@@ -14,7 +14,7 @@ BSV senders
    │ (TCP or UDP ingress)
    ▼
 bitcoin-shard-proxy
-   │ BRC-124 frames, SenderID stamped in-place at bytes 40–43 (CRC32c)
+   │ BRC-124 frames, PrevSeq/CurSeq stamped in-place at bytes 40–55 (XXH64)
    │ IPv6 multicast  FF05::<group-index>
    ▼
 Multicast fabric (site-scoped FF05::/16)
@@ -143,10 +143,10 @@ Filtering is pure (no I/O) and allocation-free on the hot path:
 ## V1 frame support
 
 `frame.Decode` accepts both v1 (44-byte header) and BRC-124 (92-byte header) frames.
-v1 frames are decoded with zero-valued `SeqNum`, `SubtreeID`,
-`SenderID`, and `SequenceID`. Shard filtering applies to v1 frames normally;
-subtree filtering has no effect (zero `SubtreeID` passes all include/exclude checks).
-Gap tracking is skipped for v1 frames because `SenderID` is zero.
+v1 frames are decoded with zero-valued `PrevSeq`, `CurSeq`, and `SubtreeID`.
+Shard filtering applies to v1 frames normally; subtree filtering has no effect
+(zero `SubtreeID` passes all include/exclude checks). Gap tracking is skipped
+for v1 frames because `CurSeq` is zero.
 
 ## Egress
 
