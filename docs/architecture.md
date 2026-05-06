@@ -6,8 +6,8 @@
 transaction distribution pipeline. The proxy multicasts BRC-124 frames onto an
 IPv6 multicast fabric; the listener joins the relevant groups, filters frames
 by shard index and/or subtree ID, forwards matching frames to a configurable
-unicast downstream over UDP or TCP, and performs NORM-inspired NACK-based gap
-recovery.
+unicast downstream over UDP or TCP and/or re-emits them via multicast egress
+(domain bridging), and performs NORM-inspired NACK-based gap recovery.
 
 ```
 BSV senders
@@ -22,9 +22,9 @@ Multicast fabric (site-scoped FF05::/16)
    ├── direct subscribers (miners, exchanges, …)
    │
    └── bitcoin-shard-listener
-          │ filter → egress (unicast UDP or TCP)
-          ▼
-       downstream consumers
+          │ filter → egress
+          ├──▶ unicast UDP/TCP → downstream consumers
+          └──▶ multicast egress (optional) → bridged domain
 ```
 
 ## Receive workers
@@ -32,8 +32,9 @@ Multicast fabric (site-scoped FF05::/16)
 Each worker:
 1. Opens a UDP socket with `SO_REUSEPORT` on the configured listen port.
 2. Joins all configured multicast groups on the configured interface.
-3. Calls `frame.Decode`, `shard.Engine.GroupIndex`, `filter.Allow`, and
-   `egress.Send` in the hot path for every received datagram.
+3. Calls `frame.Decode`, `shard.Engine.GroupIndex`, `filter.Allow`,
+   `egress.Send`, and optionally `mcastEgr.Send` in the hot path for every
+   received datagram.
 4. Calls `nack.Tracker.Observe` for BRC-124 frames with non-zero `CurSeq`.
 
 **SO_REUSEPORT and multicast:** Linux does **not** load-balance multicast
@@ -150,6 +151,8 @@ for v1 frames because `CurSeq` is zero.
 
 ## Egress
 
+### Unicast egress
+
 A single `egress.Sender` per worker delivers frames to `egress-addr`:
 
 | `egress-proto` | Behaviour |
@@ -159,6 +162,27 @@ A single `egress.Sender` per worker delivers frames to `egress-addr`:
 
 `strip-header=true` sends only the raw BSV transaction bytes (frame payload);
 `strip-header=false` (default) sends the complete 92-byte BRC-124 frame verbatim.
+
+### Multicast egress (domain bridging)
+
+When `-mc-egress-enabled=true`, each worker also holds an `egress.MCastSender`
+that re-emits every filtered frame onto a configurable IPv6 multicast address
+space. This enables bridging between multicast domains with optional scope
+and/or address-space translation.
+
+| Flag | Purpose |
+|------|---------------------------------------------------|
+| `-mc-egress-iface` | Outbound interface (`IPV6_MULTICAST_IF`) |
+| `-mc-egress-port` | Destination UDP port (default: same as `-listen-port`) |
+| `-mc-egress-scope` | Scope for egress groups (default: same as `-scope`) |
+| `-mc-egress-base-addr` | IPv6 bytes 2–12 for egress group space |
+| `-mc-egress-hoplimit` | `IPV6_MULTICAST_HOPS` (default 1) |
+
+Multicast egress fires independently of unicast egress — both paths execute
+for every accepted frame. `strip-header` applies to both egress modes.
+
+The per-frame address derivation is zero-alloc: bytes 0–12 are fixed at
+construction; only bytes 13–15 (group index) are overwritten per datagram.
 
 ## Testing
 
