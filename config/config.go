@@ -97,7 +97,7 @@ type Config struct {
 	MCEgressMiddleBytes [11]byte
 	MCEgressHopLimit    int
 
-	// Beacon discovery (BRC-TBD-retransmission)
+	// Beacon discovery (BRC-126)
 	BeaconEnabled bool
 	BeaconPort    int
 	BeaconScope   string // multicast scope for beacon group joins
