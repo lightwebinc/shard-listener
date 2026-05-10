@@ -34,7 +34,7 @@ var ErrBadADVERT = errors.New("discovery: invalid ADVERT datagram")
 
 // ADVERT is the in-memory representation of a decoded ADVERT beacon.
 type ADVERT struct {
-	Scope          byte   // 0x05=site, 0x0E=global, 0xFF=both
+	Scope          byte   // 0x05=site, 0x08=org, 0x0E=global, 0xFF=all
 	NACKAddr       net.IP // 16-byte IPv6 unicast address
 	NACKPort       uint16
 	Tier           uint8

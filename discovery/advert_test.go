@@ -139,7 +139,7 @@ func TestEncodeADVERT_size(t *testing.T) {
 }
 
 func TestEncodeADVERT_scope(t *testing.T) {
-	for _, scope := range []byte{0x05, 0x0E, 0xFF} {
+	for _, scope := range []byte{0x05, 0x08, 0x0E, 0xFF} {
 		a := testADVERT()
 		a.Scope = scope
 		var buf [ADVERTSize]byte
