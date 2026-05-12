@@ -15,6 +15,16 @@ performs NORM-inspired NACK-based gap recovery via PrevSeq/CurSeq hash-chain
 tracking with BRC-126 beacon-discovered retry endpoints and
 tier-based escalation.
 
+```
+FF05::<shard>:9001  ──multicast──►  bitcoin-shard-listener  ──UDP/TCP──►  downstream :9100
+[Control Groups]    ──multicast──►  (BRC-127 SubtreeAnnounce) └─multicast►  FF02::<shard>
+                                           │  shard + subtree filter
+                                     gap detected
+                                           │
+                          NACK (BRC-126) ──▼──────►  [nack-addr]:9300
+                                           ◄─── ACK / MISS
+```
+
 ## Features
 
 - **SO_REUSEPORT** multi-worker receive with kernel-level source affinity
