@@ -374,13 +374,19 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 		return
 	}
 
-	idx := e.endpointIdx % len(snap)
+	// Clamp at the last (highest-tier) endpoint. Once we've escalated through
+	// every tier, further attempts should stay at the deepest cache rather than
+	// cycling back to lower-tier endpoints that have already returned MISS.
+	idx := e.endpointIdx
+	if idx >= len(snap) {
+		idx = len(snap) - 1
+	}
 	endpoint := snap[idx]
 
 	addr, err := net.ResolveUDPAddr("udp", endpoint.Addr)
 	if err != nil {
 		t.log.Warn("NACK: cannot resolve retry endpoint", "endpoint", endpoint.Addr, "err", err)
-		t.advanceEndpoint(e, false)
+		t.advanceEndpoint(e, false, 0)
 		return
 	}
 
@@ -390,7 +396,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	conn, err := net.ListenPacket("udp", "[::]:0")
 	if err != nil {
 		t.log.Warn("NACK: listen failed", "endpoint", endpoint.Addr, "err", err)
-		t.advanceEndpoint(e, false)
+		t.advanceEndpoint(e, false, 0)
 		return
 	}
 	defer func() { _ = conn.Close() }()
@@ -425,14 +431,14 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	var respBuf [ResponseSize + 16]byte
 	nr, _, err := conn.ReadFrom(respBuf[:])
 	if err != nil {
-		t.advanceEndpoint(e, false)
+		t.advanceEndpoint(e, false, 0)
 		return
 	}
 
 	resp, err := DecodeResponse(respBuf[:nr])
 	if err != nil {
 		t.log.Debug("NACK: invalid response", "endpoint", endpoint.Addr, "err", err)
-		t.advanceEndpoint(e, false)
+		t.advanceEndpoint(e, false, 0)
 		return
 	}
 
@@ -449,14 +455,19 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 			"endpoint", endpoint.Addr,
 			"cur_seq", e.curSeq,
 		)
-		t.advanceEndpoint(e, true)
+		t.advanceEndpoint(e, true, len(snap))
 	}
 }
 
 // advanceEndpoint updates retry state after a NACK attempt.
-// immediate=true (MISS): retry now with next endpoint.
-// immediate=false (timeout/error): exponential backoff.
-func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool) {
+//
+//   - immediate=true (MISS): retry now at the next endpoint, provided we have
+//     not yet exhausted the endpoint list. Once endpointIdx reaches
+//     numEndpoints, the gap has tried every tier; further MISS responses use
+//     exponential backoff to give the deepest cache time to warm before
+//     retrying. numEndpoints==0 disables this clamp (used by error paths).
+//   - immediate=false (timeout/error): exponential backoff.
+func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool, numEndpoints int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -472,7 +483,8 @@ func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool) {
 	entry.retries++
 	entry.endpointIdx++
 
-	if immediate {
+	exhausted := numEndpoints > 0 && entry.endpointIdx >= numEndpoints
+	if immediate && !exhausted {
 		entry.nextAttempt = time.Now()
 	} else {
 		backoff := time.Duration(1<<uint(entry.retries)) * 500 * time.Millisecond
