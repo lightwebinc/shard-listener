@@ -24,7 +24,7 @@ func TestNew_UDP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if s.Proto() != "udp" {
 		t.Errorf("Proto = %q", s.Proto())
 	}
@@ -44,7 +44,7 @@ func TestNew_TCP_LazyDial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err) // TCP should not dial during New
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if s.Proto() != "tcp" {
 		t.Error("Proto")
 	}
@@ -57,7 +57,7 @@ func TestSend_UDP(t *testing.T) {
 	addr, pc, cleanup := newUDPSink(t)
 	defer cleanup()
 	s, _ := New(addr, "udp", false)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	raw := []byte("hello-frame")
 	f := &frame.Frame{Payload: []byte("hello")}
@@ -79,7 +79,7 @@ func TestSend_UDP_StripHeader(t *testing.T) {
 	addr, pc, cleanup := newUDPSink(t)
 	defer cleanup()
 	s, _ := New(addr, "udp", true)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	raw := []byte("ignored-header-then-payload")
 	f := &frame.Frame{Payload: []byte("only-payload")}
@@ -106,14 +106,14 @@ func TestSend_TCP_DialAndWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	doneCh := make(chan []byte, 1)
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		buf := make([]byte, 128)
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		n, _ := conn.Read(buf)
@@ -121,7 +121,7 @@ func TestSend_TCP_DialAndWrite(t *testing.T) {
 	}()
 
 	s, _ := New(ln.Addr().String(), "tcp", false)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	raw := []byte("tcp-frame")
 	if err := s.Send(raw, &frame.Frame{}); err != nil {
@@ -143,7 +143,7 @@ func TestSend_TCP_DialAndWrite(t *testing.T) {
 func TestSend_TCP_DialFailure(t *testing.T) {
 	// Connect to a port that should refuse: pick 1 (privileged, likely closed).
 	s, _ := New("127.0.0.1:1", "tcp", false)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if err := s.Send([]byte("x"), &frame.Frame{}); err == nil {
 		t.Error("expected dial failure")
 	}
@@ -151,7 +151,7 @@ func TestSend_TCP_DialFailure(t *testing.T) {
 
 func TestSend_TCP_ReconnectAfterClose(t *testing.T) {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	// First accept loop.
 	accept := make(chan net.Conn, 2)
 	go func() {
@@ -165,7 +165,7 @@ func TestSend_TCP_ReconnectAfterClose(t *testing.T) {
 	}()
 
 	s, _ := New(ln.Addr().String(), "tcp", false)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if err := s.Send([]byte("one"), &frame.Frame{}); err != nil {
 		t.Fatal(err)

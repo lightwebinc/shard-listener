@@ -199,7 +199,7 @@ func TestProcessFrame_StripHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer egr.Close()
+	defer func() { _ = egr.Close() }()
 	iface := loopbackIface(t)
 	filt := filter.New(nil, nil, nil, nil)
 	w := New(0, iface, 9999, nil, eng, filt, egr, nil, nil, nil, false)
