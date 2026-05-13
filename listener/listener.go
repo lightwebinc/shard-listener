@@ -16,7 +16,7 @@
 //  3. shard.Engine.GroupIndex — derive groupIdx from TxID
 //  4. filter.Filter.Allow — shard/subtree gating
 //  5. egress.Sender.Send — unicast forward to downstream
-//  6. nack.Tracker.Observe — gap detection (V2 only, non-zero CurSeq)
+//  6. nack.Tracker.Observe — gap detection (BRC-124/BRC-128 only, non-zero CurSeq)
 package listener
 
 import (

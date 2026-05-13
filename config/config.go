@@ -146,9 +146,9 @@ func Load() (*Config, error) {
 	shardIncludeFlag := flag.String("shard-include", envStr("SHARD_INCLUDE", ""),
 		"comma-separated shard indices/ranges to subscribe (empty = all)")
 	subtreeIncludeFlag := flag.String("subtree-include", envStr("SUBTREE_INCLUDE", ""),
-		"comma-separated hex subtree IDs to allow (V2 only; empty = all)")
+		"comma-separated hex subtree IDs to allow (BRC-124/BRC-128 only; empty = all)")
 	subtreeExcludeFlag := flag.String("subtree-exclude", envStr("SUBTREE_EXCLUDE", ""),
-		"comma-separated hex subtree IDs to drop (V2 only; empty = none)")
+		"comma-separated hex subtree IDs to drop (BRC-124/BRC-128 only; empty = none)")
 	flag.StringVar(&c.EgressAddr, "egress-addr", envStr("EGRESS_ADDR", "127.0.0.1:9100"),
 		"downstream unicast host:port")
 	flag.StringVar(&c.EgressProto, "egress-proto", envStr("EGRESS_PROTO", "udp"),

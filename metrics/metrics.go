@@ -236,7 +236,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 }
 
 // FrameReceived records receipt of a multicast frame.
-// version should be "v1" or "v2".
+// version should be "brc12" (legacy 44-byte) or "brc124" (BRC-124/BRC-128, 92-byte).
 func (r *Recorder) FrameReceived(workerID int, iface, version string) {
 	r.framesReceived.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.Int("worker", workerID),
