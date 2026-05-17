@@ -331,6 +331,10 @@ func (w *Worker) processFrame(raw []byte) {
 func (w *Worker) DeliverReassembled(payload []byte, f *frame.Frame) {
 	groupIdx := w.engine.GroupIndex(&f.TxID)
 
+	if w.rec != nil {
+		w.rec.ReassemblyCompleted()
+	}
+
 	if allow, reason := w.filt.Allow(groupIdx, f); !allow {
 		if w.rec != nil {
 			w.rec.FrameDropped(w.id, reason)
@@ -339,7 +343,6 @@ func (w *Worker) DeliverReassembled(payload []byte, f *frame.Frame) {
 	}
 
 	if w.rec != nil {
-		w.rec.ReassemblyCompleted()
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc130")
 	}
 
