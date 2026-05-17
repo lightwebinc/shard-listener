@@ -37,6 +37,7 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-listener/filter"
 	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
 	"github.com/lightwebinc/bitcoin-shard-listener/nack"
+	"github.com/lightwebinc/bitcoin-shard-listener/reassembly"
 )
 
 const (
@@ -60,7 +61,8 @@ type Worker struct {
 	rec               *metrics.Recorder
 	debug             bool
 	verifyPayloadHash bool
-	dedupSet          *dedup.Set // nil = dedup disabled
+	dedupSet          *dedup.Set         // nil = dedup disabled
+	reassemBuf        *reassembly.Buffer // nil = BRC-130 disabled
 	log               *slog.Logger
 }
 
@@ -70,6 +72,15 @@ type Worker struct {
 // to disabled.
 func (w *Worker) SetEgressDedup(s *dedup.Set) {
 	w.dedupSet = s
+}
+
+// SetReassemblyBuffer attaches a BRC-130 fragment reassembly buffer to the
+// worker. When set, BRC-130 fragment datagrams are routed to the buffer
+// instead of being forwarded directly. Completed reassemblies are delivered
+// through the buffer's callback. nil disables BRC-130 handling (fragments
+// are dropped as unknown-version frames).
+func (w *Worker) SetReassemblyBuffer(b *reassembly.Buffer) {
+	w.reassemBuf = b
 }
 
 // New constructs a Worker. mcastEgr may be nil to disable multicast egress.
@@ -181,6 +192,28 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) processFrame(raw []byte) {
+	// BRC-130 fragment: route to reassembly buffer and return.
+	if frame.IsFragment(raw) {
+		if w.reassemBuf == nil {
+			if w.rec != nil {
+				w.rec.FrameDropped(w.id, "no_reassembly_buffer")
+			}
+			return
+		}
+		ff, err := frame.DecodeFragment(raw)
+		if err != nil {
+			if w.rec != nil {
+				w.rec.FrameDropped(w.id, "frag_decode_error")
+			}
+			if w.debug {
+				w.log.Debug("BRC-130 decode error", "err", err)
+			}
+			return
+		}
+		w.reassemBuf.Observe(ff)
+		return
+	}
+
 	f, err := frame.Decode(raw)
 	if err != nil {
 		if w.rec != nil {
@@ -285,6 +318,64 @@ func (w *Worker) processFrame(raw []byte) {
 			"group", groupIdx,
 			"seq_num", f.SeqNum,
 		)
+	}
+}
+
+// DeliverReassembled is the reassembly.Callback: it receives a completed,
+// payload-verified Frame (synthetic BRC-124) and routes it through filter,
+// egress, and gap tracking exactly as a normal inline frame would be.
+// raw is re-encoded here so downstream egress code receives a valid wire buffer.
+//
+// This method is called from within the reassembly.Buffer's mutex; it must not
+// call back into the buffer.
+func (w *Worker) DeliverReassembled(payload []byte, f *frame.Frame) {
+	groupIdx := w.engine.GroupIndex(&f.TxID)
+
+	if allow, reason := w.filt.Allow(groupIdx, f); !allow {
+		if w.rec != nil {
+			w.rec.FrameDropped(w.id, reason)
+		}
+		return
+	}
+
+	if w.rec != nil {
+		w.rec.ReassemblyCompleted()
+		w.rec.FrameReceived(w.id, w.iface.Name, "brc130")
+	}
+
+	// Re-encode as BRC-124 so the Sender has a valid wire buffer.
+	raw := make([]byte, frame.HeaderSize+len(payload))
+	if _, err := frame.Encode(f, raw); err != nil {
+		if w.debug {
+			w.log.Debug("reassembled frame encode error", "err", err)
+		}
+		return
+	}
+
+	if err := w.egr.Send(raw, f); err != nil {
+		if w.rec != nil {
+			w.rec.EgressError(w.id)
+		}
+	} else {
+		if w.rec != nil {
+			w.rec.FrameForwarded(w.id, w.egr.Proto())
+		}
+	}
+
+	if w.mcastEgr != nil {
+		if err := w.mcastEgr.Send(raw, f, groupIdx); err != nil {
+			if w.rec != nil {
+				w.rec.MCEgressError(w.id)
+			}
+		} else {
+			if w.rec != nil {
+				w.rec.FrameForwarded(w.id, w.mcastEgr.Proto())
+			}
+		}
+	}
+
+	if w.tracker != nil && f.SeqNum != 0 {
+		w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
 	}
 }
 

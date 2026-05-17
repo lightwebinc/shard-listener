@@ -132,6 +132,42 @@ else
     FAILED=$(( FAILED + 1 ))
 fi
 
+# ── Test 4: BRC-130 fragmentation ────────────────────────────────────────────
+# Inject fragmented payloads (frag-mtu=300, payload-size=500 → 4 fragments).
+# The listener should reassemble all NUM_GROUPS transactions and forward them.
+echo ""
+echo "--- Test 4: BRC-130 fragmentation (expect $NUM_GROUPS reassembled frames) ---"
+
+bitcoin-shard-listener \
+    -iface lo -scope link -shard-bits "$SHARD_BITS" \
+    -listen-port 9004 \
+    -egress-addr "127.0.0.1:9105" -egress-proto udp \
+    -metrics-addr ":9203" -workers 1 -debug &
+L4=$!
+
+sink-test-frames -port 9105 -count "$NUM_GROUPS" -timeout "$RECV_TIMEOUT" &
+S4=$!
+
+sleep 1
+
+send-test-frames \
+    -addr "[::1]:9004" \
+    -shard-bits "$SHARD_BITS" -spread -count 1 -interval 50 \
+    -frag-mtu 300 -payload-size 500
+
+wait "$S4" && S4_EXIT=0 || S4_EXIT=$?
+
+kill "$L4" 2>/dev/null || true
+wait "$L4" 2>/dev/null || true
+
+if [ "$S4_EXIT" -eq 0 ]; then
+    echo "=== PASS: BRC-130 fragmentation ==="
+    PASSED=$(( PASSED + 1 ))
+else
+    echo "=== FAIL: BRC-130 fragmentation (sink_exit=$S4_EXIT) ==="
+    FAILED=$(( FAILED + 1 ))
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=== E2E results: $PASSED passed, $FAILED failed ==="

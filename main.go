@@ -24,6 +24,7 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-listener/listener"
 	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
 	"github.com/lightwebinc/bitcoin-shard-listener/nack"
+	"github.com/lightwebinc/bitcoin-shard-listener/reassembly"
 	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
 )
 
@@ -211,6 +212,20 @@ func run() error {
 		if cfg.EgressDedupCap > 0 {
 			w.SetEgressDedup(dedup.New(cfg.EgressDedupCap, cfg.EgressDedupTTL))
 		}
+		// Wire BRC-130 reassembly buffer. The buffer captures w via closure so
+		// each worker owns its own reassembly state (SO_REUSEPORT routes all
+		// fragments from the same proxy source to the same worker).
+		wLocal := w
+		buf := reassembly.New(
+			reassembly.DefaultMaxSlots,
+			reassembly.DefaultTTL,
+			cfg.VerifyPayloadHash,
+			wLocal.DeliverReassembled,
+		)
+		buf.SetStartedHook(rec.ReassemblyStarted)
+		buf.SetAbandonedHook(rec.ReassemblyAbandoned)
+		buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)
+		w.SetReassemblyBuffer(buf)
 		wg.Add(1)
 		go func(worker *listener.Worker) {
 			defer wg.Done()

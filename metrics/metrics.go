@@ -48,8 +48,13 @@ type Recorder struct {
 	framesDropped        metric.Int64Counter // by reason
 	framesForwarded      metric.Int64Counter // by worker, proto
 	framesInvalidPayload metric.Int64Counter // by worker; SHA256d(payload) != TxID
-	framesDeduped        metric.Int64Counter // by worker; suppressed retransmit before egress
-	egressErrors         metric.Int64Counter
+	// BRC-130 reassembly counters
+	frameReassemblyStarted      metric.Int64Counter
+	frameReassemblyCompleted    metric.Int64Counter
+	frameReassemblyAbandoned    metric.Int64Counter
+	frameReassemblyHashMismatch metric.Int64Counter
+	framesDeduped               metric.Int64Counter // by worker; suppressed retransmit before egress
+	egressErrors                metric.Int64Counter
 
 	// Multicast egress counters
 	mcEgressErrors metric.Int64Counter
@@ -152,6 +157,22 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 
 	if r.framesReceived, err = meter.Int64Counter("bsl_frames_received_total",
 		metric.WithDescription("Multicast frames received")); err != nil {
+		return nil, err
+	}
+	if r.frameReassemblyStarted, err = meter.Int64Counter("bsl_reassembly_started_total",
+		metric.WithDescription("BRC-130 reassembly slots opened (first fragment of a TxID received)")); err != nil {
+		return nil, err
+	}
+	if r.frameReassemblyCompleted, err = meter.Int64Counter("bsl_reassembly_completed_total",
+		metric.WithDescription("BRC-130 reassemblies that produced a complete payload")); err != nil {
+		return nil, err
+	}
+	if r.frameReassemblyAbandoned, err = meter.Int64Counter("bsl_reassembly_abandoned_total",
+		metric.WithDescription("BRC-130 reassembly slots evicted before completion (TTL expired or buffer full)")); err != nil {
+		return nil, err
+	}
+	if r.frameReassemblyHashMismatch, err = meter.Int64Counter("bsl_reassembly_hash_mismatch_total",
+		metric.WithDescription("Completed reassemblies dropped because SHA256d(payload) != TxID")); err != nil {
 		return nil, err
 	}
 	if r.framesDropped, err = meter.Int64Counter("bsl_frames_dropped_total",
@@ -279,6 +300,28 @@ func (r *Recorder) FrameInvalidPayload(workerID int) {
 	r.framesInvalidPayload.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.Int("worker", workerID),
 	))
+}
+
+// ReassemblyStarted records the opening of a new BRC-130 reassembly slot.
+func (r *Recorder) ReassemblyStarted() {
+	r.frameReassemblyStarted.Add(context.Background(), 1)
+}
+
+// ReassemblyCompleted records a BRC-130 reassembly that produced a complete payload.
+func (r *Recorder) ReassemblyCompleted() {
+	r.frameReassemblyCompleted.Add(context.Background(), 1)
+}
+
+// ReassemblyAbandoned records a BRC-130 reassembly slot evicted before
+// completion because its TTL expired or the buffer was full.
+func (r *Recorder) ReassemblyAbandoned() {
+	r.frameReassemblyAbandoned.Add(context.Background(), 1)
+}
+
+// ReassemblyHashMismatch records a completed reassembly that was dropped
+// because SHA256d(payload) != TxID.
+func (r *Recorder) ReassemblyHashMismatch() {
+	r.frameReassemblyHashMismatch.Add(context.Background(), 1)
 }
 
 // FrameDeduped records a BRC-124/BRC-128 retransmit suppressed before egress
