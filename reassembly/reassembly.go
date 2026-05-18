@@ -214,7 +214,7 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 	}
 
 	// All fragments arrived — reassemble.
-	b.complete(s, now)
+	b.complete(s)
 }
 
 // complete assembles the payload, dispatches the appropriate callback based on
@@ -225,7 +225,7 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 //   - 0x04        → deliver via onCompleteBlock (V4 BRC-131); no SHA256d.
 //   - 0x05        → deliver via onCompleteSubtree (V5 BRC-132); no SHA256d;
 //     optional Merkle root verification via verifyMerkle.
-func (b *Buffer) complete(s *slot, now time.Time) {
+func (b *Buffer) complete(s *slot) {
 	payload := make([]byte, 0, s.origPayloadLen)
 	for _, frag := range s.frags {
 		payload = append(payload, frag...)
