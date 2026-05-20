@@ -30,14 +30,21 @@ const ctrlGroupControl uint32 = 0xFFFE
 // Mirrors shard.CtrlGroupSubtreeAnnounce = 0xFFFB without importing the shard package.
 const ctrlGroupSubtreeAnnounce uint32 = 0xFFFB
 
+// ctrlGroupAnchor is the virtual group index for BRC-134 anchor transaction frames.
+// Anchors share the CtrlGroupControl multicast address on the wire but use a
+// dedicated groupIdx for HashKey derivation so they have their own SeqNum counter.
+const ctrlGroupAnchor uint32 = 0xFFF9
+
 // flowLabel returns "brc131" for block control flows, "brc132" for subtree data
-// flows, and "brc124" for all others.
+// flows, "brc134" for anchor transaction flows, and "brc124" for all others.
 func flowLabel(groupIdx uint32) string {
 	switch groupIdx {
 	case ctrlGroupControl:
 		return "brc131"
 	case ctrlGroupSubtreeAnnounce:
 		return "brc132"
+	case ctrlGroupAnchor:
+		return "brc134"
 	default:
 		return "brc124"
 	}

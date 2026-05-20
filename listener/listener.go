@@ -532,10 +532,13 @@ func (w *Worker) processAnchorFrame(raw []byte) {
 		}
 	}
 
-	// Gap tracking on the control flow uses a zero SubtreeID.
+	// Gap tracking uses a virtual anchor groupIdx (0xFFF9) that matches the
+	// proxy's HashKey derivation for BRC-134 frames. This gives anchors their
+	// own independent flow label ("brc134") in the gap tracker.
 	if w.tracker != nil && f.SeqNum != 0 {
+		const anchorGroupIdx = uint32(0xFFF9)
 		var zeroSub [32]byte
-		w.tracker.Observe(uint32(shard.CtrlGroupControl), zeroSub, f.HashKey, f.SeqNum, f.TxID)
+		w.tracker.Observe(anchorGroupIdx, zeroSub, f.HashKey, f.SeqNum, f.TxID)
 	}
 
 	if w.debug {
