@@ -597,3 +597,137 @@ func TestNew_Construction(t *testing.T) {
 		t.Errorf("fields not preserved: %+v", w)
 	}
 }
+
+// ── BRC-134 anchor transaction frames (FrameVerV6) ────────────────────────────
+
+// buildAnchorFrame constructs a BRC-134 anchor transaction frame with the given
+// TxID byte, seqNum, and payload. It uses frame.Encode (FrameVerV2 layout) then
+// patches the version byte to 0x06.
+func buildAnchorFrame(t *testing.T, txid [32]byte, payload []byte, seqNum uint64) []byte {
+	t.Helper()
+	f := &frame.Frame{
+		Version: frame.FrameVerV2,
+		TxID:    txid,
+		SeqNum:  seqNum,
+		Payload: payload,
+	}
+	buf := make([]byte, frame.HeaderSize+len(payload))
+	n, err := frame.Encode(f, buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf[6] = frame.FrameVerV6 // promote to anchor version
+	return buf[:n]
+}
+
+func TestProcessFrame_RoutesBRC134AnchorViaDispatch(t *testing.T) {
+	// processFrame must detect FrameVerV6 and route to processAnchorFrame,
+	// which forwards to egress. Verify the frame arrives at the sink.
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+
+	raw := buildAnchorFrame(t, [32]byte{0xAA}, []byte("anchor-payload"), 0)
+	w.processFrame(raw)
+
+	select {
+	case got := <-ch:
+		if len(got) != len(raw) {
+			t.Fatalf("got %d bytes, want %d", len(got), len(raw))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for anchor frame forwarded via processFrame dispatch")
+	}
+}
+
+func TestProcessAnchorFrame_ForwardsToEgress(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+
+	raw := buildAnchorFrame(t, [32]byte{0x11, 0x22}, []byte("anchor-tx"), 0)
+	w.processAnchorFrame(raw)
+
+	select {
+	case got := <-ch:
+		if len(got) != len(raw) {
+			t.Fatalf("got %d bytes, want %d", len(got), len(raw))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for anchor frame forwarded to egress")
+	}
+}
+
+func TestProcessAnchorFrame_BypassesShardFilter(t *testing.T) {
+	// A shard filter allowing only group 0 must not suppress anchor frames.
+	// Anchor frames bypass all shard/subtree filtering.
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+
+	// shard-include only allows group 0; an anchor TxID with top bits 0xC0
+	// would hash to group 3 with shardBits=2 — filtered for ordinary tx.
+	filt := filter.New([]uint32{0}, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+
+	var txid [32]byte
+	txid[0] = 0xC0 // would be shard group 3; irrelevant for anchor routing
+	raw := buildAnchorFrame(t, txid, []byte("anchor"), 0)
+	w.processAnchorFrame(raw)
+
+	select {
+	case got := <-ch:
+		if len(got) != len(raw) {
+			t.Fatalf("got %d bytes, want %d", len(got), len(raw))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("anchor frame must bypass shard filter — timeout waiting for frame")
+	}
+}
+
+func TestProcessAnchorFrame_DecodeError_Drops(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+
+	// Bad magic — DecodeAnchor will fail; frame must be dropped silently.
+	bad := make([]byte, frame.HeaderSize)
+	bad[6] = frame.FrameVerV6
+	w.processAnchorFrame(bad)
+
+	select {
+	case <-ch:
+		t.Fatal("invalid anchor frame must not be forwarded")
+	case <-time.After(150 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestProcessAnchorFrame_StripHeader(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
+	egr, err := egress.New(addr, "udp", true) // strip-header mode
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egr.Close() })
+	iface := loopbackIface(t)
+	filt := filter.New(nil, nil, nil, nil)
+	w := New(0, iface, 9999, nil, eng, filt, egr, nil, nil, nil, false)
+
+	payload := []byte("raw-anchor-tx-bytes")
+	raw := buildAnchorFrame(t, [32]byte{0x33}, payload, 0)
+	w.processAnchorFrame(raw)
+
+	select {
+	case got := <-ch:
+		if string(got) != string(payload) {
+			t.Fatalf("strip mode: got %q, want %q", got, payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for strip-header anchor frame")
+	}
+}
