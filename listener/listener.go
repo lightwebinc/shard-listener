@@ -217,6 +217,12 @@ func (w *Worker) processFrame(raw []byte) {
 		return
 	}
 
+	// BRC-134 anchor transaction frame (FrameVer 0x06): route to anchor handler.
+	if frame.IsAnchorFrame(raw) {
+		w.processAnchorFrame(raw)
+		return
+	}
+
 	// BRC-130 fragment: route to reassembly buffer and return.
 	if frame.IsFragment(raw) {
 		if w.reassemBuf == nil {
@@ -491,6 +497,51 @@ func (w *Worker) processSubtreeDataFrame(raw []byte) {
 			"msg_type", sf.MsgType,
 			"subtree_id", fmt.Sprintf("%x", sf.SubtreeID[:8]),
 			"seq_num", sf.SeqNum,
+		)
+	}
+}
+
+// processAnchorFrame handles BRC-134 chained anchor transaction frames
+// (FrameVer 0x06). Anchor frames bypass shard/subtree filtering and are
+// forwarded directly to egress. Gap tracking is performed on the control flow
+// so NACK-based retransmission can recover lost anchor frames.
+func (w *Worker) processAnchorFrame(raw []byte) {
+	f, err := frame.DecodeAnchor(raw)
+	if err != nil {
+		if w.rec != nil {
+			w.rec.FrameDropped(w.id, "decode_error")
+		}
+		if w.debug {
+			w.log.Debug("anchor frame decode error", "err", err, "len", len(raw))
+		}
+		return
+	}
+
+	if w.rec != nil {
+		w.rec.FrameReceived(w.id, w.iface.Name, "brc134")
+	}
+
+	if err := w.egr.Send(raw, f); err != nil {
+		if w.rec != nil {
+			w.rec.EgressError(w.id)
+		}
+		w.log.Debug("anchor egress send error", "err", err)
+	} else {
+		if w.rec != nil {
+			w.rec.FrameForwarded(w.id, w.egr.Proto())
+		}
+	}
+
+	// Gap tracking on the control flow uses a zero SubtreeID.
+	if w.tracker != nil && f.SeqNum != 0 {
+		var zeroSub [32]byte
+		w.tracker.Observe(uint32(shard.CtrlGroupControl), zeroSub, f.HashKey, f.SeqNum, f.TxID)
+	}
+
+	if w.debug {
+		w.log.Debug("anchor frame forwarded",
+			"txid", fmt.Sprintf("%x", f.TxID[:8]),
+			"seq_num", f.SeqNum,
 		)
 	}
 }
