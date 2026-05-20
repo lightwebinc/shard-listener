@@ -309,8 +309,8 @@ used by the retry endpoints.
 
 ## Subtree Group Announcements (BRC-127)
 
-When configured, the listener joins the `CtrlGroupSubtreeAnnounce`
-(`0xFFFB`) control-plane multicast group and receives `SubtreeAnnounce`
+When configured, the listener joins the `CtrlGroupSubtreeGroupAnnounce`
+(`0xFFFC`) control-plane multicast group and receives `SubtreeAnnounce`
 datagrams from block assemblers (via the proxy TCP ingress). Announced
 SubtreeIDs are added to a dynamic registry with TTL-based eviction. The
 filter treats registry membership as an additional pass condition alongside

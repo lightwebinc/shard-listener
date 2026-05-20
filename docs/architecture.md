@@ -17,12 +17,14 @@ bitcoin-shard-proxy
    │ BRC-124/BRC-128 frames → FF05::B:<shard>      (data plane)
    │ BRC-131 frames         → FF05::B:FFFE          (CtrlGroupControl)
    │ BRC-132 frames         → FF05::B:FFFB          (CtrlGroupSubtreeAnnounce)
+   │ BRC-127 datagrams      → FF05::B:FFFC          (CtrlGroupSubtreeGroupAnnounce)
    ▼
 Multicast fabric (site-scoped FF05::/16)
    │
    ├── FF05::B:<shard>   BRC-124/BRC-128 transaction frames
    ├── FF05::B:FFFE      BRC-131 block control (always joined)
    ├── FF05::B:FFFB      BRC-132 subtree data (when -subtree-data-enabled)
+   ├── FF05::B:FFFC      BRC-127 subtree group announcements (when -subtree-groups set)
    └── FF05::B:FFFD      BRC-126 ADVERT beacon
        │
        └── bitcoin-shard-listener
@@ -37,7 +39,8 @@ Multicast fabric (site-scoped FF05::/16)
 Each worker:
 1. Opens a UDP socket with `SO_REUSEPORT` on the configured listen port.
 2. Joins all configured multicast groups on the configured interface (shard groups +
-   `CtrlGroupControl` always; `CtrlGroupSubtreeAnnounce` when `-subtree-data-enabled`).
+   `CtrlGroupControl` always; `CtrlGroupSubtreeAnnounce` when `-subtree-data-enabled`;
+   `CtrlGroupSubtreeGroupAnnounce` when `-subtree-groups` is set).
 3. Dispatches each received datagram via `processFrame`, which branches on the frame
    version byte before decode:
    - `FrameVerV4` (0x04) → `processBlockFrame` (BRC-131)
@@ -170,13 +173,14 @@ for BRC-12 frames because `SeqNum` is zero.
 | Constant | Index | Address (site scope, group-id `0x000B`) | Purpose |
 |---|---|---|---|
 | `CtrlGroupBlockHeader` | 0xFFFA | FF05::B:FFFA | Block header egress channel (stripped BRC-131 headers) |
-| `CtrlGroupSubtreeAnnounce` | 0xFFFB | FF05::B:FFFB | BRC-127 SubtreeAnnounce datagrams + BRC-132 subtree data |
-| `CtrlGroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC | BRC-127 subtree group membership announcements |
+| `CtrlGroupSubtreeAnnounce` | 0xFFFB | FF05::B:FFFB | BRC-132 subtree data frames |
+| `CtrlGroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC | BRC-127 subtree group announcements |
 | `CtrlGroupBeacon` | 0xFFFD | FF05::B:FFFD | ADVERT beacon (BRC-126 discovery) |
 | `CtrlGroupControl` | 0xFFFE | FF05::B:FFFE | BRC-131 block control frames |
 
 The listener always joins `CtrlGroupControl` and `CtrlGroupBeacon`. It joins
-`CtrlGroupSubtreeAnnounce` only when `-subtree-data-enabled=true`.
+`CtrlGroupSubtreeAnnounce` only when `-subtree-data-enabled=true`, and
+`CtrlGroupSubtreeGroupAnnounce` when `-subtree-groups` is configured.
 
 ## BRC-131 Block Control Frame Processing
 

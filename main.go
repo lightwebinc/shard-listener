@@ -145,7 +145,7 @@ func run() error {
 		var announceGroups []*net.UDPAddr
 		for _, scopeName := range cfg.AnnounceScopes {
 			scopePrefix := config.Scopes[scopeName]
-			annIP := shard.ControlGroupAddr(scopePrefix, cfg.MCGroupID, shard.CtrlGroupSubtreeAnnounce)
+			annIP := shard.ControlGroupAddr(scopePrefix, cfg.MCGroupID, shard.CtrlGroupSubtreeGroupAnnounce)
 			announceGroups = append(announceGroups, &net.UDPAddr{IP: annIP, Port: cfg.ListenPort})
 		}
 		sal := &discovery.SubtreeAnnounceListener{
