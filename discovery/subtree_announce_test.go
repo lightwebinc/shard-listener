@@ -25,6 +25,7 @@ func TestSockaddrToUDP_Other(t *testing.T) {
 	got := sockaddrToUDP(&unix.SockaddrInet4{})
 	if got == nil {
 		t.Fatal("nil")
+		return
 	}
 	if got.IP != nil {
 		t.Errorf("expected nil IP, got %v", got.IP)

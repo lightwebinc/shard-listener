@@ -592,6 +592,7 @@ func TestNew_Construction(t *testing.T) {
 	w := New(7, iface, 9001, nil, eng, filt, nil, nil, nil, nil, true)
 	if w == nil {
 		t.Fatal("nil worker")
+		return
 	}
 	if w.id != 7 || w.port != 9001 || !w.debug {
 		t.Errorf("fields not preserved: %+v", w)
