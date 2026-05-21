@@ -4,10 +4,15 @@
 
 `bitcoin-shard-listener` sits downstream of `bitcoin-shard-proxy` in the BSV
 transaction distribution pipeline. The proxy multicasts BRC-124/BRC-128 transaction frames
-and BRC-131/BRC-132 control-plane frames onto an IPv6 multicast fabric; the listener joins
+and BRC-131/BRC-132/BRC-134 control-plane frames onto an IPv6 multicast fabric; the listener joins
 the relevant groups, filters transaction frames by shard index and/or subtree ID, forwards
 matching frames to a configurable unicast downstream over UDP or TCP and/or re-emits them
 via multicast egress (domain bridging), and performs NORM-inspired NACK-based gap recovery.
+
+Foundational concepts (shard hierarchy, anycast ingress, frame versions) live in
+[multicast-skills/architecture.md](../../../multicast-skills/architecture.md) and
+[multicast-skills/protocol.md](../../../multicast-skills/protocol.md); BRC-specific wire formats
+in [bitcoin-multicast/docs/](../../../bitcoin-multicast/docs/).
 
 ```
 BSV senders
@@ -15,14 +20,14 @@ BSV senders
    ▼
 bitcoin-shard-proxy
    │ BRC-124/BRC-128 frames → FF05::B:<shard>      (data plane)
-   │ BRC-131 frames         → FF05::B:FFFE          (CtrlGroupControl)
+   │ BRC-131/BRC-134 frames → FF05::B:FFFE          (CtrlGroupControl)
    │ BRC-132 frames         → FF05::B:FFFB          (CtrlGroupSubtreeAnnounce)
    │ BRC-127 datagrams      → FF05::B:FFFC          (CtrlGroupSubtreeGroupAnnounce)
    ▼
 Multicast fabric (site-scoped FF05::/16)
    │
    ├── FF05::B:<shard>   BRC-124/BRC-128 transaction frames
-   ├── FF05::B:FFFE      BRC-131 block control (always joined)
+   ├── FF05::B:FFFE      BRC-131 block control + BRC-134 anchor (always joined)
    ├── FF05::B:FFFB      BRC-132 subtree data (when -subtree-data-enabled)
    ├── FF05::B:FFFC      BRC-127 subtree group announcements (when -subtree-groups set)
    └── FF05::B:FFFD      BRC-126 ADVERT beacon
@@ -45,6 +50,7 @@ Each worker:
    version byte before decode:
    - `FrameVerV4` (0x04) → `processBlockFrame` (BRC-131)
    - `FrameVerV5` (0x05) → `processSubtreeDataFrame` (BRC-132)
+   - `FrameVerV6` (0x06) → `processAnchorFrame` (BRC-134)
    - `FrameVerV3` (0x03) → fragment reassembly buffer (`Buffer.Observe`)
    - Otherwise → BRC-12/BRC-124/BRC-128 hot path: `frame.Decode`, `shard.Engine.GroupIndex`,
      `filter.Allow`, `egress.Send`, optionally `mcastEgr.Send`
@@ -176,7 +182,8 @@ for BRC-12 frames because `SeqNum` is zero.
 | `CtrlGroupSubtreeAnnounce` | 0xFFFB | FF05::B:FFFB | BRC-132 subtree data frames |
 | `CtrlGroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC | BRC-127 subtree group announcements |
 | `CtrlGroupBeacon` | 0xFFFD | FF05::B:FFFD | ADVERT beacon (BRC-126 discovery) |
-| `CtrlGroupControl` | 0xFFFE | FF05::B:FFFE | BRC-131 block control frames |
+| `CtrlGroupControl` | 0xFFFE | FF05::B:FFFE | BRC-131 block control + BRC-134 anchor frames |
+| _(virtual)_ | 0xFFF9 | — | BRC-134 anchor flow identity for gap tracking |
 
 The listener always joins `CtrlGroupControl` and `CtrlGroupBeacon`. It joins
 `CtrlGroupSubtreeAnnounce` only when `-subtree-data-enabled=true`, and
@@ -226,6 +233,20 @@ The reassembly buffer's `SubtreeDataCallback` is called on completion. Optional 
 Merkle root verification is applied if `-subtree-data-verify-merkle=true`. The completed payload
 is delivered via `DeliverReassembledSubtreeData`, which re-encodes it via `frame.EncodeSubtreeData`
 before forwarding.
+
+## BRC-134 Anchor Transaction Frame Processing
+
+`FrameVerV6` (0x06) anchor frames arrive on `CtrlGroupControl` (0xFFFE). The processor:
+
+1. Calls `frame.IsAnchorFrame` to detect, then `frame.DecodeAnchor` to validate.
+2. Bypasses the shard/subtree filter (anchors carry no shard semantics).
+3. Forwards the raw frame via `egress.Sender.SendAnchor` to the configured downstream.
+4. Calls `nack.Tracker.Observe` with a **virtual anchor groupIdx `0xFFF9`** so anchor gap
+   tracking has an independent flow label (`brc134`) separate from BRC-131 block control.
+
+The virtual `0xFFF9` is not a real multicast address — it matches the proxy's HashKey
+derivation for anchor frames to keep flow identity consistent end to end. See
+[bitcoin-multicast/docs/brc-134-anchor-transactions.md](../../../bitcoin-multicast/docs/brc-134-anchor-transactions.md).
 
 ## Fragment Reassembly Callbacks
 
