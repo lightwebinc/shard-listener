@@ -54,6 +54,8 @@ type Recorder struct {
 	frameReassemblyAbandoned    metric.Int64Counter
 	frameReassemblyHashMismatch metric.Int64Counter
 	framesDeduped               metric.Int64Counter // by worker; suppressed retransmit before egress
+	framesTxDeduped             metric.Int64Counter // by worker; suppressed by Redis TxID claim
+	txDedupErrors               metric.Int64Counter // Redis errors during TxID claim
 	egressErrors                metric.Int64Counter
 
 	// Block header egress counters
@@ -193,6 +195,14 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.framesDeduped, err = meter.Int64Counter("bsl_frames_deduped_total",
 		metric.WithDescription("BRC-124/BRC-128 retransmits suppressed before egress (egress dedup)")); err != nil {
+		return nil, err
+	}
+	if r.framesTxDeduped, err = meter.Int64Counter("bsl_frames_tx_deduped_total",
+		metric.WithDescription("Frames suppressed by Redis TxID claim (cross-listener dedup)")); err != nil {
+		return nil, err
+	}
+	if r.txDedupErrors, err = meter.Int64Counter("bsl_txid_dedup_errors_total",
+		metric.WithDescription("Redis errors during TxID dedup claim (fail-open: frame was forwarded)")); err != nil {
 		return nil, err
 	}
 	if r.egressErrors, err = meter.Int64Counter("bsl_egress_errors_total",
@@ -346,6 +356,21 @@ func (r *Recorder) FrameDeduped(workerID int) {
 	r.framesDeduped.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.Int("worker", workerID),
 	))
+}
+
+// FrameTxDeduped records a frame suppressed by the Redis TxID claim gate
+// (cross-listener deduplication). The frame was already claimed by another
+// listener in the same Redis-backed dedup group.
+func (r *Recorder) FrameTxDeduped(workerID int) {
+	r.framesTxDeduped.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.Int("worker", workerID),
+	))
+}
+
+// TxDedupError records a Redis error during a TxID claim attempt. The frame
+// was forwarded anyway (fail-open behaviour).
+func (r *Recorder) TxDedupError() {
+	r.txDedupErrors.Add(context.Background(), 1)
 }
 
 // EgressError records a send failure to downstream.

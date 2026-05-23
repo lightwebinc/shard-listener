@@ -52,6 +52,9 @@
 //	-subtree-data-verify-merkle SUBTREE_DATA_VERIFY_MERKLE false Optional post-reassembly Merkle root verification (expensive)
 //	-egress-dedup-cap     EGRESS_DEDUP_CAP     0                Egress dedup capacity (0 = disabled)
 //	-egress-dedup-ttl     EGRESS_DEDUP_TTL     2s               Egress dedup TTL (max age of a remembered key)
+//	-txid-dedup-addr      TXID_DEDUP_ADDR                       Redis address for cross-listener TxID dedup (empty = disabled)
+//	-txid-dedup-prefix    TXID_DEDUP_PREFIX    bsl:txid:        Redis key prefix for TxID dedup entries
+//	-txid-dedup-ttl       TXID_DEDUP_TTL       60s              TTL for TxID dedup Redis entries
 //	-metrics-addr         METRICS_ADDR         :9200            Prometheus / healthz / readyz
 //	-drain-timeout        DRAIN_TIMEOUT        0s               Pre-shutdown drain window
 //	-instance             INSTANCE_ID          hostname         OTel service.instance.id
@@ -152,6 +155,9 @@ type Config struct {
 	VerifyPayloadHash bool
 	EgressDedupCap    int           // 0 = disabled
 	EgressDedupTTL    time.Duration // max age of a remembered key
+	TxidDedupAddr     string        // empty = disabled
+	TxidDedupPrefix   string
+	TxidDedupTTL      time.Duration
 	DrainTimeout      time.Duration
 
 	// Observability
@@ -257,6 +263,12 @@ func Load() (*Config, error) {
 		"egress duplicate-suppression capacity (0 = disabled); typical value: workers × tps × dedup-ttl")
 	flag.DurationVar(&c.EgressDedupTTL, "egress-dedup-ttl", envDuration("EGRESS_DEDUP_TTL", 2*time.Second),
 		"egress dedup TTL: max age of a remembered (groupIdx, subtreeID, SeqNum) tuple")
+	flag.StringVar(&c.TxidDedupAddr, "txid-dedup-addr", envStr("TXID_DEDUP_ADDR", ""),
+		"Redis address for cross-listener TxID dedup (host:port); empty = disabled")
+	flag.StringVar(&c.TxidDedupPrefix, "txid-dedup-prefix", envStr("TXID_DEDUP_PREFIX", "bsl:txid:"),
+		"Redis key prefix for TxID dedup entries")
+	flag.DurationVar(&c.TxidDedupTTL, "txid-dedup-ttl", envDuration("TXID_DEDUP_TTL", 60*time.Second),
+		"TTL for TxID dedup Redis entries; must exceed max propagation delay across all listeners")
 	flag.DurationVar(&c.DrainTimeout, "drain-timeout", envDuration("DRAIN_TIMEOUT", 0),
 		"pre-drain delay before closing sockets; /readyz returns 503 during this window (0 = disabled)")
 	flag.StringVar(&c.MetricsAddr, "metrics-addr", envStr("METRICS_ADDR", ":9200"),

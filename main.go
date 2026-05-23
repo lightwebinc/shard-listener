@@ -26,6 +26,7 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-listener/nack"
 	"github.com/lightwebinc/bitcoin-shard-listener/reassembly"
 	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
+	"github.com/lightwebinc/bitcoin-shard-listener/txdedup"
 )
 
 func main() {
@@ -201,6 +202,21 @@ func run() error {
 		slog.Info("beacon listener started", "group", beaconIP, "port", cfg.BeaconPort)
 	}
 
+	// Build shared Redis TxID dedup store (nil when disabled).
+	var txDedupStore *txdedup.Store
+	if cfg.TxidDedupAddr != "" {
+		txDedupStore, err = txdedup.New(cfg.TxidDedupAddr, cfg.TxidDedupPrefix, cfg.TxidDedupTTL)
+		if err != nil {
+			return fmt.Errorf("txid dedup: %w", err)
+		}
+		defer func() { _ = txDedupStore.Close() }()
+		slog.Info("txid dedup enabled",
+			"addr", cfg.TxidDedupAddr,
+			"prefix", cfg.TxidDedupPrefix,
+			"ttl", cfg.TxidDedupTTL,
+		)
+	}
+
 	// Start workers.
 	for i := range cfg.NumWorkers {
 		egr, err := egress.New(cfg.EgressAddr, cfg.EgressProto, cfg.StripHeader)
@@ -267,6 +283,9 @@ func run() error {
 		}
 		if cfg.EgressDedupCap > 0 {
 			w.SetEgressDedup(dedup.New(cfg.EgressDedupCap, cfg.EgressDedupTTL))
+		}
+		if txDedupStore != nil {
+			w.SetTxDedup(txDedupStore)
 		}
 		// Wire BRC-130 reassembly buffer. The buffer captures w via closure so
 		// each worker owns its own reassembly state (SO_REUSEPORT routes all

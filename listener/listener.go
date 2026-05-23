@@ -38,6 +38,7 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
 	"github.com/lightwebinc/bitcoin-shard-listener/nack"
 	"github.com/lightwebinc/bitcoin-shard-listener/reassembly"
+	"github.com/lightwebinc/bitcoin-shard-listener/txdedup"
 )
 
 const (
@@ -65,6 +66,7 @@ type Worker struct {
 	verifyPayloadHash bool
 	senderACL         *filter.SenderACL  // nil = accept every source
 	dedupSet          *dedup.Set         // nil = dedup disabled
+	txDedup           *txdedup.Store     // nil = cross-listener TxID dedup disabled
 	reassemBuf        *reassembly.Buffer // nil = BRC-130 disabled
 	log               *slog.Logger
 }
@@ -75,6 +77,14 @@ type Worker struct {
 // to disabled.
 func (w *Worker) SetEgressDedup(s *dedup.Set) {
 	w.dedupSet = s
+}
+
+// SetTxDedup attaches a Redis-backed cross-listener TxID dedup store. When
+// set, each BRC-124/BRC-128 or BRC-134 frame races to claim its TxID in
+// Redis; only the first listener to claim it forwards egress. nil disables
+// cross-listener dedup. Defaults to disabled.
+func (w *Worker) SetTxDedup(s *txdedup.Store) {
+	w.txDedup = s
 }
 
 // SetReassemblyBuffer attaches a BRC-130 fragment reassembly buffer to the
@@ -317,6 +327,30 @@ func (w *Worker) processFrame(raw []byte) {
 		return
 	}
 
+	// Cross-listener TxID dedup: when multiple listeners receive the same
+	// multicast frame, only the first to claim the TxID in Redis forwards it.
+	// Fail-open: on Redis error the frame is forwarded and the error is counted.
+	if w.txDedup != nil && f.Version == frame.FrameVerV2 {
+		claimed, claimErr := w.txDedup.Claim(f.TxID)
+		if claimErr != nil {
+			if w.rec != nil {
+				w.rec.TxDedupError()
+			}
+			if w.debug {
+				w.log.Debug("txid dedup redis error (fail-open)", "err", claimErr)
+			}
+		} else if !claimed {
+			if w.rec != nil {
+				w.rec.FrameTxDeduped(w.id)
+			}
+			// Skip egress, but still observe so gap-fill bookkeeping stays accurate.
+			if w.tracker != nil && f.SeqNum != 0 {
+				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
+			}
+			return
+		}
+	}
+
 	// Egress duplicate suppression (GAP-3): when an inline frame and its
 	// retransmit both reach the listener (common at 1+% loss with a warm
 	// retry endpoint), forward only the first. Gap-state suppression in
@@ -543,6 +577,29 @@ func (w *Worker) processAnchorFrame(raw []byte) {
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc134")
 	}
 
+	// Cross-listener TxID dedup for BRC-134 anchor frames.
+	if w.txDedup != nil {
+		claimed, claimErr := w.txDedup.Claim(f.TxID)
+		if claimErr != nil {
+			if w.rec != nil {
+				w.rec.TxDedupError()
+			}
+			if w.debug {
+				w.log.Debug("txid dedup redis error (fail-open)", "err", claimErr)
+			}
+		} else if !claimed {
+			if w.rec != nil {
+				w.rec.FrameTxDeduped(w.id)
+			}
+			const anchorGroupIdx = uint32(0xFFF9)
+			var zeroSub [32]byte
+			if w.tracker != nil && f.SeqNum != 0 {
+				w.tracker.Observe(anchorGroupIdx, zeroSub, f.HashKey, f.SeqNum, f.TxID)
+			}
+			return
+		}
+	}
+
 	if err := w.egr.Send(raw, f); err != nil {
 		if w.rec != nil {
 			w.rec.EgressError(w.id)
@@ -690,6 +747,27 @@ func (w *Worker) DeliverReassembled(payload []byte, f *frame.Frame) {
 
 	if w.rec != nil {
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc130")
+	}
+
+	// Cross-listener TxID dedup for reassembled BRC-130 frames.
+	if w.txDedup != nil {
+		claimed, claimErr := w.txDedup.Claim(f.TxID)
+		if claimErr != nil {
+			if w.rec != nil {
+				w.rec.TxDedupError()
+			}
+			if w.debug {
+				w.log.Debug("txid dedup redis error (fail-open)", "err", claimErr)
+			}
+		} else if !claimed {
+			if w.rec != nil {
+				w.rec.FrameTxDeduped(w.id)
+			}
+			if w.tracker != nil && f.SeqNum != 0 {
+				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
+			}
+			return
+		}
 	}
 
 	// Re-encode as BRC-124 so the Sender has a valid wire buffer.

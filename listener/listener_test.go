@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/lightwebinc/bitcoin-shard-common/frame"
 	"github.com/lightwebinc/bitcoin-shard-common/shard"
 	"golang.org/x/sys/unix"
@@ -13,6 +14,7 @@ import (
 	"github.com/lightwebinc/bitcoin-shard-listener/dedup"
 	"github.com/lightwebinc/bitcoin-shard-listener/egress"
 	"github.com/lightwebinc/bitcoin-shard-listener/filter"
+	"github.com/lightwebinc/bitcoin-shard-listener/txdedup"
 )
 
 // sha256d returns the BSV double-SHA256 of buf.
@@ -775,5 +777,190 @@ func TestProcessAnchorFrame_StripHeader(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for strip-header anchor frame")
+	}
+}
+
+// ── Cross-listener TxID dedup (txdedup.Store) ─────────────────────────────────
+
+func newTxDedup(t *testing.T, mr *miniredis.Miniredis) *txdedup.Store {
+	t.Helper()
+	s, err := txdedup.New(mr.Addr(), "test:txid:", time.Second)
+	if err != nil {
+		t.Fatalf("txdedup.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func TestProcessFrame_TxDedup_FirstForwards(t *testing.T) {
+	mr := miniredis.RunT(t)
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetTxDedup(newTxDedup(t, mr))
+
+	payload := []byte("tx-first")
+	txid := sha256d(payload)
+	raw := buildBRC124Frame(t, txid, payload)
+	w.processFrame(raw)
+
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("first claim: frame must be forwarded")
+	}
+}
+
+func TestProcessFrame_TxDedup_SecondSuppressed(t *testing.T) {
+	mr := miniredis.RunT(t)
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+
+	// w1 and w2 share the same Redis (same miniredis instance).
+	w1 := newWorker(t, addr, filt)
+	w1.SetTxDedup(newTxDedup(t, mr))
+
+	w2 := newWorker(t, addr, filt)
+	w2.SetTxDedup(newTxDedup(t, mr))
+
+	payload := []byte("tx-dup")
+	txid := sha256d(payload)
+	raw := buildBRC124Frame(t, txid, payload)
+
+	// w1 claims and forwards.
+	w1.processFrame(raw)
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("w1: first claim must forward")
+	}
+
+	// w2 loses the race — must suppress.
+	w2.processFrame(raw)
+	select {
+	case <-ch:
+		t.Fatal("w2: duplicate TxID must be suppressed")
+	case <-time.After(150 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestProcessFrame_TxDedup_DistinctTxIDsAllForward(t *testing.T) {
+	mr := miniredis.RunT(t)
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetTxDedup(newTxDedup(t, mr))
+
+	for i := range 5 {
+		payload := []byte{byte(i), 0xAB, 0xCD, 0xEF}
+		txid := sha256d(payload)
+		raw := buildBRC124Frame(t, txid, payload)
+		w.processFrame(raw)
+	}
+
+	count := 0
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case <-ch:
+			count++
+		case <-deadline:
+			goto done
+		}
+	}
+done:
+	if count != 5 {
+		t.Errorf("distinct TxIDs: expected 5 forwards, got %d (no false positives)", count)
+	}
+}
+
+func TestProcessFrame_TxDedup_RedisDown_FailOpen(t *testing.T) {
+	mr := miniredis.RunT(t)
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetTxDedup(newTxDedup(t, mr))
+
+	// Bring Redis down before sending the frame.
+	mr.Close()
+
+	payload := []byte("failopen")
+	txid := sha256d(payload)
+	raw := buildBRC124Frame(t, txid, payload)
+	w.processFrame(raw)
+
+	// Fail-open: frame must still be forwarded even with Redis down.
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("fail-open: frame must forward when Redis is unreachable")
+	}
+}
+
+func TestProcessAnchorFrame_TxDedup_SecondSuppressed(t *testing.T) {
+	mr := miniredis.RunT(t)
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+
+	w1 := newWorker(t, addr, filt)
+	w1.SetTxDedup(newTxDedup(t, mr))
+
+	w2 := newWorker(t, addr, filt)
+	w2.SetTxDedup(newTxDedup(t, mr))
+
+	var txid [32]byte
+	txid[0] = 0xAA
+	raw := buildAnchorFrame(t, txid, []byte("anchor-dup"), 42)
+
+	// w1 claims and forwards.
+	w1.processAnchorFrame(raw)
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("w1: anchor first claim must forward")
+	}
+
+	// w2 loses the race — must suppress.
+	w2.processAnchorFrame(raw)
+	select {
+	case <-ch:
+		t.Fatal("w2: duplicate anchor TxID must be suppressed")
+	case <-time.After(150 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestProcessFrame_TxDedup_Disabled_ForwardsBoth(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	// No txDedup set — both copies must reach downstream.
+
+	payload := []byte("no-txdedup")
+	txid := sha256d(payload)
+	raw := buildBRC124Frame(t, txid, payload)
+	w.processFrame(raw)
+	w.processFrame(raw)
+
+	count := 0
+	deadline := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case <-ch:
+			count++
+		case <-deadline:
+			goto done2
+		}
+	}
+done2:
+	if count != 2 {
+		t.Errorf("without txdedup: expected 2 forwards, got %d", count)
 	}
 }
