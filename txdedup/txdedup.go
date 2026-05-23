@@ -38,8 +38,16 @@ func New(addr, prefix string, ttl time.Duration) (*Store, error) {
 		return nil, fmt.Errorf("txdedup: ttl must be > 0 (got %s); zero or negative TTL would create persistent keys", ttl)
 	}
 
+	// Tune for fail-fast: when Redis is unreachable we want Claim to return
+	// quickly so the worker doesn't back-pressure the UDP recv path. We
+	// already fail-open at the application level, so client-level retries
+	// only add latency.
 	client := redis.NewClient(&redis.Options{
-		Addr: addr,
+		Addr:         addr,
+		DialTimeout:  200 * time.Millisecond,
+		ReadTimeout:  50 * time.Millisecond,
+		WriteTimeout: 50 * time.Millisecond,
+		MaxRetries:   -1, // no client-level retries; application fails open
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
