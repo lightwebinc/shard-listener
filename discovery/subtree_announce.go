@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/bitcoin-shard-common/frame"
+	"github.com/lightwebinc/bitcoin-shard-listener/filter"
 	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
 	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
 )
@@ -179,23 +180,11 @@ func sockaddrToUDP(sa unix.Sockaddr) *net.UDPAddr {
 }
 
 // senderAllowed applies exclude → include filtering on the UDP source.
-// Returns true if the announcement should be processed.
+// Returns true if the announcement should be processed. Delegates to
+// [filter.SenderACL] so the same logic backs the data-plane worker check.
 func (sl *SubtreeAnnounceListener) senderAllowed(src *net.UDPAddr) bool {
-	ip := src.IP
-	for _, cidr := range sl.SenderExclude {
-		if cidr.Contains(ip) {
-			return false
-		}
-	}
-	if len(sl.SenderInclude) == 0 {
-		return true
-	}
-	for _, cidr := range sl.SenderInclude {
-		if cidr.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	acl := filter.SenderACL{Include: sl.SenderInclude, Exclude: sl.SenderExclude}
+	return acl.Allow(src.IP)
 }
 
 func (sl *SubtreeAnnounceListener) evictLoop(ctx context.Context) {

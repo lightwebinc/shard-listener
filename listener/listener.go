@@ -63,6 +63,7 @@ type Worker struct {
 	rec               *metrics.Recorder
 	debug             bool
 	verifyPayloadHash bool
+	senderACL         *filter.SenderACL  // nil = accept every source
 	dedupSet          *dedup.Set         // nil = dedup disabled
 	reassemBuf        *reassembly.Buffer // nil = BRC-130 disabled
 	log               *slog.Logger
@@ -126,6 +127,15 @@ func (w *Worker) SetHeaderEgress(s *egress.Sender) { w.headerEgr = s }
 // group. nil disables.
 func (w *Worker) SetHeaderMCastEgress(s *egress.MCastSender) { w.headerMCastEgr = s }
 
+// SetSenderACL attaches a CIDR-based sender filter. When set, datagrams whose
+// IPv6 source address is rejected by the ACL are dropped before decode and
+// counted under bsl_frames_dropped_total{reason="sender_filter"}. The same
+// ACL is shared with the BRC-127 announcement listener so trust boundaries
+// are configured once. nil (default) accepts every source.
+func (w *Worker) SetSenderACL(a *filter.SenderACL) {
+	w.senderACL = a
+}
+
 // SetVerifyPayloadHash toggles SHA256d(payload)==TxID verification on
 // BRC-124/BRC-128 frames. When true, frames whose payload hash does not match
 // their TxID are dropped before egress and gap tracking, and
@@ -178,7 +188,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	buf := make([]byte, recvBufSize)
 	for {
-		n, _, err := unix.Recvfrom(fd, buf, 0)
+		n, from, err := unix.Recvfrom(fd, buf, 0)
 		if err != nil {
 			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
 				if ctx.Err() != nil {
@@ -199,6 +209,18 @@ func (w *Worker) Run(ctx context.Context) error {
 			continue
 		}
 		if n > 0 {
+			if w.senderACL != nil {
+				ip := sockaddrIP(from)
+				if !w.senderACL.Allow(ip) {
+					if w.rec != nil {
+						w.rec.FrameDropped(w.id, "sender_filter")
+					}
+					if w.debug {
+						w.log.Debug("sender filter rejected", "src", ip)
+					}
+					continue
+				}
+			}
 			w.processFrame(buf[:n])
 		}
 	}
@@ -704,6 +726,20 @@ func (w *Worker) DeliverReassembled(payload []byte, f *frame.Frame) {
 	if w.tracker != nil && f.SeqNum != 0 {
 		w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
 	}
+}
+
+// sockaddrIP extracts the source IP from a unix.Sockaddr returned by
+// Recvfrom on an AF_INET6 socket. Dual-stack sockets surface IPv4 sources
+// as IPv4-mapped IPv6 addresses; returning the raw 16-byte form lets
+// net.IPNet.Contains match either an IPv6 or IPv4 CIDR via Go's normal
+// IPv4-in-IPv6 handling.
+func sockaddrIP(sa unix.Sockaddr) net.IP {
+	if sa6, ok := sa.(*unix.SockaddrInet6); ok {
+		ip := make(net.IP, 16)
+		copy(ip, sa6.Addr[:])
+		return ip
+	}
+	return nil
 }
 
 // openRawSocket creates a UDP6 socket with SO_REUSEPORT bound to [::]:port

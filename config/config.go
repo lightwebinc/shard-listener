@@ -43,8 +43,8 @@
 //	-subtree-groups       SUBTREE_GROUPS                        Comma-separated 32-char hex GroupIDs to subscribe
 //	-subtree-group-default-ttl SUBTREE_GROUP_DEFAULT_TTL 900s  Default TTL for group announcements
 //	-announce-scope       ANNOUNCE_SCOPE       site             Multicast scope(s) for announcement group joins
-//	-sender-include       SENDER_INCLUDE                        IPv6 addresses/CIDRs of trusted announcement senders
-//	-sender-exclude       SENDER_EXCLUDE                        IPv6 addresses/CIDRs to reject (checked before include)
+//	-sender-include       SENDER_INCLUDE                        IPv6/IPv4 addresses/CIDRs of trusted senders (announcements + data frames)
+//	-sender-exclude       SENDER_EXCLUDE                        IPv6/IPv4 addresses/CIDRs to reject (checked before include)
 //	-workers              NUM_WORKERS          NumCPU           Receive goroutine count
 //	-debug                DEBUG                false            Per-frame logging
 //	-verify-payload-hash  VERIFY_PAYLOAD_HASH  false            Verify SHA256d(payload)==TxID on V2 frames; drop on mismatch
@@ -240,9 +240,9 @@ func Load() (*Config, error) {
 	announceScopeFlag := flag.String("announce-scope", envStr("ANNOUNCE_SCOPE", "site"),
 		"multicast scope(s) for subtree announcement group joins: link | site | org | global (comma-separated)")
 	senderIncludeFlag := flag.String("sender-include", envStr("SENDER_INCLUDE", ""),
-		"comma-separated IPv6 addresses/CIDRs of trusted announcement senders (empty = accept all)")
+		"comma-separated IPv6/IPv4 addresses/CIDRs of trusted senders; applied to both BRC-127 announcements and data-plane frames (empty = accept all)")
 	senderExcludeFlag := flag.String("sender-exclude", envStr("SENDER_EXCLUDE", ""),
-		"comma-separated IPv6 addresses/CIDRs to reject (checked before include)")
+		"comma-separated IPv6/IPv4 addresses/CIDRs to reject; checked before include and applied to both BRC-127 announcements and data-plane frames")
 	flag.IntVar(&c.NumWorkers, "workers", envInt("NUM_WORKERS", runtime.NumCPU()),
 		"number of worker goroutines (0 = runtime.NumCPU)")
 	flag.BoolVar(&c.Debug, "debug", envBool("DEBUG", false),

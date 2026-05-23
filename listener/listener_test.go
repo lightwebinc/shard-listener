@@ -8,6 +8,7 @@ import (
 
 	"github.com/lightwebinc/bitcoin-shard-common/frame"
 	"github.com/lightwebinc/bitcoin-shard-common/shard"
+	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/bitcoin-shard-listener/dedup"
 	"github.com/lightwebinc/bitcoin-shard-listener/egress"
@@ -596,6 +597,50 @@ func TestNew_Construction(t *testing.T) {
 	}
 	if w.id != 7 || w.port != 9001 || !w.debug {
 		t.Errorf("fields not preserved: %+v", w)
+	}
+}
+
+// ── Sender ACL (data-plane) ───────────────────────────────────────────────────
+
+func TestSockaddrIP_IPv6(t *testing.T) {
+	sa := &unix.SockaddrInet6{
+		Addr: [16]byte{0xfd, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x24},
+	}
+	got := sockaddrIP(sa)
+	want := net.ParseIP("fd20::24")
+	if !got.Equal(want) {
+		t.Errorf("sockaddrIP = %v, want %v", got, want)
+	}
+}
+
+func TestSockaddrIP_NonInet6_ReturnsNil(t *testing.T) {
+	if got := sockaddrIP(&unix.SockaddrInet4{}); got != nil {
+		t.Errorf("non-inet6 sockaddr should yield nil, got %v", got)
+	}
+}
+
+func TestWorker_SetSenderACL_PreservedOnWorker(t *testing.T) {
+	addr, _, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	if w.senderACL != nil {
+		t.Fatal("default worker must have nil senderACL")
+	}
+	_, cidr, err := net.ParseCIDR("fd20::/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl := filter.NewSenderACL([]*net.IPNet{cidr}, nil)
+	w.SetSenderACL(acl)
+	if w.senderACL == nil {
+		t.Fatal("senderACL must be set after SetSenderACL")
+	}
+	if !w.senderACL.Allow(net.ParseIP("fd20::24")) {
+		t.Error("included sender must be allowed")
+	}
+	if w.senderACL.Allow(net.ParseIP("fe80::1")) {
+		t.Error("non-included sender must be denied")
 	}
 }
 

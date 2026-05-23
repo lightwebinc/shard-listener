@@ -345,13 +345,27 @@ multicast egress for the control-plane group.
 
 ### `-sender-include` / `SENDER_INCLUDE`
 
-Comma-separated IPv6 addresses or CIDRs of trusted announcement senders.
+Comma-separated IPv6/IPv4 addresses or CIDRs of trusted senders. Applied to
+**both** the BRC-127 announcement listener **and** the data-plane workers:
+datagrams whose source address is not in the include set (and is not
+matched by `-sender-exclude`) are dropped before decode. Data-plane drops
+are counted as `bsl_frames_dropped_total{reason="sender_filter"}`.
 Empty means accept all senders not matched by `-sender-exclude`.
+
+This forms the trust boundary for pure dynamic-subtree-group filtering:
+without static `-subtree-include`, only frames from authorized senders can
+reach the registry-based subtree gate.
 
 ### `-sender-exclude` / `SENDER_EXCLUDE`
 
-Comma-separated IPv6 addresses or CIDRs to reject. Checked before
-`-sender-include`. Empty means exclude nothing.
+Comma-separated IPv6/IPv4 addresses or CIDRs to reject. Checked before
+`-sender-include` and applied to both announcements and data-plane frames.
+Empty means exclude nothing.
+
+> **Upgrade note:** prior releases applied `-sender-include` /
+> `-sender-exclude` only to BRC-127 announcements. They now also gate
+> data-plane frames. If you already configured an include list, ensure
+> your proxy / source IP is covered before upgrading.
 
 ---
 

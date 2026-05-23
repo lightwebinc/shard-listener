@@ -289,7 +289,9 @@ func (r *Recorder) FrameReceived(workerID int, iface, version string) {
 }
 
 // FrameDropped records a dropped frame.
-// reason: "decode_error", "shard_filter", "subtree_filter".
+// reason: "decode_error", "shard_filter", "subtree_exclude",
+// "subtree_include_miss", "sender_filter", "frag_decode_error",
+// "no_reassembly_buffer".
 func (r *Recorder) FrameDropped(workerID int, reason string) {
 	r.framesDropped.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.Int("worker", workerID),

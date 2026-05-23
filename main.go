@@ -109,6 +109,11 @@ func run() error {
 	// Build filter.
 	filt := filter.New(cfg.ShardInclude, cfg.SubtreeInclude, cfg.SubtreeExclude, groupReg)
 
+	// Shared sender ACL applied to both BRC-127 announcements and the
+	// data-plane workers. nil when neither -sender-include nor -sender-exclude
+	// is configured (so the per-frame check collapses to a single nil compare).
+	senderACL := filter.NewSenderACL(cfg.SenderInclude, cfg.SenderExclude)
+
 	// Build the endpoint registry (beacon-discovered + static seeds).
 	reg := discovery.NewRegistry()
 
@@ -257,6 +262,9 @@ func run() error {
 			w.SetHeaderMCastEgress(headerMCastEgr)
 		}
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
+		if senderACL != nil {
+			w.SetSenderACL(senderACL)
+		}
 		if cfg.EgressDedupCap > 0 {
 			w.SetEgressDedup(dedup.New(cfg.EgressDedupCap, cfg.EgressDedupTTL))
 		}
