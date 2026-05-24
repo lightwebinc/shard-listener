@@ -50,12 +50,22 @@ func New(addr, prefix string, ttl time.Duration) (*Store, error) {
 		MaxRetries:   -1, // no client-level retries; application fails open
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := client.Ping(ctx).Err(); err != nil {
+	// Retry Ping for up to ~10 s to tolerate co-started Redis containers
+	// that may not yet be accepting connections when the listener boots.
+	var pingErr error
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		pingErr = client.Ping(ctx).Err()
+		cancel()
+		if pingErr == nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if pingErr != nil {
 		_ = client.Close()
-		return nil, fmt.Errorf("txdedup: redis ping %s: %w", addr, err)
+		return nil, fmt.Errorf("txdedup: redis ping %s: %w", addr, pingErr)
 	}
 
 	return &Store{
