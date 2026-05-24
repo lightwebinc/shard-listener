@@ -101,6 +101,20 @@ make test-e2e
 - `golang.org/x/net/ipv6` — multicast group join
 - `golang.org/x/sys/unix` — `SO_REUSEPORT`
 
+## Helm chart
+
+A Kubernetes Helm chart is published from a dedicated chart repository:
+
+- Repository: [`lightwebinc/bitcoin-shard-listener-helm`](https://github.com/lightwebinc/bitcoin-shard-listener-helm)
+- HTTPS:
+  ```
+  helm repo add bsl https://lightwebinc.github.io/bitcoin-shard-listener-helm
+  helm install listener bsl/bitcoin-shard-listener
+  ```
+- OCI: `helm install listener oci://ghcr.io/lightwebinc/charts/bitcoin-shard-listener --version 0.1.0`
+
+Supports `workloadType=Deployment` (default) and `workloadType=DaemonSet`. Every flag accepted by this binary is exposed under `.config` in the chart's `values.yaml`. The chart hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication. See the chart README for the full reference.
+
 ## License
 
 See [LICENSE](LICENSE).

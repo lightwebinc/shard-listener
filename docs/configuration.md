@@ -481,3 +481,9 @@ bitcoin-shard-listener \
   -nack-max-retries 8 \
   -metrics-addr :9200
 ```
+
+## Helm chart
+
+Every flag documented in this file is exposed under `.config` in the corresponding Helm chart's `values.yaml`. See the chart repository for installation snippets and the `values.schema.json` for validation rules.
+
+Chart: [`lightwebinc/bitcoin-shard-listener-helm`](https://github.com/lightwebinc/bitcoin-shard-listener-helm) — supports `workloadType=Deployment | DaemonSet`; hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication.
