@@ -138,7 +138,7 @@ a gap in one flow does not affect another flow's tail.
 ## Beacon discovery
 
 Retry endpoints multicast 56-byte ADVERT datagrams to the beacon group
-(`ff05::ff:fffd` for site scope, UDP port 9300 by default). Each ADVERT
+(`ff05::B:FFFD` for site scope, UDP port 9300 by default). Each ADVERT
 carries the endpoint's NACKAddr (unicast IPv6), tier, preference, and flags.
 
 The `discovery.BeaconListener` goroutine joins the beacon group and upserts
