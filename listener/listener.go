@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -60,6 +61,8 @@ type Worker struct {
 	mcastEgr          *egress.MCastSender // nil when multicast egress is disabled
 	headerEgr         *egress.Sender      // nil when unicast header egress is disabled
 	headerMCastEgr    *egress.MCastSender // nil when multicast header egress is disabled
+	headerHashKey     uint64              // BRC-135 emitter HashKey (XXH64(emitterIPv6 ∥ 0xFFFE ∥ zeros))
+	headerSeqNum      atomic.Uint64       // BRC-135 monotonic per-emitter counter (starts at 1)
 	tracker           *nack.Tracker
 	rec               *metrics.Recorder
 	debug             bool
@@ -126,16 +129,27 @@ func New(
 	}
 }
 
-// SetHeaderEgress attaches a unicast sender for stripped block header
+// SetHeaderEgress attaches a unicast sender for BRC-135 block header
 // retransmission. When set, BlockAnnounce frames trigger extraction of
-// the 80-byte block header and re-encoding as a 172-byte stripped
-// BRC-131 frame sent to the configured downstream. nil disables.
+// the 80-byte block header and re-encoding as a 172-byte BRC-135 frame
+// (FrameVer 0x07) sent to the configured downstream. nil disables.
 func (w *Worker) SetHeaderEgress(s *egress.Sender) { w.headerEgr = s }
 
-// SetHeaderMCastEgress attaches a multicast sender for stripped block
+// SetHeaderMCastEgress attaches a multicast sender for BRC-135 block
 // header retransmission to the CtrlGroupBlockHeader (0xFFFA) multicast
 // group. nil disables.
 func (w *Worker) SetHeaderMCastEgress(s *egress.MCastSender) { w.headerMCastEgr = s }
+
+// SetHeaderEmitterIdentity sets the BRC-135 emitter HashKey for block
+// header egress. HashKey is the stable per-emitter flow identifier
+// computed once as XXH64(emitterIPv6 ∥ 0xFFFE ∥ zeros[32]) using the
+// listener's own egress IPv6 address. It is stamped into every BRC-135
+// frame emitted by this worker. The companion SeqNum counter is reset
+// to start at 1 on the next emission.
+func (w *Worker) SetHeaderEmitterIdentity(hashKey uint64) {
+	w.headerHashKey = hashKey
+	w.headerSeqNum.Store(0)
+}
 
 // SetSenderACL attaches a CIDR-based sender filter. When set, datagrams whose
 // IPv6 source address is rejected by the ACL are dropped before decode and
@@ -461,11 +475,15 @@ func (w *Worker) processBlockFrame(raw []byte) {
 }
 
 // emitBlockHeader extracts the 80-byte block header from a BlockAnnounce
-// payload, re-encodes it as a stripped BRC-131 frame (92B header + 80B
-// payload = 172B), and sends it to configured header egress endpoints.
-// The BRC-131 header preserves ContentID (block hash), HashKey (sender
-// attribution), and SeqNum (per-sender ordering) so downstream SPV
-// consumers can track multiple chain tips from competing miners.
+// payload, re-encodes it as a BRC-135 block header frame (FrameVer 0x07,
+// 92B header + 80B payload = 172B), and sends it to configured header
+// egress endpoints.
+//
+// Per BRC-135, the listener (as emitter) stamps HashKey using its own
+// identity (set via SetHeaderEmitterIdentity) and a monotonic per-emitter
+// SeqNum counter. The block hash is carried verbatim from the upstream
+// BRC-131 ContentID. Downstream SPV consumers track gaps on the
+// emitter-attributed (HashKey, SeqNum) flow.
 func (w *Worker) emitBlockHeader(bf *frame.BlockFrame) {
 	if bf.MsgType != frame.BlockMsgAnnounce {
 		return
@@ -474,16 +492,9 @@ func (w *Worker) emitBlockHeader(bf *frame.BlockFrame) {
 		return
 	}
 
-	// Build a stripped BlockFrame: payload = just the 80-byte header.
-	stripped := &frame.BlockFrame{
-		MsgType:   bf.MsgType,
-		ContentID: bf.ContentID,
-		HashKey:   bf.HashKey,
-		SeqNum:    bf.SeqNum,
-		Payload:   bf.Payload[:frame.BlockHeaderSize],
-	}
-	buf := make([]byte, frame.HeaderSize+frame.BlockHeaderSize)
-	if _, err := frame.EncodeBlock(stripped, buf); err != nil {
+	buf := make([]byte, frame.BlockHeaderFrameSize)
+	seqNum := w.headerSeqNum.Add(1)
+	if _, err := frame.EncodeBlockHeader(bf.ContentID, w.headerHashKey, seqNum, bf.Payload[:frame.BlockHeaderSize], buf); err != nil {
 		w.log.Debug("header egress encode error", "err", err)
 		return
 	}

@@ -194,6 +194,13 @@ UDP destination port for multicast header datagrams.
 Multicast scope for the header egress group. Use a narrower scope than the data plane if
 SPV consumers are on a separate L2 segment.
 
+### `-header-mc-egress-group-id` / `HEADER_MC_EGRESS_GROUP_ID` (default: same as `-mc-group-id`)
+
+IANA group-id (bytes 12–13 of the IPv6 multicast address) for the header egress group.
+Override when consumers join headers on a different `FF0X::<gid>:FFFA` address than the
+data-plane fabric (e.g. a tenant-isolated SPV segment). Accepts decimal (`11`) or hex
+(`0x000B`).
+
 ### `-header-mc-egress-hoplimit` / `HEADER_MC_EGRESS_HOPLIMIT` (default: `1`)
 
 `IPV6_MULTICAST_HOPS` for header egress datagrams. The default `1` confines headers to the
@@ -268,6 +275,36 @@ Entries also evict on capacity overflow regardless of TTL.
 > **Interaction with gap tracker:** even when a duplicate is suppressed by
 > egress dedup, `nack.Tracker.Observe` is still called so gap-fill bookkeeping
 > stays accurate.
+
+---
+
+## Cross-Listener TxID Deduplication
+
+When multiple listeners process the same multicast fabric (e.g. for redundancy
+behind a downstream load balancer), each will forward the same TxID once to its
+own downstream. Cross-listener dedup arbitrates a single forwarder per TxID
+through a shared Redis backend: the first listener to claim a TxID in Redis
+forwards egress; the others drop the frame.
+
+Local egress dedup (above) operates on `(groupIdx, subtreeID, SeqNum)` within a
+single listener; cross-listener dedup is keyed on `TxID` across all listeners.
+The two mechanisms are independent and can be combined.
+
+### `-txid-dedup-addr` / `TXID_DEDUP_ADDR` (default: empty)
+
+Redis address (`host:port`) for cross-listener TxID dedup. Empty disables the
+feature entirely; the listener runs without checking Redis.
+
+### `-txid-dedup-prefix` / `TXID_DEDUP_PREFIX` (default: `bsl:txid:`)
+
+Redis key prefix prepended to every `TxID` claim. Useful for namespacing
+multiple independent listener fleets sharing one Redis instance.
+
+### `-txid-dedup-ttl` / `TXID_DEDUP_TTL` (default: `60s`)
+
+TTL for `TxID` dedup Redis entries. Must exceed the maximum propagation delay
+across all listeners (including retransmit jitter) so that a late-arriving
+retransmit on another listener still finds the original claim.
 
 ---
 

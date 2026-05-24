@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lightwebinc/bitcoin-shard-common/seqhash"
 	"github.com/lightwebinc/bitcoin-shard-common/shard"
 
 	"github.com/lightwebinc/bitcoin-shard-listener/config"
@@ -277,6 +278,15 @@ func run() error {
 		if headerMCastEgr != nil {
 			w.SetHeaderMCastEgress(headerMCastEgr)
 		}
+		// BRC-135 emitter identity: stable per-emitter HashKey computed once
+		// using the listener's primary IPv6 on the configured interface,
+		// the CtrlGroupControl index, and a zero SubtreeID. The same value
+		// is reused for every block header frame this emitter produces.
+		if headerEgr != nil || headerMCastEgr != nil {
+			if emitterIP, ok := primaryIPv6(cfg.Iface); ok {
+				w.SetHeaderEmitterIdentity(seqhash.Hash(emitterIP, uint32(shard.CtrlGroupControl), [32]byte{}))
+			}
+		}
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
 		if senderACL != nil {
 			w.SetSenderACL(senderACL)
@@ -351,6 +361,44 @@ func run() error {
 
 	slog.Info("shutdown complete")
 	return nil
+}
+
+// primaryIPv6 returns the first non-link-local IPv6 address assigned to iface,
+// falling back to any IPv6 address if no non-link-local is present. The
+// returned 16-byte value is suitable as the senderIPv6 input to seqhash.Hash.
+// Returns ok=false if iface has no IPv6 address (e.g. loopback in some test
+// environments) — callers should leave the emitter HashKey unset in that case.
+func primaryIPv6(iface *net.Interface) (out [16]byte, ok bool) {
+	if iface == nil {
+		return out, false
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return out, false
+	}
+	var fallback net.IP
+	for _, a := range addrs {
+		ipn, ok2 := a.(*net.IPNet)
+		if !ok2 {
+			continue
+		}
+		ip := ipn.IP.To16()
+		if ip == nil || ip.To4() != nil {
+			continue
+		}
+		if fallback == nil {
+			fallback = ip
+		}
+		if !ip.IsLinkLocalUnicast() {
+			copy(out[:], ip)
+			return out, true
+		}
+	}
+	if fallback != nil {
+		copy(out[:], fallback)
+		return out, true
+	}
+	return out, false
 }
 
 // buildGroups returns the multicast group addresses this instance should join.

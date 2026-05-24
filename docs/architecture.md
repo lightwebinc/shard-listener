@@ -20,14 +20,14 @@ BSV senders
    ▼
 bitcoin-shard-proxy
    │ BRC-124/BRC-128 frames → FF05::B:<shard>      (data plane)
-   │ BRC-131/BRC-134 frames → FF05::B:FFFE          (CtrlGroupControl)
+   │ BRC-131/BRC-134 frames → FF0E::B:FFFE          (CtrlGroupControl, always global)
    │ BRC-132 frames         → FF05::B:FFFB          (CtrlGroupSubtreeAnnounce)
    │ BRC-127 datagrams      → FF05::B:FFFC          (CtrlGroupSubtreeGroupAnnounce)
    ▼
 Multicast fabric (site-scoped FF05::/16)
    │
    ├── FF05::B:<shard>   BRC-124/BRC-128 transaction frames
-   ├── FF05::B:FFFE      BRC-131 block control + BRC-134 anchor (always joined)
+   ├── FF0E::B:FFFE      BRC-131 block control + BRC-134 anchor (always joined; global scope)
    ├── FF05::B:FFFB      BRC-132 subtree data (when -subtree-data-enabled)
    ├── FF05::B:FFFC      BRC-127 subtree group announcements (when -subtree-groups set)
    └── FF05::B:FFFD      BRC-126 ADVERT beacon
@@ -176,13 +176,13 @@ for BRC-12 frames because `SeqNum` is zero.
 
 ## Control Group Address Table
 
-| Constant | Index | Address (site scope, group-id `0x000B`) | Purpose |
+| Constant | Index | Canonical Address (group-id `0x000B`) | Purpose |
 |---|---|---|---|
-| `CtrlGroupBlockHeader` | 0xFFFA | FF05::B:FFFA | Block header egress channel (stripped BRC-131 headers) |
-| `CtrlGroupSubtreeAnnounce` | 0xFFFB | FF05::B:FFFB | BRC-132 subtree data frames |
-| `CtrlGroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC | BRC-127 subtree group announcements |
-| `CtrlGroupBeacon` | 0xFFFD | FF05::B:FFFD | ADVERT beacon (BRC-126 discovery) |
-| `CtrlGroupControl` | 0xFFFE | FF05::B:FFFE | BRC-131 block control + BRC-134 anchor frames |
+| `CtrlGroupBlockHeader` | 0xFFFA | egress-scope `FF0X::<egress-gid>:FFFA` | Block header egress channel (BRC-135) |
+| `CtrlGroupSubtreeAnnounce` | 0xFFFB | FF05::B:FFFB (data-plane scope) | BRC-132 subtree data frames |
+| `CtrlGroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC (data-plane scope) | BRC-127 subtree group announcements |
+| `CtrlGroupBeacon` | 0xFFFD | FF05::B:FFFD (site) / FF0E::B:FFFD (global) | ADVERT beacon (BRC-126 discovery) |
+| `CtrlGroupControl` | 0xFFFE | **FF0E::B:FFFE (always global)** | BRC-131 block control + BRC-134 anchor frames |
 | _(virtual)_ | 0xFFF9 | — | BRC-134 anchor flow identity for gap tracking |
 
 The listener always joins `CtrlGroupControl` and `CtrlGroupBeacon`. It joins
@@ -200,13 +200,26 @@ received on this group are dispatched to `processBlockFrame`:
 4. Calls `nack.Tracker.Observe(uint32(CtrlGroupControl), zeroSubtreeID, bf.HashKey, bf.SeqNum, bf.ContentID)`
    for gap tracking on the block control flow.
 
-**Block header egress:** when `-header-egress-enabled=true`, `processBlockFrame` additionally
-calls `emitBlockHeader` for `BlockAnnounce` (MsgType 0x01) frames. `emitBlockHeader` extracts
-the first 80 bytes of the payload (raw block header), re-encodes them as a stripped 172-byte
-BRC-131 frame (92-byte header + 80-byte payload), and sends it to the configured unicast
+**Block header egress (BRC-135):** when `-header-egress-enabled=true`, `processBlockFrame`
+additionally calls `emitBlockHeader` for `BlockAnnounce` (MsgType 0x01) frames.
+`emitBlockHeader` extracts the first 80 bytes of the payload (raw block header) and
+re-encodes them as a 172-byte BRC-135 frame (FrameVer `0x07`, 92-byte header + 80-byte
+payload) via `frame.EncodeBlockHeader`. The frame is sent to the configured unicast
 header egress endpoint.
 
-When `-header-mc-egress-enabled=true`, the stripped header frame is also re-emitted to
+Per BRC-135, the listener stamps the frame with its **own emitter identity**:
+
+- `HashKey = XXH64(listenerIPv6 ∥ 0xFFFE ∥ zeros[32])` — computed once at startup
+  from the configured `-iface` primary IPv6 address (see `primaryIPv6` in `main.go`).
+- `SeqNum` — a monotonic per-worker counter (`atomic.Uint64`) starting at 1,
+  incremented on every emission.
+- `BlockHash` (TxID slot) — copied verbatim from the upstream BRC-131 `ContentID`.
+
+Downstream SPV consumers track gaps on the emitter-attributed `(HashKey, SeqNum)`
+flow; if multiple listeners emit headers for the same block, each appears as an
+independent flow (matching the "redundant emitters" recovery model in BRC-135 §6).
+
+When `-header-mc-egress-enabled=true`, the BRC-135 frame is also re-emitted to
 `CtrlGroupBlockHeader` (0xFFFA), allowing SPV consumers to join only that group.
 
 **Reassembly:** fragmented BRC-131 payloads arrive as BRC-130 fragments with `OrigFrameVer=0x04`.

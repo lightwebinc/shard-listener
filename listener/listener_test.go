@@ -451,38 +451,39 @@ func TestProcessBlockFrame_HeaderEgress_Unicast(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = hdrEgr.Close() })
 	w.SetHeaderEgress(hdrEgr)
+	const emitterHashKey uint64 = 0xABCDEF0123456789
+	w.SetHeaderEmitterIdentity(emitterHashKey)
 
 	raw := buildBlockAnnounceFrame(t, 0xAA, 0xDEADBEEF, 42)
 	w.processBlockFrame(raw)
 
-	// Expect a 172-byte stripped BRC-131 on the header egress.
+	// Expect a 172-byte BRC-135 frame on the header egress.
 	select {
 	case got := <-hdrCh:
-		expectedLen := frame.HeaderSize + frame.BlockHeaderSize // 92 + 80 = 172
-		if len(got) != expectedLen {
-			t.Fatalf("header egress: got %d bytes, want %d", len(got), expectedLen)
+		if len(got) != frame.BlockHeaderFrameSize {
+			t.Fatalf("header egress: got %d bytes, want %d", len(got), frame.BlockHeaderFrameSize)
 		}
-		// Decode and verify fields are preserved.
-		decoded, err := frame.DecodeBlock(got)
+		if !frame.IsBlockHeaderFrame(got) {
+			t.Fatalf("egress frame is not BRC-135 (FrameVer=0x%02X)", got[6])
+		}
+		decoded, err := frame.DecodeBlockHeader(got)
 		if err != nil {
-			t.Fatalf("decode stripped header: %v", err)
+			t.Fatalf("decode BRC-135: %v", err)
 		}
-		if decoded.MsgType != frame.BlockMsgAnnounce {
-			t.Errorf("MsgType = 0x%02X, want 0x01", decoded.MsgType)
+		if decoded.TxID[0] != 0xAA {
+			t.Errorf("BlockHash[0] = 0x%02X, want 0xAA", decoded.TxID[0])
 		}
-		if decoded.ContentID[0] != 0xAA {
-			t.Errorf("ContentID[0] = 0x%02X, want 0xAA", decoded.ContentID[0])
+		// Per BRC-135: HashKey is the emitter's identity, NOT the upstream's.
+		if decoded.HashKey != emitterHashKey {
+			t.Errorf("HashKey = 0x%016X, want 0x%016X (emitter identity)", decoded.HashKey, emitterHashKey)
 		}
-		if decoded.HashKey != 0xDEADBEEF {
-			t.Errorf("HashKey = %x, want 0xDEADBEEF", decoded.HashKey)
-		}
-		if decoded.SeqNum != 42 {
-			t.Errorf("SeqNum = %d, want 42", decoded.SeqNum)
+		// Per BRC-135: SeqNum is the per-emitter counter, starting at 1.
+		if decoded.SeqNum != 1 {
+			t.Errorf("SeqNum = %d, want 1 (first emission)", decoded.SeqNum)
 		}
 		if len(decoded.Payload) != frame.BlockHeaderSize {
 			t.Errorf("Payload len = %d, want %d", len(decoded.Payload), frame.BlockHeaderSize)
 		}
-		// Verify the block header content is preserved.
 		if decoded.Payload[0] != 0x01 {
 			t.Errorf("block header version byte = 0x%02X, want 0x01", decoded.Payload[0])
 		}
@@ -570,18 +571,19 @@ func TestDeliverReassembledBlock_HeaderEgress(t *testing.T) {
 
 	select {
 	case got := <-hdrCh:
-		if len(got) != frame.HeaderSize+frame.BlockHeaderSize {
-			t.Fatalf("reassembled header egress: got %d bytes, want %d", len(got), frame.HeaderSize+frame.BlockHeaderSize)
+		if len(got) != frame.BlockHeaderFrameSize {
+			t.Fatalf("reassembled header egress: got %d bytes, want %d", len(got), frame.BlockHeaderFrameSize)
 		}
-		decoded, err := frame.DecodeBlock(got)
+		decoded, err := frame.DecodeBlockHeader(got)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if decoded.ContentID[0] != 0xDD {
-			t.Errorf("ContentID[0] = 0x%02X, want 0xDD", decoded.ContentID[0])
+		if decoded.TxID[0] != 0xDD {
+			t.Errorf("BlockHash[0] = 0x%02X, want 0xDD", decoded.TxID[0])
 		}
-		if decoded.HashKey != 0xFEED {
-			t.Errorf("HashKey = %x, want 0xFEED", decoded.HashKey)
+		// HashKey is emitter identity (unset in this test → 0); SeqNum starts at 1.
+		if decoded.SeqNum != 1 {
+			t.Errorf("SeqNum = %d, want 1 (first emission)", decoded.SeqNum)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for reassembled header egress")
