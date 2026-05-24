@@ -10,8 +10,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: build
+  ci:
+    name: ci (dagger)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -26,82 +26,16 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: bitcoin-shard-listener/go.mod
+          cache: false
 
-      - name: Use local bitcoin-shard-common
+      - name: Run Dagger pipeline
         working-directory: bitcoin-shard-listener
-        run: go mod edit -replace github.com/lightwebinc/bitcoin-shard-common=../bitcoin-shard-common
+        env:
+          GOWORK: "off"
+        run: make ci
 
-      - name: go mod tidy check
-        working-directory: bitcoin-shard-listener
-        run: |
-          go mod tidy
-          go mod edit -dropreplace github.com/lightwebinc/bitcoin-shard-common
-          git diff --exit-code go.mod
-          go mod edit -replace github.com/lightwebinc/bitcoin-shard-common=../bitcoin-shard-common
-
-      - name: Build
-        working-directory: bitcoin-shard-listener
-        run: go build -buildvcs=false ./...
-
-  security:
-    name: security
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          path: bitcoin-shard-listener
-
-      - uses: actions/checkout@v6
-        with:
-          repository: lightwebinc/bitcoin-shard-common
-          path: bitcoin-shard-common
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: bitcoin-shard-listener/go.mod
-
-      - name: Use local bitcoin-shard-common
-        working-directory: bitcoin-shard-listener
-        run: go mod edit -replace github.com/lightwebinc/bitcoin-shard-common=../bitcoin-shard-common
-
-      - name: govulncheck
-        working-directory: bitcoin-shard-listener
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
-
-  lint:
-    name: lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          path: bitcoin-shard-listener
-
-      - uses: actions/checkout@v6
-        with:
-          repository: lightwebinc/bitcoin-shard-common
-          path: bitcoin-shard-common
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: bitcoin-shard-listener/go.mod
-
-      - name: Use local bitcoin-shard-common
-        working-directory: bitcoin-shard-listener
-        run: go mod edit -replace github.com/lightwebinc/bitcoin-shard-common=../bitcoin-shard-common
-
-      - name: go vet
-        working-directory: bitcoin-shard-listener
-        run: go vet ./...
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          working-directory: bitcoin-shard-listener
-
-  test:
-    name: test
+  e2e:
+    name: e2e (host)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -122,16 +56,21 @@ jobs:
         with:
           go-version-file: bitcoin-shard-listener/go.mod
 
-      - name: Use local bitcoin-shard-common
+      - name: Use local bitcoin-shard-common (listener)
         working-directory: bitcoin-shard-listener
         run: go mod edit -replace github.com/lightwebinc/bitcoin-shard-common=../bitcoin-shard-common
 
-      - name: Unit tests
-        working-directory: bitcoin-shard-listener
-        run: go test -race ./...
+      - name: Use local bitcoin-shard-common (proxy)
+        working-directory: bitcoin-shard-proxy
+        run: go mod edit -replace github.com/lightwebinc/bitcoin-shard-common=../bitcoin-shard-common
 
       - name: Install curl
         run: sudo apt-get install -y --no-install-recommends curl
+
+      - name: Enable IPv6 multicast on loopback
+        run: |
+          sudo ip link set lo multicast on
+          sudo ip -6 route add ff00::/8 dev lo table local 2>/dev/null || true
 
       - name: E2E test
         working-directory: bitcoin-shard-listener

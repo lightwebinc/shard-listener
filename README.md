@@ -101,6 +101,12 @@ make test-e2e
 - `golang.org/x/net/ipv6` — multicast group join
 - `golang.org/x/sys/unix` — `SO_REUSEPORT`
 
+## Container image
+
+The Dockerfile produces a `gcr.io/distroless/static:nonroot` image with the
+single static binary at `/usr/local/bin/bitcoin-shard-listener`. Configure via
+Helm `values.yaml`, container environment variables, or CLI flags.
+
 ## Helm chart
 
 A Kubernetes Helm chart is published from a dedicated chart repository:
