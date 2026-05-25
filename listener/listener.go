@@ -310,6 +310,14 @@ func (w *Worker) processFrame(raw []byte) {
 		w.rec.FrameReceived(w.id, w.iface.Name, ver)
 	}
 
+	// Courtesy ingress-set mark: best-effort SETNX into the local proxy's
+	// namespace so sibling proxies treat this TxID as "already on the network"
+	// — useful when a frame arrived via a cross-site bridge or a path the
+	// local proxy itself did not observe. Async; never affects forward path.
+	if w.txDedup != nil && w.txDedup.HasIngressMark() && f.Version == frame.FrameVerV2 {
+		w.txDedup.Mark(f.TxID)
+	}
+
 	// Optional payload-hash verification (GAP-2). Only meaningful for V2
 	// frames (BRC-12 has no chain semantics; the TxID is still the BSV
 	// double-SHA256 of the payload but legacy frames are forwarded verbatim
@@ -586,6 +594,11 @@ func (w *Worker) processAnchorFrame(raw []byte) {
 
 	if w.rec != nil {
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc134")
+	}
+
+	// Courtesy ingress-set mark for BRC-134 anchor TxIDs.
+	if w.txDedup != nil && w.txDedup.HasIngressMark() {
+		w.txDedup.Mark(f.TxID)
 	}
 
 	// Cross-listener TxID dedup for BRC-134 anchor frames.

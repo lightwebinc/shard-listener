@@ -155,10 +155,37 @@ type Config struct {
 	VerifyPayloadHash bool
 	EgressDedupCap    int           // 0 = disabled
 	EgressDedupTTL    time.Duration // max age of a remembered key
-	TxidDedupAddr     string        // empty = disabled
-	TxidDedupPrefix   string
-	TxidDedupTTL      time.Duration
-	DrainTimeout      time.Duration
+
+	// Egress TxID dedup (per-deployment): HA listener siblings sharing a
+	// DeploymentID race to win the SETNX claim under EgressDedupPrefix +
+	// DeploymentID + ":" + hex(txid). Only the winner forwards downstream.
+	// Listeners with different DeploymentID values race independently, so
+	// each deployment forwards at most once.
+	//
+	// TxidDedupAddr/Prefix/TTL are preserved as DEPRECATED aliases for
+	// EgressDedupRedisAddr/Prefix/TTL when the new flags are not set.
+	TxidDedupAddr   string        // DEPRECATED alias for EgressDedupRedisAddr
+	TxidDedupPrefix string        // DEPRECATED alias for EgressDedupPrefix
+	TxidDedupTTL    time.Duration // DEPRECATED alias for EgressDedupTTL
+
+	DeploymentID         string
+	NodeID               string
+	EgressDedupRedisAddr string
+	EgressDedupPrefix    string
+	EgressDedupTTL2      time.Duration // separate field so deprecation logic can compare
+	EgressDedupLocalCap  int
+
+	// Optional courtesy SETNX into the local proxy's ingress namespace so
+	// the proxy knows the TxID has been seen on the multicast network (e.g.
+	// arrived via a cross-site bridge or other path the proxy did not see).
+	//
+	// IngressSetRedisAddr empty disables the courtesy mark.
+	IngressSetRedisAddr string
+	IngressSetPrefix    string
+	IngressSetTTL       time.Duration
+	IngressSetLocalCap  int
+
+	DrainTimeout time.Duration
 
 	// Observability
 	MetricsAddr  string
@@ -264,11 +291,33 @@ func Load() (*Config, error) {
 	flag.DurationVar(&c.EgressDedupTTL, "egress-dedup-ttl", envDuration("EGRESS_DEDUP_TTL", 2*time.Second),
 		"egress dedup TTL: max age of a remembered (groupIdx, subtreeID, SeqNum) tuple")
 	flag.StringVar(&c.TxidDedupAddr, "txid-dedup-addr", envStr("TXID_DEDUP_ADDR", ""),
-		"Redis address for cross-listener TxID dedup (host:port); empty = disabled")
-	flag.StringVar(&c.TxidDedupPrefix, "txid-dedup-prefix", envStr("TXID_DEDUP_PREFIX", "bsl:txid:"),
-		"Redis key prefix for TxID dedup entries")
-	flag.DurationVar(&c.TxidDedupTTL, "txid-dedup-ttl", envDuration("TXID_DEDUP_TTL", 60*time.Second),
-		"TTL for TxID dedup Redis entries; must exceed max propagation delay across all listeners")
+		"DEPRECATED: use -egress-dedup-redis-addr. Redis address for cross-listener TxID dedup")
+	flag.StringVar(&c.TxidDedupPrefix, "txid-dedup-prefix", envStr("TXID_DEDUP_PREFIX", ""),
+		"DEPRECATED: use -egress-dedup-prefix. Redis key prefix for TxID dedup entries")
+	flag.DurationVar(&c.TxidDedupTTL, "txid-dedup-ttl", envDuration("TXID_DEDUP_TTL", 0),
+		"DEPRECATED: use -egress-dedup-ttl. TTL for TxID dedup Redis entries")
+
+	flag.StringVar(&c.DeploymentID, "deployment-id", envStr("DEPLOYMENT_ID", ""),
+		"per-deployment dedup identifier; HA siblings must share the same value (default: hostname)")
+	flag.StringVar(&c.NodeID, "node-id", envStr("NODE_ID", ""),
+		"per-node informational identifier used in metrics labels (default: hostname)")
+	flag.StringVar(&c.EgressDedupRedisAddr, "egress-dedup-redis-addr", envStr("EGRESS_DEDUP_REDIS_ADDR", ""),
+		"Redis address for per-deployment egress TxID dedup; empty = local-only LRU")
+	flag.StringVar(&c.EgressDedupPrefix, "egress-dedup-prefix", envStr("EGRESS_DEDUP_PREFIX", "bsl:egr:"),
+		"Redis key prefix for per-deployment egress dedup; deployment-id is appended")
+	flag.DurationVar(&c.EgressDedupTTL2, "egress-dedup-ttl-redis", envDuration("EGRESS_DEDUP_TTL_REDIS", 60*time.Second),
+		"TTL for egress-dedup Redis entries (per-deployment); must exceed max propagation delay")
+	flag.IntVar(&c.EgressDedupLocalCap, "egress-dedup-local-cap", envInt("EGRESS_DEDUP_LOCAL_CAP", 1<<20),
+		"tier-1 local LRU capacity for the egress TxID dedup gate (0 = disable feature)")
+
+	flag.StringVar(&c.IngressSetRedisAddr, "ingress-set-redis-addr", envStr("INGRESS_SET_REDIS_ADDR", ""),
+		"Redis address for courtesy SETNX into the local proxy's ingress namespace (empty = disabled)")
+	flag.StringVar(&c.IngressSetPrefix, "ingress-set-prefix", envStr("INGRESS_SET_PREFIX", "bsp:tx:"),
+		"Redis key prefix for ingress-set courtesy marks; MUST match the local proxy's -txid-dedup-prefix")
+	flag.DurationVar(&c.IngressSetTTL, "ingress-set-ttl", envDuration("INGRESS_SET_TTL", 10*time.Minute),
+		"TTL for ingress-set courtesy marks; SHOULD match the local proxy's -txid-dedup-ttl")
+	flag.IntVar(&c.IngressSetLocalCap, "ingress-set-local-cap", envInt("INGRESS_SET_LOCAL_CAP", 1<<20),
+		"tier-1 local LRU capacity for the ingress-mark dedup (0 = disable local LRU)")
 	flag.DurationVar(&c.DrainTimeout, "drain-timeout", envDuration("DRAIN_TIMEOUT", 0),
 		"pre-drain delay before closing sockets; /readyz returns 503 during this window (0 = disabled)")
 	flag.StringVar(&c.MetricsAddr, "metrics-addr", envStr("METRICS_ADDR", ":9200"),
@@ -465,6 +514,33 @@ func Load() (*Config, error) {
 	}
 	if c.SenderExclude, err = parseIPNetList(*senderExcludeFlag); err != nil {
 		return nil, fmt.Errorf("sender-exclude: %w", err)
+	}
+
+	// Deprecation: when -egress-dedup-redis-addr is empty but the deprecated
+	// -txid-dedup-addr is set, alias the old values into the new fields. This
+	// preserves behaviour for operators who have not yet migrated. An info
+	// log is emitted at startup (in main.go) when the alias is taken.
+	if c.EgressDedupRedisAddr == "" && c.TxidDedupAddr != "" {
+		c.EgressDedupRedisAddr = c.TxidDedupAddr
+	}
+	if c.TxidDedupPrefix != "" {
+		// Operator set the deprecated flag explicitly — honour it.
+		c.EgressDedupPrefix = c.TxidDedupPrefix
+	}
+	if c.TxidDedupTTL > 0 {
+		c.EgressDedupTTL2 = c.TxidDedupTTL
+	}
+
+	// Default DeploymentID / NodeID to hostname when unset.
+	if c.DeploymentID == "" {
+		if h, hErr := os.Hostname(); hErr == nil && h != "" {
+			c.DeploymentID = h
+		} else {
+			c.DeploymentID = "unknown"
+		}
+	}
+	if c.NodeID == "" {
+		c.NodeID = c.DeploymentID
 	}
 
 	return c, nil

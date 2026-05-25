@@ -87,7 +87,10 @@ func TestClaim_TTLExpiry(t *testing.T) {
 		t.Fatalf("second Claim (within TTL): got (%v, %v), want (false, nil)", ok, err)
 	}
 
-	// Advance miniredis clock past TTL.
+	// Advance both wall-clock (for the local-LRU tier) and miniredis clock
+	// (for the Redis tier) past TTL. The Store layers a TTL'd local set in
+	// front of Redis, so both must time out for the next Claim to win.
+	time.Sleep(150 * time.Millisecond)
 	mr.FastForward(200 * time.Millisecond)
 
 	// After TTL, the key has expired — new claim should succeed.

@@ -203,19 +203,48 @@ func run() error {
 		slog.Info("beacon listener started", "group", beaconIP, "port", cfg.BeaconPort)
 	}
 
-	// Build shared Redis TxID dedup store (nil when disabled).
+	// Build the shared TxID dedup store. Two independent namespaces are
+	// composed into one Store:
+	//   - egress  — per-deployment SETNX before downstream forward
+	//   - ingress — optional courtesy SETNX into the local proxy's namespace
+	//
+	// LocalCap=0 on the egress side disables the feature entirely.
 	var txDedupStore *txdedup.Store
-	if cfg.TxidDedupAddr != "" {
-		txDedupStore, err = txdedup.New(cfg.TxidDedupAddr, cfg.TxidDedupPrefix, cfg.TxidDedupTTL)
+	if cfg.EgressDedupLocalCap > 0 {
+		txDedupStore, err = txdedup.NewWithConfig(txdedup.Config{
+			EgressRedisAddr:  cfg.EgressDedupRedisAddr,
+			EgressPrefix:     cfg.EgressDedupPrefix,
+			EgressTTL:        cfg.EgressDedupTTL2,
+			EgressLocalCap:   cfg.EgressDedupLocalCap,
+			DeploymentID:     cfg.DeploymentID,
+			IngressRedisAddr: cfg.IngressSetRedisAddr,
+			IngressPrefix:    cfg.IngressSetPrefix,
+			IngressTTL:       cfg.IngressSetTTL,
+			IngressLocalCap:  cfg.IngressSetLocalCap,
+			Recorder:         rec,
+		})
 		if err != nil {
 			return fmt.Errorf("txid dedup: %w", err)
 		}
 		defer func() { _ = txDedupStore.Close() }()
-		slog.Info("txid dedup enabled",
-			"addr", cfg.TxidDedupAddr,
-			"prefix", cfg.TxidDedupPrefix,
-			"ttl", cfg.TxidDedupTTL,
+
+		slog.Info("egress TxID dedup enabled",
+			"redis_addr", cfg.EgressDedupRedisAddr,
+			"prefix", txDedupStore.EgressPrefix(),
+			"ttl", cfg.EgressDedupTTL2,
+			"local_cap", cfg.EgressDedupLocalCap,
+			"deployment_id", cfg.DeploymentID,
 		)
+		if txDedupStore.HasIngressMark() {
+			slog.Info("ingress-set courtesy mark enabled",
+				"redis_addr", cfg.IngressSetRedisAddr,
+				"prefix", txDedupStore.IngressPrefix(),
+				"ttl", cfg.IngressSetTTL,
+			)
+		}
+		if cfg.TxidDedupAddr != "" || cfg.TxidDedupPrefix != "" || cfg.TxidDedupTTL > 0 {
+			slog.Warn("deprecated -txid-dedup-* flags in use; migrate to -egress-dedup-* and -deployment-id")
+		}
 	}
 
 	// Start workers.

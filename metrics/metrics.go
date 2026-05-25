@@ -58,6 +58,16 @@ type Recorder struct {
 	txDedupErrors               metric.Int64Counter // Redis errors during TxID claim
 	egressErrors                metric.Int64Counter
 
+	// Egress / ingress TxID dedup outcomes (txidset.Store callbacks)
+	egressClaimLocalHit metric.Int64Counter
+	egressClaimWon      metric.Int64Counter
+	egressClaimLost     metric.Int64Counter
+	egressClaimError    metric.Int64Counter
+	ingressMarkSet      metric.Int64Counter
+	ingressMarkExisted  metric.Int64Counter
+	ingressMarkError    metric.Int64Counter
+	ingressMarkDropped  metric.Int64Counter
+
 	// Block header egress counters
 	headerForwarded    metric.Int64Counter
 	headerEgressErrors metric.Int64Counter
@@ -203,6 +213,38 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.txDedupErrors, err = meter.Int64Counter("bsl_txid_dedup_errors_total",
 		metric.WithDescription("Redis errors during TxID dedup claim (fail-open: frame was forwarded)")); err != nil {
+		return nil, err
+	}
+	if r.egressClaimLocalHit, err = meter.Int64Counter("bsl_egress_claim_local_hit_total",
+		metric.WithDescription("Tier-1 local LRU short-circuit on per-deployment egress claim")); err != nil {
+		return nil, err
+	}
+	if r.egressClaimWon, err = meter.Int64Counter("bsl_egress_claim_won_total",
+		metric.WithDescription("Per-deployment egress claim SETNX wins (frame forwarded)")); err != nil {
+		return nil, err
+	}
+	if r.egressClaimLost, err = meter.Int64Counter("bsl_egress_claim_lost_total",
+		metric.WithDescription("Per-deployment egress claim SETNX losses (HA sibling already forwarded)")); err != nil {
+		return nil, err
+	}
+	if r.egressClaimError, err = meter.Int64Counter("bsl_egress_claim_errors_total",
+		metric.WithDescription("Redis errors during egress claim (fail-open: frame was forwarded)")); err != nil {
+		return nil, err
+	}
+	if r.ingressMarkSet, err = meter.Int64Counter("bsl_ingress_mark_set_total",
+		metric.WithDescription("Courtesy SETNX into the proxy's ingress namespace that created a new key")); err != nil {
+		return nil, err
+	}
+	if r.ingressMarkExisted, err = meter.Int64Counter("bsl_ingress_mark_existed_total",
+		metric.WithDescription("Courtesy SETNX into the proxy's ingress namespace where the key already existed")); err != nil {
+		return nil, err
+	}
+	if r.ingressMarkError, err = meter.Int64Counter("bsl_ingress_mark_errors_total",
+		metric.WithDescription("Redis errors during ingress-set courtesy mark (best-effort)")); err != nil {
+		return nil, err
+	}
+	if r.ingressMarkDropped, err = meter.Int64Counter("bsl_ingress_mark_dropped_total",
+		metric.WithDescription("Ingress-set courtesy marks dropped because the async queue was full or local-only mode is active")); err != nil {
 		return nil, err
 	}
 	if r.egressErrors, err = meter.Int64Counter("bsl_egress_errors_total",
@@ -372,6 +414,33 @@ func (r *Recorder) FrameTxDeduped(workerID int) {
 func (r *Recorder) TxDedupError() {
 	r.txDedupErrors.Add(context.Background(), 1)
 }
+
+// EgressClaimLocalHit records a tier-1 local-LRU short-circuit on egress claim.
+func (r *Recorder) EgressClaimLocalHit() { r.egressClaimLocalHit.Add(context.Background(), 1) }
+
+// EgressClaimWon records a tier-2 SETNX win (frame proceeds to egress).
+func (r *Recorder) EgressClaimWon() { r.egressClaimWon.Add(context.Background(), 1) }
+
+// EgressClaimLost records a tier-2 SETNX loss (sibling listener forwarded).
+func (r *Recorder) EgressClaimLost() { r.egressClaimLost.Add(context.Background(), 1) }
+
+// EgressClaimError records a Redis error during egress claim (fail-open).
+func (r *Recorder) EgressClaimError() { r.egressClaimError.Add(context.Background(), 1) }
+
+// IngressMarkSet records a courtesy SETNX into the proxy's namespace that
+// created a new key (this listener was first to observe the TxID via multicast).
+func (r *Recorder) IngressMarkSet() { r.ingressMarkSet.Add(context.Background(), 1) }
+
+// IngressMarkExisted records a courtesy SETNX where the key already existed
+// (the local proxy or a sibling listener had already claimed the TxID).
+func (r *Recorder) IngressMarkExisted() { r.ingressMarkExisted.Add(context.Background(), 1) }
+
+// IngressMarkError records a Redis error during async ingress-set mark.
+func (r *Recorder) IngressMarkError() { r.ingressMarkError.Add(context.Background(), 1) }
+
+// IngressMarkDropped records an ingress-set courtesy mark dropped because the
+// async work queue was full or no Redis was configured.
+func (r *Recorder) IngressMarkDropped() { r.ingressMarkDropped.Add(context.Background(), 1) }
 
 // EgressError records a send failure to downstream.
 func (r *Recorder) EgressError(workerID int) {

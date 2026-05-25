@@ -491,6 +491,74 @@ Metric export interval for the OTLP push exporter. Default `30s`. Ignored when
 `OTLP_ENDPOINT` is empty. Tune down for tighter observability or up to reduce
 collector load.
 
+### `-deployment-id` / `DEPLOYMENT_ID` (default: hostname)
+
+Logical deployment identifier. All HA listener siblings sharing a Redis
+must set the same value to dedup their downstream egress. Listeners with
+distinct `DEPLOYMENT_ID` values race independently, so each deployment
+forwards at most once. Default = hostname makes every listener its own
+deployment of one out of the box.
+
+### `-node-id` / `NODE_ID` (default: hostname)
+
+Informational identifier surfaced in metrics labels. Does not participate
+in the dedup decision.
+
+### `-egress-dedup-redis-addr` / `EGRESS_DEDUP_REDIS_ADDR`
+
+Redis address for the per-deployment egress TxID dedup. Empty falls back
+to a tier-1 in-process LRU only — useful for single-listener deployments
+or when Redis is unavailable.
+
+Final Redis key shape: `<EGRESS_DEDUP_PREFIX><DEPLOYMENT_ID>:<hex-txid>`.
+
+### `-egress-dedup-prefix` / `EGRESS_DEDUP_PREFIX` (default `bsl:egr:`)
+
+Key prefix for the egress dedup namespace. The current `-deployment-id` is
+appended to this prefix.
+
+### `-egress-dedup-ttl-redis` / `EGRESS_DEDUP_TTL_REDIS` (default `60s`)
+
+TTL for egress-dedup Redis entries. Must exceed the maximum propagation
+delay across HA siblings. Distinct from the legacy `-egress-dedup-ttl`
+(the local egress sliding-window dedup TTL for `(groupIdx, subtreeID, SeqNum)`).
+
+### `-egress-dedup-local-cap` / `EGRESS_DEDUP_LOCAL_CAP` (default `1048576`)
+
+Tier-1 local LRU capacity for the egress dedup gate. Set to 0 to disable
+the per-deployment dedup feature entirely.
+
+### `-ingress-set-redis-addr` / `INGRESS_SET_REDIS_ADDR`
+
+Optional Redis address for the courtesy SETNX into the local proxy's
+ingress namespace. Lets the local proxy know that a TxID is already on
+the multicast network even when the proxy itself never saw the upstream
+delivery (cross-site bridged TxIDs, side-channel ingress, etc.). Empty
+disables the courtesy mark; the egress dedup gate continues to function.
+
+### `-ingress-set-prefix` / `INGRESS_SET_PREFIX` (default `bsp:tx:`)
+
+Key prefix for the courtesy mark. **MUST** match the local proxy's
+`-txid-dedup-prefix` exactly; otherwise the proxy is unaware of marks.
+
+### `-ingress-set-ttl` / `INGRESS_SET_TTL` (default `10m`)
+
+TTL for ingress-set marks. SHOULD match the local proxy's
+`-txid-dedup-ttl` so cross-bridge dedup windows align.
+
+### `-ingress-set-local-cap` / `INGRESS_SET_LOCAL_CAP` (default `1048576`)
+
+Tier-1 LRU capacity for the ingress mark (avoids redundant async Redis
+writes for repeated TxIDs).
+
+### Deprecated TxID dedup flags
+
+The old `-txid-dedup-addr` / `-txid-dedup-prefix` / `-txid-dedup-ttl`
+remain accepted as aliases for the corresponding `-egress-dedup-*` flags
+and trigger a startup warning. They will be removed in a future release.
+A single-listener deployment that previously set these flags continues to
+work without changes (deployment-id defaults to hostname).
+
 ---
 
 ## Example: minimal
