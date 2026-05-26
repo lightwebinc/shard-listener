@@ -35,7 +35,7 @@ Multicast fabric (site-scoped FF05::/16)
        └── bitcoin-shard-listener
               ├──▶ unicast UDP/TCP → downstream consumers
               ├──▶ multicast egress (optional) → bridged domain
-              ├──▶ header egress (BRC-131 BlockAnnounce only, optional)
+              ├──▶ header egress BRC-135 (produced from BRC-131 BlockAnnounce, optional)
               └──▶ NACK gap tracking (shard flows + control-plane flows)
 ```
 
