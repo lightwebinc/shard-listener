@@ -38,6 +38,8 @@ FF05::<shard>:9001  ──multicast──►  shard-listener  ──UDP/TCP─�
 - **Semaphore-bounded dispatch** — concurrent NACK goroutines with configurable limit
 - **Egress UDP or TCP** with optional strip-header mode (payload-only)
 - **Multicast egress** — optional domain bridging; re-emits filtered frames onto a separate multicast address space with configurable scope, interface, port, and hop limit
+- **BRC-135 header egress** — optional; re-emits the 80-byte block header carried in BRC-131 BlockAnnounce frames as a 172-byte BRC-135 frame on a dedicated egress group (`0xFFFA`) for SPV-style consumers
+- **Per-deployment egress TxID dedup** — optional shared store (Redis SETNX) to suppress duplicate egress when multiple listeners cover the same shard subset; honours optional ingress courtesy marks from `shard-proxy`
 - **Prometheus + OTLP metrics**, `/healthz`, `/readyz`
 - **Graceful shutdown** with configurable drain window
 
