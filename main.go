@@ -14,20 +14,20 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-common/seqhash"
-	"github.com/lightwebinc/bitcoin-shard-common/shard"
+	"github.com/lightwebinc/shard-common/seqhash"
+	"github.com/lightwebinc/shard-common/shard"
 
-	"github.com/lightwebinc/bitcoin-shard-listener/config"
-	"github.com/lightwebinc/bitcoin-shard-listener/dedup"
-	"github.com/lightwebinc/bitcoin-shard-listener/discovery"
-	"github.com/lightwebinc/bitcoin-shard-listener/egress"
-	"github.com/lightwebinc/bitcoin-shard-listener/filter"
-	"github.com/lightwebinc/bitcoin-shard-listener/listener"
-	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
-	"github.com/lightwebinc/bitcoin-shard-listener/nack"
-	"github.com/lightwebinc/bitcoin-shard-listener/reassembly"
-	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
-	"github.com/lightwebinc/bitcoin-shard-listener/txdedup"
+	"github.com/lightwebinc/shard-listener/config"
+	"github.com/lightwebinc/shard-listener/dedup"
+	"github.com/lightwebinc/shard-listener/discovery"
+	"github.com/lightwebinc/shard-listener/egress"
+	"github.com/lightwebinc/shard-listener/filter"
+	"github.com/lightwebinc/shard-listener/listener"
+	"github.com/lightwebinc/shard-listener/metrics"
+	"github.com/lightwebinc/shard-listener/nack"
+	"github.com/lightwebinc/shard-listener/reassembly"
+	"github.com/lightwebinc/shard-listener/subtreegroup"
+	"github.com/lightwebinc/shard-listener/txdedup"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-module github.com/lightwebinc/bitcoin-shard-listener/ci
+module github.com/lightwebinc/shard-listener/ci
 
 go 1.25.0
 

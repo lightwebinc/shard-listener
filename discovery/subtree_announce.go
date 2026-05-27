@@ -10,10 +10,10 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/lightwebinc/bitcoin-shard-common/frame"
-	"github.com/lightwebinc/bitcoin-shard-listener/filter"
-	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
-	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
+	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-listener/filter"
+	"github.com/lightwebinc/shard-listener/metrics"
+	"github.com/lightwebinc/shard-listener/subtreegroup"
 )
 
 // SubtreeAnnounceListener joins the BRC-127 subtree announcement multicast

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-listener/nack"
+	"github.com/lightwebinc/shard-listener/nack"
 )
 
 const (

@@ -28,7 +28,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/lightwebinc/bitcoin-shard-common/frame"
+	"github.com/lightwebinc/shard-common/frame"
 )
 
 const mcSendBuf = 16 * 1024 * 1024 // 16 MiB; kernel silently caps at wmem_max

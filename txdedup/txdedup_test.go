@@ -6,7 +6,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 
-	"github.com/lightwebinc/bitcoin-shard-listener/txdedup"
+	"github.com/lightwebinc/shard-listener/txdedup"
 )
 
 func newStore(t *testing.T, mr *miniredis.Miniredis) *txdedup.Store {

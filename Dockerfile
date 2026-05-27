@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Canonical multi-stage Dockerfile for bitcoin-shard-listener.
+# Canonical multi-stage Dockerfile for shard-listener.
 # Final image: distroless/static:nonroot.
 
 FROM golang:1.25-alpine AS builder
@@ -19,10 +19,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -buildvcs=false \
-      -ldflags "-s -w -X github.com/lightwebinc/bitcoin-shard-listener/metrics.Version=${VERSION}" \
-      -o /out/bitcoin-shard-listener .
+      -ldflags "-s -w -X github.com/lightwebinc/shard-listener/metrics.Version=${VERSION}" \
+      -o /out/shard-listener .
 
 FROM gcr.io/distroless/static:nonroot
 USER nonroot:nonroot
-COPY --from=builder /out/bitcoin-shard-listener /usr/local/bin/bitcoin-shard-listener
-ENTRYPOINT ["/usr/local/bin/bitcoin-shard-listener"]
+COPY --from=builder /out/shard-listener /usr/local/bin/shard-listener
+ENTRYPOINT ["/usr/local/bin/shard-listener"]

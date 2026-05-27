@@ -16,20 +16,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          path: bitcoin-shard-listener
+          path: shard-listener
 
       - uses: actions/checkout@v6
         with:
-          repository: lightwebinc/bitcoin-shard-common
-          path: bitcoin-shard-common
+          repository: lightwebinc/shard-common
+          path: shard-common
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: bitcoin-shard-listener/go.mod
+          go-version-file: shard-listener/go.mod
           cache: false
 
       - name: Run Dagger pipeline
-        working-directory: bitcoin-shard-listener
+        working-directory: shard-listener
         env:
           GOWORK: "off"
         run: make ci
@@ -40,12 +40,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          path: bitcoin-shard-listener
+          path: shard-listener
 
       - uses: actions/checkout@v6
         with:
-          repository: lightwebinc/bitcoin-shard-common
-          path: bitcoin-shard-common
+          repository: lightwebinc/shard-common
+          path: shard-common
 
       - uses: actions/checkout@v6
         with:
@@ -54,15 +54,15 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: bitcoin-shard-listener/go.mod
+          go-version-file: shard-listener/go.mod
 
-      - name: Use local bitcoin-shard-common (listener)
-        working-directory: bitcoin-shard-listener
-        run: go mod edit -replace github.com/lightwebinc/bitcoin-shard-common=../bitcoin-shard-common
+      - name: Use local shard-common (listener)
+        working-directory: shard-listener
+        run: go mod edit -replace github.com/lightwebinc/shard-common=../shard-common
 
-      - name: Use local bitcoin-shard-common (proxy)
+      - name: Use local shard-common (proxy)
         working-directory: bitcoin-shard-proxy
-        run: go mod edit -replace github.com/lightwebinc/bitcoin-shard-common=../bitcoin-shard-common
+        run: go mod edit -replace github.com/lightwebinc/shard-common=../shard-common
 
       - name: Install curl
         run: sudo apt-get install -y --no-install-recommends curl
@@ -73,5 +73,5 @@ jobs:
           sudo ip -6 route add ff00::/8 dev lo table local 2>/dev/null || true
 
       - name: E2E test
-        working-directory: bitcoin-shard-listener
+        working-directory: shard-listener
         run: make test-e2e

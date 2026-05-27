@@ -36,7 +36,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-common/txidset"
+	"github.com/lightwebinc/shard-common/txidset"
 )
 
 // Recorder is the metrics-callback interface implemented by the listener's

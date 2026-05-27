@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/lightwebinc/bitcoin-shard-listener/filter"
+	"github.com/lightwebinc/shard-listener/filter"
 )
 
 func mustCIDR(t *testing.T, s string) *net.IPNet {

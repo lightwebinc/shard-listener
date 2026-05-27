@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-common/frame"
-	"github.com/lightwebinc/bitcoin-shard-listener/filter"
-	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
+	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-listener/filter"
+	"github.com/lightwebinc/shard-listener/subtreegroup"
 )
 
 func makeFrame(subtree [32]byte) *frame.Frame {

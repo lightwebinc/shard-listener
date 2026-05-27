@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-common/frame"
+	"github.com/lightwebinc/shard-common/frame"
 )
 
 // buildFragFrame constructs a *frame.FragFrame from raw components.

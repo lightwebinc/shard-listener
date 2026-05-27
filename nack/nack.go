@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-listener/discovery"
-	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
+	"github.com/lightwebinc/shard-listener/discovery"
+	"github.com/lightwebinc/shard-listener/metrics"
 )
 
 // TrackerConfig holds tuning parameters for the gap tracker.

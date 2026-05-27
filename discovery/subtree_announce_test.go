@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/lightwebinc/bitcoin-shard-listener/subtreegroup"
+	"github.com/lightwebinc/shard-listener/subtreegroup"
 )
 
 func TestSockaddrToUDP_IPv6(t *testing.T) {

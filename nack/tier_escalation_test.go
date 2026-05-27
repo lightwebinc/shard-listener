@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-listener/discovery"
-	"github.com/lightwebinc/bitcoin-shard-listener/nack"
+	"github.com/lightwebinc/shard-listener/discovery"
+	"github.com/lightwebinc/shard-listener/nack"
 )
 
 // mockEndpoint is a small UDP server that replies to every NACK with a fixed

@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-listener/metrics"
+	"github.com/lightwebinc/shard-listener/metrics"
 )
 
 // BeaconListener joins the beacon multicast groups and upserts received

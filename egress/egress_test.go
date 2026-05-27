@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lightwebinc/bitcoin-shard-common/frame"
+	"github.com/lightwebinc/shard-common/frame"
 )
 
 func newUDPSink(t *testing.T) (string, *net.UDPConn, func()) {

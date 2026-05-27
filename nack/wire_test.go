@@ -3,7 +3,7 @@ package nack_test
 import (
 	"testing"
 
-	"github.com/lightwebinc/bitcoin-shard-listener/nack"
+	"github.com/lightwebinc/shard-listener/nack"
 )
 
 func TestNACKSize(t *testing.T) {
