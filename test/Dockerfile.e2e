@@ -3,22 +3,22 @@ FROM golang:1.25 AS builder
 WORKDIR /workspace
 
 # Both repos are required side-by-side so the listener's replace directive
-# (replace github.com/lightwebinc/bitcoin-shard-proxy => ../bitcoin-shard-proxy)
+# (replace github.com/lightwebinc/shard-proxy => ../shard-proxy)
 # resolves correctly.  The build context must be set to the parent directory
-# that contains both bitcoin-shard-proxy/ and bitcoin-shard-listener/.
-COPY bitcoin-shard-proxy/ bitcoin-shard-proxy/
-COPY bitcoin-shard-listener/ bitcoin-shard-listener/
+# that contains both shard-proxy/ and shard-listener/.
+COPY shard-proxy/ shard-proxy/
+COPY shard-listener/ shard-listener/
 
 # Build proxy binary and send-test-frames from the proxy repo.
-WORKDIR /workspace/bitcoin-shard-proxy
+WORKDIR /workspace/shard-proxy
 RUN go mod download && \
-    CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /bitcoin-shard-proxy . && \
+    CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /shard-proxy . && \
     CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /send-test-frames ./cmd/send-test-frames/
 
 # Build listener binary and sink-test-frames from the listener repo.
-WORKDIR /workspace/bitcoin-shard-listener
+WORKDIR /workspace/shard-listener
 RUN go mod download && \
-    CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /bitcoin-shard-listener . && \
+    CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /shard-listener . && \
     CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /sink-test-frames ./cmd/sink-test-frames/
 
 FROM ubuntu:24.04
@@ -29,12 +29,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /bitcoin-shard-proxy    /usr/local/bin/bitcoin-shard-proxy
+COPY --from=builder /shard-proxy    /usr/local/bin/shard-proxy
 COPY --from=builder /send-test-frames       /usr/local/bin/send-test-frames
-COPY --from=builder /bitcoin-shard-listener /usr/local/bin/bitcoin-shard-listener
+COPY --from=builder /shard-listener /usr/local/bin/shard-listener
 COPY --from=builder /sink-test-frames       /usr/local/bin/sink-test-frames
 
-COPY bitcoin-shard-listener/test/run-e2e.sh /run-e2e.sh
+COPY shard-listener/test/run-e2e.sh /run-e2e.sh
 RUN chmod +x /run-e2e.sh
 
 ENTRYPOINT ["/run-e2e.sh"]

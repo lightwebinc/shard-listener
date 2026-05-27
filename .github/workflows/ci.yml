@@ -49,8 +49,8 @@ jobs:
 
       - uses: actions/checkout@v6
         with:
-          repository: lightwebinc/bitcoin-shard-proxy
-          path: bitcoin-shard-proxy
+          repository: lightwebinc/shard-proxy
+          path: shard-proxy
 
       - uses: actions/setup-go@v6
         with:
@@ -61,7 +61,7 @@ jobs:
         run: go mod edit -replace github.com/lightwebinc/shard-common=../shard-common
 
       - name: Use local shard-common (proxy)
-        working-directory: bitcoin-shard-proxy
+        working-directory: shard-proxy
         run: go mod edit -replace github.com/lightwebinc/shard-common=../shard-common
 
       - name: Install curl

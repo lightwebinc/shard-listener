@@ -1,4 +1,4 @@
-# bitcoin-shard-listener — Configuration Reference
+# shard-listener — Configuration Reference
 
 All parameters are accepted as CLI flags. Environment variables serve as
 fallbacks; hard-coded defaults apply when neither is present.
@@ -140,7 +140,7 @@ re-emitted frames to the directly attached network. Increase for routed
 multicast delivery (requires PIM or similar on intermediate routers).
 
 > **Firewall:** the egress interface OUTPUT chain must accept
-> `ip6 daddr ff00::/8 udp dport <mc-egress-port>`. The `bitcoin-listener`
+> `ip6 daddr ff00::/8 udp dport <mc-egress-port>`. The `listener-infra`
 > Ansible role nft template should be extended with this rule when mc egress
 > is in use.
 
@@ -313,7 +313,7 @@ retransmit on another listener still finds the original claim.
 ### `-beacon-enabled` / `BEACON_ENABLED` (default: `true`)
 
 When true, join the beacon multicast group and dynamically discover retry
-endpoints from ADVERT datagrams broadcast by `bitcoin-retry-endpoint` instances.
+endpoints from ADVERT datagrams broadcast by `retry-endpoint` instances.
 Discovered endpoints are merged into the NACK dispatch registry alongside any
 static seeds from `-retry-endpoints`.
 
@@ -340,7 +340,7 @@ used by the retry endpoints.
 
 > **Firewall:** the listener's nftables input chain must accept UDP traffic on
 > `beacon-port` from the beacon multicast prefix (`ff00::/8`) on the fabric
-> interface. The `bitcoin-listener` Ansible role already includes this rule.
+> interface. The `listener-infra` Ansible role already includes this rule.
 
 ---
 
@@ -564,7 +564,7 @@ work without changes (deployment-id defaults to hostname).
 ## Example: minimal
 
 ```
-bitcoin-shard-listener \
+shard-listener \
   -iface eth0 \
   -shard-bits 2 \
   -egress-addr 127.0.0.1:9100
@@ -573,7 +573,7 @@ bitcoin-shard-listener \
 ## Example: shard filter + NACK with beacon discovery
 
 ```
-bitcoin-shard-listener \
+shard-listener \
   -iface eth0 \
   -shard-bits 8 \
   -shard-include 0,1,2,3 \
@@ -591,4 +591,4 @@ bitcoin-shard-listener \
 
 Every flag documented in this file is exposed under `.config` in the corresponding Helm chart's `values.yaml`. See the chart repository for installation snippets and the `values.schema.json` for validation rules.
 
-Chart: [`lightwebinc/bitcoin-shard-listener-helm`](https://github.com/lightwebinc/bitcoin-shard-listener-helm) — supports `workloadType=Deployment | DaemonSet`; hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication.
+Chart: [`lightwebinc/shard-listener-helm`](https://github.com/lightwebinc/shard-listener-helm) — supports `workloadType=Deployment | DaemonSet`; hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication.

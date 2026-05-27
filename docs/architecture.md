@@ -1,8 +1,8 @@
-# bitcoin-shard-listener — Architecture
+# shard-listener — Architecture
 
 ## Overview
 
-`bitcoin-shard-listener` sits downstream of `bitcoin-shard-proxy` in the BSV
+`shard-listener` sits downstream of `shard-proxy` in the BSV
 transaction distribution pipeline. The proxy multicasts BRC-124/BRC-128 transaction frames
 and BRC-131/BRC-132/BRC-134 control-plane frames onto an IPv6 multicast fabric; the listener joins
 the relevant groups, filters transaction frames by shard index and/or subtree ID, forwards
@@ -12,13 +12,13 @@ via multicast egress (domain bridging), and performs NORM-inspired NACK-based ga
 Foundational concepts (shard hierarchy, anycast ingress, frame versions) live in
 [multicast-skills/architecture.md](../../../multicast-skills/architecture.md) and
 [multicast-skills/protocol.md](../../../multicast-skills/protocol.md); BRC-specific wire formats
-in [bitcoin-multicast/docs/](../../../bitcoin-multicast/docs/).
+in [bsv-multicast/docs/](../../../bsv-multicast/docs/).
 
 ```
 BSV senders
    │ (TCP or UDP ingress)
    ▼
-bitcoin-shard-proxy
+shard-proxy
    │ BRC-124/BRC-128 frames → FF05::B:<shard>      (data plane)
    │ BRC-131/BRC-134 frames → FF0E::B:FFFE          (CtrlGroupControl, always global)
    │ BRC-132 frames         → FF05::B:FFFB          (CtrlGroupSubtreeAnnounce)
@@ -32,7 +32,7 @@ Multicast fabric (site-scoped FF05::/16)
    ├── FF05::B:FFFC      BRC-127 subtree group announcements (when -subtree-groups set)
    └── FF05::B:FFFD      BRC-126 ADVERT beacon
        │
-       └── bitcoin-shard-listener
+       └── shard-listener
               ├──▶ unicast UDP/TCP → downstream consumers
               ├──▶ multicast egress (optional) → bridged domain
               ├──▶ header egress BRC-135 (produced from BRC-131 BlockAnnounce, optional)
@@ -70,7 +70,7 @@ allowing multiple worker sockets to be tested in isolation.
 ## BRC-124/BRC-128 frame format (92 bytes)
 
 All multi-byte integers are big-endian. Layout is defined in
-`bitcoin-shard-common/frame/frame.go`.
+`shard-common/frame/frame.go`.
 
 ```text
 Offset  Size  Align  Field          Value / notes
@@ -259,7 +259,7 @@ before forwarding.
 
 The virtual `0xFFF9` is not a real multicast address — it matches the proxy's HashKey
 derivation for anchor frames to keep flow identity consistent end to end. See
-[bitcoin-multicast/docs/brc-134-anchor-transactions.md](../../../bitcoin-multicast/docs/brc-134-anchor-transactions.md).
+[bsv-multicast/docs/brc-134-anchor-transactions.md](../../../bsv-multicast/docs/brc-134-anchor-transactions.md).
 
 ## Fragment Reassembly Callbacks
 

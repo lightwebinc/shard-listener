@@ -28,7 +28,7 @@ import (
 )
 
 // ServiceName is the OTel service.name resource attribute value.
-const ServiceName = "bitcoin-shard-listener"
+const ServiceName = "shard-listener"
 
 // Version is set at build time via -ldflags "-X metrics.Version=<ver>".
 var Version = "dev"

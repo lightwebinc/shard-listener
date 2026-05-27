@@ -1,5 +1,5 @@
 // Package listener implements the multicast receive workers for
-// bitcoin-shard-listener.
+// shard-listener.
 //
 // # Worker model
 //

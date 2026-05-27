@@ -1,4 +1,4 @@
-// bitcoin-shard-listener receives IPv6 multicast BSV transaction frames,
+// shard-listener receives IPv6 multicast BSV transaction frames,
 // filters by shard and/or subtree, forwards matching frames to a configurable
 // downstream unicast host:port over UDP or TCP, and performs NACK-based gap recovery for BRC-124/BRC-128 frames.
 package main
@@ -49,7 +49,7 @@ func run() error {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 
-	slog.Info("bitcoin-shard-listener starting",
+	slog.Info("shard-listener starting",
 		"shard_bits", cfg.ShardBits,
 		"num_groups", cfg.NumGroups,
 		"scope", cfg.MCScope,

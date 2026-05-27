@@ -1,5 +1,5 @@
 // Package discovery implements ADVERT beacon decoding and retry endpoint
-// registry management for bitcoin-shard-listener (BRC-126).
+// registry management for shard-listener (BRC-126).
 package discovery
 
 import (

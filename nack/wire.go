@@ -1,5 +1,5 @@
 // Package nack implements NORM-inspired multicast gap recovery for
-// bitcoin-shard-listener. This file defines the 64-byte NACK request wire
+// shard-listener. This file defines the 64-byte NACK request wire
 // format and the 16-byte ACK/MISS response wire format.
 //
 // # NACK datagram (UDP, 64 bytes, 8-byte aligned)

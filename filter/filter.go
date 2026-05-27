@@ -1,5 +1,5 @@
 // Package filter implements allocation-free shard and subtree filtering for
-// bitcoin-shard-listener. All logic is pure; no I/O is performed.
+// shard-listener. All logic is pure; no I/O is performed.
 //
 // A frame passes the filter if and only if:
 //  1. Its group index is in the shard-include set (or the set is empty = all).

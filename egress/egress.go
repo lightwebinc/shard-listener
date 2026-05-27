@@ -1,5 +1,5 @@
 // Package egress implements the unicast forwarding sink for
-// bitcoin-shard-listener. Frames filtered from the multicast fabric are
+// shard-listener. Frames filtered from the multicast fabric are
 // delivered to a single downstream host:port over UDP or TCP.
 //
 // # UDP sender

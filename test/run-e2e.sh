@@ -26,7 +26,7 @@ FAILED=0
 echo ""
 echo "--- Test 1: basic delivery (expect $NUM_GROUPS frames) ---"
 
-bitcoin-shard-listener \
+shard-listener \
     -iface lo -scope link -shard-bits "$SHARD_BITS" \
     -listen-port 9001 \
     -egress-addr "127.0.0.1:9102" -egress-proto udp \
@@ -66,7 +66,7 @@ fi
 echo ""
 echo "--- Test 2: shard filter (shard-include=0, expect 1 frame) ---"
 
-bitcoin-shard-listener \
+shard-listener \
     -iface lo -scope link -shard-bits "$SHARD_BITS" \
     -listen-port 9002 \
     -shard-include 0 \
@@ -102,7 +102,7 @@ fi
 echo ""
 echo "--- Test 3: strip-header (expect $NUM_GROUPS raw datagrams) ---"
 
-bitcoin-shard-listener \
+shard-listener \
     -iface lo -scope link -shard-bits "$SHARD_BITS" \
     -listen-port 9003 \
     -strip-header \
@@ -138,7 +138,7 @@ fi
 echo ""
 echo "--- Test 4: BRC-130 fragmentation (expect $NUM_GROUPS reassembled frames) ---"
 
-bitcoin-shard-listener \
+shard-listener \
     -iface lo -scope link -shard-bits "$SHARD_BITS" \
     -listen-port 9004 \
     -egress-addr "127.0.0.1:9105" -egress-proto udp \

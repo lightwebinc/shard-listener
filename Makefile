@@ -1,14 +1,14 @@
-BINARY    := bitcoin-shard-listener
+BINARY    := shard-listener
 SINK      := sink-test-frames
 VERSION   ?= $(shell git describe --tags --dirty 2>/dev/null || echo "dev")
 TAG       ?= $(VERSION)
 IMAGE     ?= ghcr.io/lightwebinc/$(BINARY)
-COMMON    ?= ../bitcoin-shard-common
-LDFLAGS   := -buildvcs=false -ldflags "-X github.com/lightwebinc/bitcoin-shard-listener/metrics.Version=$(VERSION)"
+COMMON    ?= ../shard-common
+LDFLAGS   := -buildvcs=false -ldflags "-X github.com/lightwebinc/shard-listener/metrics.Version=$(VERSION)"
 BUILD_DIR := build
 
-PROXY_DIR := ../bitcoin-shard-proxy
-PROXY_BIN := $(PROXY_DIR)/bitcoin-shard-proxy
+PROXY_DIR := ../shard-proxy
+PROXY_BIN := $(PROXY_DIR)/shard-proxy
 SEND_BIN  := $(PROXY_DIR)/send-test-frames
 
 DAGGER_RUN := GOWORK=off go run .
@@ -32,7 +32,7 @@ $(SINK): FORCE
 	go build -buildvcs=false -o $(SINK) ./cmd/sink-test-frames/
 
 $(PROXY_BIN): FORCE
-	$(MAKE) -C $(PROXY_DIR) bitcoin-shard-proxy
+	$(MAKE) -C $(PROXY_DIR) shard-proxy
 
 $(SEND_BIN): FORCE
 	(cd $(PROXY_DIR) && go build -buildvcs=false -o send-test-frames ./cmd/send-test-frames/)

@@ -1,5 +1,5 @@
 // Command sink-test-frames listens on a UDP port and counts incoming BSV
-// transaction frames delivered by bitcoin-shard-listener. When -count frames
+// transaction frames delivered by shard-listener. When -count frames
 // have been received it exits 0. If -timeout expires first it exits 1.
 //
 // Use -raw to count raw UDP datagrams without frame decoding; pass this flag

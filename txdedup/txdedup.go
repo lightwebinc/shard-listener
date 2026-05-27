@@ -1,5 +1,5 @@
 // Package txdedup provides per-deployment Redis-backed TxID egress dedup
-// for bitcoin-shard-listener, plus optional courtesy marking of the proxy's
+// for shard-listener, plus optional courtesy marking of the proxy's
 // ingress namespace ("network seen" set).
 //
 // # Two Redis namespaces, one Store per role
@@ -15,7 +15,7 @@
 //     race; only one forwards. Listeners in different deployments race
 //     independently, so each deployment forwards at most once.
 //
-// Both Stores are *txidset.Store from bitcoin-shard-common. This package
+// Both Stores are *txidset.Store from shard-common. This package
 // composes them with deployment-id key shaping and exposes a single Store
 // type that the listener worker interacts with.
 //
