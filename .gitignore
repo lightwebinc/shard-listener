@@ -32,6 +32,6 @@ go.work.sum
 # .vscode/
 
 # Artifacts
-/bitcoin-shard-listener
+/shard-listener
 /sink-test-frames
 /build/
