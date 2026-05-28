@@ -61,7 +61,7 @@ type Worker struct {
 	mcastEgr          *egress.MCastSender // nil when multicast egress is disabled
 	headerEgr         *egress.Sender      // nil when unicast header egress is disabled
 	headerMCastEgr    *egress.MCastSender // nil when multicast header egress is disabled
-	headerHashKey     uint64              // BRC-135 emitter HashKey (XXH64(emitterIPv6 ∥ 0xFFFE ∥ zeros))
+	headerHashKey     uint64              // BRC-135 emitter HashKey (XXH64(emitterIPv6 ∥ 0xFFFA ∥ zeros))
 	headerSeqNum      atomic.Uint64       // BRC-135 monotonic per-emitter counter (starts at 1)
 	tracker           *nack.Tracker
 	rec               *metrics.Recorder
@@ -142,10 +142,10 @@ func (w *Worker) SetHeaderMCastEgress(s *egress.MCastSender) { w.headerMCastEgr 
 
 // SetHeaderEmitterIdentity sets the BRC-135 emitter HashKey for block
 // header egress. HashKey is the stable per-emitter flow identifier
-// computed once as XXH64(emitterIPv6 ∥ 0xFFFE ∥ zeros[32]) using the
-// listener's own egress IPv6 address. It is stamped into every BRC-135
-// frame emitted by this worker. The companion SeqNum counter is reset
-// to start at 1 on the next emission.
+// computed once as XXH64(emitterIPv6 ∥ 0xFFFA ∥ zeros[32]) — the
+// CtrlGroupBlockHeader index matches the actual BRC-135 egress group.
+// It is stamped into every BRC-135 frame emitted by this worker. The
+// companion SeqNum counter is reset to start at 1 on the next emission.
 func (w *Worker) SetHeaderEmitterIdentity(hashKey uint64) {
 	w.headerHashKey = hashKey
 	w.headerSeqNum.Store(0)

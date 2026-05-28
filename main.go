@@ -309,11 +309,12 @@ func run() error {
 		}
 		// BRC-135 emitter identity: stable per-emitter HashKey computed once
 		// using the listener's primary IPv6 on the configured interface,
-		// the CtrlGroupControl index, and a zero SubtreeID. The same value
-		// is reused for every block header frame this emitter produces.
+		// the CtrlGroupBlockHeader index (matches the actual egress group
+		// for BRC-135 frames), and a zero SubtreeID. The same value is
+		// reused for every block header frame this emitter produces.
 		if headerEgr != nil || headerMCastEgr != nil {
 			if emitterIP, ok := primaryIPv6(cfg.Iface); ok {
-				w.SetHeaderEmitterIdentity(seqhash.Hash(emitterIP, uint32(shard.CtrlGroupControl), [32]byte{}))
+				w.SetHeaderEmitterIdentity(seqhash.Hash(emitterIP, uint32(shard.CtrlGroupBlockHeader), [32]byte{}))
 			}
 		}
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
