@@ -20,9 +20,9 @@ BSV senders
    ▼
 shard-proxy
    │ BRC-124/BRC-128 frames → FF05::B:<shard>      (data plane)
-   │ BRC-131/BRC-134 frames → FF0E::B:FFFE          (CtrlGroupControl, always global)
-   │ BRC-132 frames         → FF05::B:FFFB          (CtrlGroupSubtreeAnnounce)
-   │ BRC-127 datagrams      → FF05::B:FFFC          (CtrlGroupSubtreeGroupAnnounce)
+   │ BRC-131/BRC-134 frames → FF0E::B:FFFE          (GroupBlockBroadcast, always global)
+   │ BRC-132 frames         → FF05::B:FFFB          (GroupSubtreeAnnounce)
+   │ BRC-127 datagrams      → FF05::B:FFFC          (GroupSubtreeGroupAnnounce)
    ▼
 Multicast fabric (site-scoped FF05::/16)
    │
@@ -44,8 +44,8 @@ Multicast fabric (site-scoped FF05::/16)
 Each worker:
 1. Opens a UDP socket with `SO_REUSEPORT` on the configured listen port.
 2. Joins all configured multicast groups on the configured interface (shard groups +
-   `CtrlGroupControl` always; `CtrlGroupSubtreeAnnounce` when `-subtree-data-enabled`;
-   `CtrlGroupSubtreeGroupAnnounce` when `-subtree-groups` is set).
+   `GroupBlockBroadcast` always; `GroupSubtreeAnnounce` when `-subtree-data-enabled`;
+   `GroupSubtreeGroupAnnounce` when `-subtree-groups` is set).
 3. Dispatches each received datagram via `processFrame`, which branches on the frame
    version byte before decode:
    - `FrameVerV4` (0x04) → `processBlockFrame` (BRC-131)
@@ -178,26 +178,26 @@ for BRC-12 frames because `SeqNum` is zero.
 
 | Constant | Index | Canonical Address (group-id `0x000B`) | Purpose |
 |---|---|---|---|
-| `CtrlGroupBlockHeader` | 0xFFFA | egress-scope `FF0X::<egress-gid>:FFFA` | Block header egress channel (BRC-135) |
-| `CtrlGroupSubtreeAnnounce` | 0xFFFB | FF05::B:FFFB (data-plane scope) | BRC-132 subtree data frames |
-| `CtrlGroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC (data-plane scope) | BRC-127 subtree group announcements |
-| `CtrlGroupBeacon` | 0xFFFD | FF05::B:FFFD (site) / FF0E::B:FFFD (global) | ADVERT beacon (BRC-126 discovery) |
-| `CtrlGroupControl` | 0xFFFE | **FF0E::B:FFFE (always global)** | BRC-131 block control + BRC-134 anchor frames |
+| `GroupBlockHeader` | 0xFFFA | egress-scope `FF0X::<egress-gid>:FFFA` | Block header egress channel (BRC-135) |
+| `GroupSubtreeAnnounce` | 0xFFFB | FF05::B:FFFB (data-plane scope) | BRC-132 subtree data frames |
+| `GroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC (data-plane scope) | BRC-127 subtree group announcements |
+| `GroupBeacon` | 0xFFFD | FF05::B:FFFD (site) / FF0E::B:FFFD (global) | ADVERT beacon (BRC-126 discovery) |
+| `GroupBlockBroadcast` | 0xFFFE | **FF0E::B:FFFE (always global)** | BRC-131 block control + BRC-134 anchor frames |
 | _(virtual)_ | 0xFFF9 | — | BRC-134 anchor flow identity for gap tracking |
 
-The listener always joins `CtrlGroupControl` and `CtrlGroupBeacon`. It joins
-`CtrlGroupSubtreeAnnounce` only when `-subtree-data-enabled=true`, and
-`CtrlGroupSubtreeGroupAnnounce` when `-subtree-groups` is configured.
+The listener always joins `GroupBlockBroadcast` and `GroupBeacon`. It joins
+`GroupSubtreeAnnounce` only when `-subtree-data-enabled=true`, and
+`GroupSubtreeGroupAnnounce` when `-subtree-groups` is configured.
 
 ## BRC-131 Block Control Frame Processing
 
-`CtrlGroupControl` (0xFFFE) is joined at startup unconditionally. BRC-131 frames
+`GroupBlockBroadcast` (0xFFFE) is joined at startup unconditionally. BRC-131 frames
 received on this group are dispatched to `processBlockFrame`:
 
 1. Calls `frame.DecodeBlock` to validate and extract block fields.
 2. Bypasses the shard/subtree filter (block frames carry no TxID; filtering would be meaningless).
 3. Forwards the raw frame via `egress.Sender.SendBlock` to the configured downstream.
-4. Calls `nack.Tracker.Observe(uint32(CtrlGroupControl), zeroSubtreeID, bf.HashKey, bf.SeqNum, bf.ContentID)`
+4. Calls `nack.Tracker.Observe(uint32(GroupBlockBroadcast), zeroSubtreeID, bf.HashKey, bf.SeqNum, bf.ContentID)`
    for gap tracking on the block control flow.
 
 **Block header egress (BRC-135):** when `-header-egress-enabled=true`, `processBlockFrame`
@@ -220,7 +220,7 @@ flow; if multiple listeners emit headers for the same block, each appears as an
 independent flow (matching the "redundant emitters" recovery model in BRC-135 §6).
 
 When `-header-mc-egress-enabled=true`, the BRC-135 frame is also re-emitted to
-`CtrlGroupBlockHeader` (0xFFFA), allowing SPV consumers to join only that group.
+`GroupBlockHeader` (0xFFFA), allowing SPV consumers to join only that group.
 
 **Reassembly:** fragmented BRC-131 payloads arrive as BRC-130 fragments with `OrigFrameVer=0x04`.
 The reassembly buffer's `BlockCallback` is called when all fragments arrive; the completed payload
@@ -229,13 +229,13 @@ is delivered via `DeliverReassembledBlock`, which re-encodes it as a valid wire 
 
 ## BRC-132 Subtree Data Frame Processing
 
-`CtrlGroupSubtreeAnnounce` (0xFFFB) is joined only when `-subtree-data-enabled=true`.
+`GroupSubtreeAnnounce` (0xFFFB) is joined only when `-subtree-data-enabled=true`.
 BRC-132 frames on this group are dispatched to `processSubtreeDataFrame`:
 
 1. Calls `frame.DecodeSubtreeData` to validate and extract subtree fields.
 2. Bypasses the shard/subtree filter.
 3. Forwards the raw frame via `egress.Sender.SendSubtreeData` to the configured downstream.
-4. Calls `nack.Tracker.Observe(uint32(CtrlGroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)`
+4. Calls `nack.Tracker.Observe(uint32(GroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)`
    for gap tracking. Each distinct `SubtreeID` is sequenced independently.
 
 The listener forwards the raw payload without parsing. `MsgType` `0x01` = hashes-only
@@ -249,7 +249,7 @@ before forwarding.
 
 ## BRC-134 Anchor Transaction Frame Processing
 
-`FrameVerV6` (0x06) anchor frames arrive on `CtrlGroupControl` (0xFFFE). The processor:
+`FrameVerV6` (0x06) anchor frames arrive on `GroupBlockBroadcast` (0xFFFE). The processor:
 
 1. Calls `frame.IsAnchorFrame` to detect, then `frame.DecodeAnchor` to validate.
 2. Bypasses the shard/subtree filter (anchors carry no shard semantics).

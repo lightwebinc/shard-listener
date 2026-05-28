@@ -136,14 +136,14 @@ func New(
 func (w *Worker) SetHeaderEgress(s *egress.Sender) { w.headerEgr = s }
 
 // SetHeaderMCastEgress attaches a multicast sender for BRC-135 block
-// header retransmission to the CtrlGroupBlockHeader (0xFFFA) multicast
+// header retransmission to the GroupBlockHeader (0xFFFA) multicast
 // group. nil disables.
 func (w *Worker) SetHeaderMCastEgress(s *egress.MCastSender) { w.headerMCastEgr = s }
 
 // SetHeaderEmitterIdentity sets the BRC-135 emitter HashKey for block
 // header egress. HashKey is the stable per-emitter flow identifier
 // computed once as XXH64(emitterIPv6 ∥ 0xFFFA ∥ zeros[32]) — the
-// CtrlGroupBlockHeader index matches the actual BRC-135 egress group.
+// GroupBlockHeader index matches the actual BRC-135 egress group.
 // It is stamped into every BRC-135 frame emitted by this worker. The
 // companion SeqNum counter is reset to start at 1 on the next emission.
 func (w *Worker) SetHeaderEmitterIdentity(hashKey uint64) {
@@ -470,7 +470,7 @@ func (w *Worker) processBlockFrame(raw []byte) {
 	// Gap tracking on the control flow uses a zero SubtreeID.
 	if w.tracker != nil && bf.SeqNum != 0 {
 		var zeroSub [32]byte
-		w.tracker.Observe(uint32(shard.CtrlGroupControl), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID)
+		w.tracker.Observe(uint32(shard.GroupBlockBroadcast), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID)
 	}
 
 	if w.debug {
@@ -521,7 +521,7 @@ func (w *Worker) emitBlockHeader(bf *frame.BlockFrame) {
 
 	// Multicast header egress.
 	if w.headerMCastEgr != nil {
-		if err := w.headerMCastEgr.SendToGroup(buf, shard.CtrlGroupBlockHeader); err != nil {
+		if err := w.headerMCastEgr.SendToGroup(buf, uint16(shard.GroupBlockHeader)); err != nil {
 			if w.rec != nil {
 				w.rec.HeaderEgressError(w.id)
 			}
@@ -564,7 +564,7 @@ func (w *Worker) processSubtreeDataFrame(raw []byte) {
 
 	// Gap tracking on the subtree data flow uses SubtreeID as the flow scope.
 	if w.tracker != nil && sf.SeqNum != 0 {
-		w.tracker.Observe(uint32(shard.CtrlGroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
+		w.tracker.Observe(uint32(shard.GroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
 	}
 
 	if w.debug {
@@ -692,7 +692,7 @@ func (w *Worker) DeliverReassembledBlock(payload []byte, bf *frame.BlockFrame) {
 
 	if w.tracker != nil && bf.SeqNum != 0 {
 		var zeroSub [32]byte
-		w.tracker.Observe(uint32(shard.CtrlGroupControl), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID)
+		w.tracker.Observe(uint32(shard.GroupBlockBroadcast), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID)
 	}
 
 	if w.debug {
@@ -737,7 +737,7 @@ func (w *Worker) DeliverReassembledSubtreeData(payload []byte, sf *frame.Subtree
 	}
 
 	if w.tracker != nil && sf.SeqNum != 0 {
-		w.tracker.Observe(uint32(shard.CtrlGroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
+		w.tracker.Observe(uint32(shard.GroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
 	}
 
 	if w.debug {

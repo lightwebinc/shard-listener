@@ -152,7 +152,7 @@ func run() error {
 		var announceGroups []*net.UDPAddr
 		for _, scopeName := range cfg.AnnounceScopes {
 			scopePrefix := config.Scopes[scopeName]
-			annIP := shard.ControlGroupAddr(scopePrefix, cfg.MCGroupID, shard.CtrlGroupSubtreeGroupAnnounce)
+			annIP := shard.GroupAddr(scopePrefix, cfg.MCGroupID, shard.GroupSubtreeGroupAnnounce)
 			announceGroups = append(announceGroups, &net.UDPAddr{IP: annIP, Port: cfg.ListenPort})
 		}
 		sal := &discovery.SubtreeAnnounceListener{
@@ -184,7 +184,7 @@ func run() error {
 		if !ok {
 			beaconScopePrefix = 0xFF05
 		}
-		beaconIP := shard.ControlGroupAddr(beaconScopePrefix, cfg.MCGroupID, shard.CtrlGroupBeacon)
+		beaconIP := shard.GroupAddr(beaconScopePrefix, cfg.MCGroupID, shard.GroupBeacon)
 		beaconGrp := &net.UDPAddr{IP: beaconIP, Port: cfg.BeaconPort}
 		bl := &discovery.BeaconListener{
 			Registry: reg,
@@ -309,12 +309,12 @@ func run() error {
 		}
 		// BRC-135 emitter identity: stable per-emitter HashKey computed once
 		// using the listener's primary IPv6 on the configured interface,
-		// the CtrlGroupBlockHeader index (matches the actual egress group
+		// the GroupBlockHeader index (matches the actual egress group
 		// for BRC-135 frames), and a zero SubtreeID. The same value is
 		// reused for every block header frame this emitter produces.
 		if headerEgr != nil || headerMCastEgr != nil {
 			if emitterIP, ok := primaryIPv6(cfg.Iface); ok {
-				w.SetHeaderEmitterIdentity(seqhash.Hash(emitterIP, uint32(shard.CtrlGroupBlockHeader), [32]byte{}))
+				w.SetHeaderEmitterIdentity(seqhash.Hash(emitterIP, uint32(shard.GroupBlockHeader), [32]byte{}))
 			}
 		}
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
@@ -451,13 +451,13 @@ func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, erro
 		groups = append(groups, addr)
 	}
 
-	// Join the block control group so we receive block announcements.
-	ctrlIP := shard.ControlGroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.CtrlGroupControl)
+	// Join the block broadcast group so we receive block announcements.
+	ctrlIP := shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupBlockBroadcast)
 	groups = append(groups, &net.UDPAddr{IP: ctrlIP, Port: cfg.ListenPort})
 
 	// Join the subtree data group when BRC-132 reception is enabled.
 	if cfg.SubtreeDataEnabled {
-		subtreeDataIP := shard.ControlGroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.CtrlGroupSubtreeAnnounce)
+		subtreeDataIP := shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupSubtreeAnnounce)
 		groups = append(groups, &net.UDPAddr{IP: subtreeDataIP, Port: cfg.ListenPort})
 	}
 

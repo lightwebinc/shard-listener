@@ -22,28 +22,28 @@ type TrackerConfig struct {
 	SeqResetThreshold uint64        // If seqNum <= threshold on an established flow, treat as proxy restart (default 100)
 }
 
-// ctrlGroupControl is the reserved group index for BRC-131 block control frames.
-// Mirrors shard.CtrlGroupControl = 0xFFFE without importing the shard package.
-const ctrlGroupControl uint32 = 0xFFFE
+// groupBlockBroadcast is the reserved group index for BRC-131 block control frames.
+// Mirrors shard.GroupBlockBroadcast = 0xFFFE without importing the shard package.
+const groupBlockBroadcast uint32 = 0xFFFE
 
-// ctrlGroupSubtreeAnnounce is the reserved group index for BRC-132 subtree data frames.
-// Mirrors shard.CtrlGroupSubtreeAnnounce = 0xFFFB without importing the shard package.
-const ctrlGroupSubtreeAnnounce uint32 = 0xFFFB
+// groupSubtreeAnnounce is the reserved group index for BRC-132 subtree data frames.
+// Mirrors shard.GroupSubtreeAnnounce = 0xFFFB without importing the shard package.
+const groupSubtreeAnnounce uint32 = 0xFFFB
 
-// ctrlGroupAnchor is the virtual group index for BRC-134 anchor transaction frames.
-// Anchors share the CtrlGroupControl multicast address on the wire but use a
+// groupAnchorFlow is the virtual group index for BRC-134 anchor transaction frames.
+// Anchors share the GroupBlockBroadcast multicast address on the wire but use a
 // dedicated groupIdx for HashKey derivation so they have their own SeqNum counter.
-const ctrlGroupAnchor uint32 = 0xFFF9
+const groupAnchorFlow uint32 = 0xFFF9
 
 // flowLabel returns "brc131" for block control flows, "brc132" for subtree data
 // flows, "brc134" for anchor transaction flows, and "brc124" for all others.
 func flowLabel(groupIdx uint32) string {
 	switch groupIdx {
-	case ctrlGroupControl:
+	case groupBlockBroadcast:
 		return "brc131"
-	case ctrlGroupSubtreeAnnounce:
+	case groupSubtreeAnnounce:
 		return "brc132"
-	case ctrlGroupAnchor:
+	case groupAnchorFlow:
 		return "brc134"
 	default:
 		return "brc124"

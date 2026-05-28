@@ -146,7 +146,7 @@ type Config struct {
 	SenderExclude          []*net.IPNet // checked before include
 
 	// BRC-132 subtree data
-	SubtreeDataEnabled      bool // join CtrlGroupSubtreeAnnounce (0xFFFB)
+	SubtreeDataEnabled      bool // join GroupSubtreeAnnounce (0xFFFB)
 	SubtreeDataVerifyMerkle bool // optional post-reassembly Merkle root check
 
 	// Runtime
@@ -238,7 +238,7 @@ func Load() (*Config, error) {
 	flag.StringVar(&c.HeaderEgressProto, "header-egress-proto", envStr("HEADER_EGRESS_PROTO", "udp"),
 		"block header egress protocol: udp | tcp")
 	flag.BoolVar(&c.HeaderMCEgressEnabled, "header-mc-egress-enabled", envBool("HEADER_MC_EGRESS_ENABLED", false),
-		"enable multicast block header retransmission to CtrlGroupBlockHeader (0xFFFA)")
+		"enable multicast block header retransmission to GroupBlockHeader (0xFFFA)")
 	headerMCEgressIfaceFlag := flag.String("header-mc-egress-iface", envStr("HEADER_MC_EGRESS_IFACE", ""),
 		"network interface for multicast header egress send (default: same as -iface)")
 	flag.IntVar(&c.HeaderMCEgressPort, "header-mc-egress-port", envInt("HEADER_MC_EGRESS_PORT", 0),
@@ -283,7 +283,7 @@ func Load() (*Config, error) {
 	flag.BoolVar(&c.VerifyPayloadHash, "verify-payload-hash", envBool("VERIFY_PAYLOAD_HASH", false),
 		"verify SHA256d(payload) == TxID on BRC-124/BRC-128 frames; drop on mismatch")
 	flag.BoolVar(&c.SubtreeDataEnabled, "subtree-data-enabled", envBool("SUBTREE_DATA_ENABLED", false),
-		"enable BRC-132 subtree data reception: join CtrlGroupSubtreeAnnounce (0xFFFB) group")
+		"enable BRC-132 subtree data reception: join GroupSubtreeAnnounce (0xFFFB) group")
 	flag.BoolVar(&c.SubtreeDataVerifyMerkle, "subtree-data-verify-merkle", envBool("SUBTREE_DATA_VERIFY_MERKLE", false),
 		"optional post-reassembly Merkle root verification for BRC-132 frames (expensive at 1M nodes)")
 	flag.IntVar(&c.EgressDedupCap, "egress-dedup-cap", envInt("EGRESS_DEDUP_CAP", 0),
