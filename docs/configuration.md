@@ -34,6 +34,63 @@ The default `0x000B` corresponds to the IANA-assigned Bitcoin allocation
 
 ---
 
+## SSM (RFC 4607)
+
+See the [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/SourceSpecificMulticast/ssm-support-plan.md)
+for the full design. ASM remains the default; SSM is fully opt-in.
+
+### `-source-mode` / `SOURCE_MODE` (default: `asm`)
+
+Multicast addressing model: `asm` (FF0x scope; default) or `ssm`
+(FF3x scope per RFC 4607). In SSM mode the prefix is derived via
+`shard.Prefix(SSM, scope)` — FF35 for site, FF3E for global. RFC 8815
+deprecates ASM at global scope and the validator rejects it. All three
+join sites (data plane, beacon, subtree-announce) branch between
+`IPV6_JOIN_GROUP` (ASM) and `MCAST_JOIN_SOURCE_GROUP` (SSM, one per
+source) via the shared `shard-common/netjoin` helper.
+
+### `-ssm-bootstrap-manifest` / `SSM_BOOTSTRAP_MANIFEST` (default: `""`)
+
+CSV of `shard-manifest` source IPs (IPv6 literals or DNS names; a
+headless-Service name is the expected production form). Resolved via
+the shared `bootstrap.Resolver` at startup and re-resolved every
+`ssm-bootstrap-refresh`. Used as the SSM source set for the manifest
+group `(S,G)` join.
+
+### `-ssm-bootstrap-beacon` / `SSM_BOOTSTRAP_BEACON` (default: `""`)
+
+CSV of retry-endpoint source IPs (the retry-endpoint is the beacon
+emitter — see BRC-126). Used as the SSM source set for the beacon
+group `(S,G)` join under Posture C.
+
+### `-ssm-bootstrap-subtree-announce` / `SSM_BOOTSTRAP_SUBTREE_ANNOUNCE` (default: `""`)
+
+CSV of source IPs that emit subtree-announce frames. Used as the SSM
+source set for both `GroupSubtreeAnnounce` (0xFFFB) and
+`GroupSubtreeGroupAnnounce` (0xFFFC).
+
+### `-ssm-publishers-static` / `SSM_PUBLISHERS_STATIC` (default: `""`)
+
+**Lab / CI escape hatch.** Pre-declared data-plane publisher source
+list applied to every shard group. Production must use manifest-driven
+discovery (set `-ssm-bootstrap-manifest`); fails closed when
+`source-mode=ssm` AND the list has > 16 entries AND no manifest
+bootstrap is configured.
+
+### `-ssm-bootstrap-refresh` / `SSM_BOOTSTRAP_REFRESH` (default: `30s`)
+
+DNS re-resolve interval for the bootstrap lists. The `bootstrap.Resolver`
+retains the last good AAAA set on transient refresh failures so a brief
+DNS outage doesn't drop active joins.
+
+### Fail-closed validation
+
+When `-source-mode=ssm`, at least one of the four lists above MUST be
+non-empty or the process fails to start. This prevents silent ASM
+fallback when SSM was intended.
+
+---
+
 ## Sharding
 
 ### `-shard-bits` / `SHARD_BITS` (default: `2`)

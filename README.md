@@ -42,14 +42,29 @@ FF05::<shard>:9001  ──multicast──►  shard-listener  ──UDP/TCP─�
 - **Per-deployment egress TxID dedup** — optional shared store (Redis SETNX) to suppress duplicate egress when multiple listeners cover the same shard subset; honours optional ingress courtesy marks from `shard-proxy`
 - **Prometheus + OTLP metrics**, `/healthz`, `/readyz`
 - **Graceful shutdown** with configurable drain window
+- **SSM (RFC 4607) opt-in** — `-source-mode=ssm` branches every join site (data plane, beacon, subtree-announce) between `IPV6_JOIN_GROUP` and `MCAST_JOIN_SOURCE_GROUP` via `shard-common/netjoin`; per-control-group bootstrap source lists resolve DNS names or IPv6 literals through `shard-common/bootstrap.Resolver` (fail-closed startup, last-good retention on refresh failures); ASM is the default. See [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/SourceSpecificMulticast/ssm-support-plan.md).
 
 ## Quick start
 
 ```sh
-# Subscribe to all groups; forward to localhost:9100 over UDP
+# Subscribe to all groups; forward to localhost:9100 over UDP (ASM, default)
 shard-listener \
   -iface eth0 \
   -shard-bits 2 \
+  -egress-addr 127.0.0.1:9100
+```
+
+SSM (Posture C — requires PIM-SSM in the fabric and raised
+`net.ipv6.mld_max_msf`):
+
+```sh
+shard-listener \
+  -iface eth0 \
+  -shard-bits 2 \
+  -scope site \
+  -source-mode ssm \
+  -ssm-bootstrap-manifest shard-manifest-headless.svc.cluster.local \
+  -ssm-bootstrap-beacon   retry-endpoint-headless.svc.cluster.local \
   -egress-addr 127.0.0.1:9100
 ```
 

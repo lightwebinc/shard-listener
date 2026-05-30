@@ -39,6 +39,35 @@ Multicast fabric (site-scoped FF05::/16)
               └──▶ NACK gap tracking (shard flows + control-plane flows)
 ```
 
+## SSM (RFC 4607) mode
+
+When `-source-mode=ssm` the listener joins every multicast group as
+`(S,G)` via `MCAST_JOIN_SOURCE_GROUP` instead of `(*,G)` via
+`IPV6_JOIN_GROUP`. The branch lives in the shared
+`shard-common/netjoin` package; the data-plane Worker, BeaconListener,
+and SubtreeAnnounceListener all call the same `netjoin.Join(fd, ifIdx,
+group, sources)` helper which selects the syscall based on the source
+list length.
+
+Source lists per group come from two places:
+
+| Group                          | Source set                                                                                    |
+| ------------------------------ | --------------------------------------------------------------------------------------------- |
+| Data groups (`FF35::B:idx`)    | `-ssm-publishers-static` (lab/CI) or manifest-derived publisher union (production)             |
+| Beacon (`:FFFD`)               | `-ssm-bootstrap-beacon` — the retry-endpoint pod IPs (retry-endpoint emits NACK ADVERTs)       |
+| Manifest / BlockBroadcast      | `-ssm-bootstrap-manifest` — the shard-manifest pod IPs                                         |
+| SubtreeAnnounce (`:FFFB/FFFC`) | `-ssm-bootstrap-subtree-announce`                                                              |
+
+Bootstrap lists are resolved via the shared `bootstrap.Resolver`
+(`shard-common/bootstrap`): DNS names or IPv6 literals; fail-closed
+startup; last-good retention on transient refresh failures. The
+addressing prefix switches from `FF0x` (ASM) to `FF3x` (SSM) per
+`shard.Prefix(SourceModeSSM, scope)` — FF35 for site, FF3E for global
+(RFC 8815 rejects global-scope ASM).
+
+See the [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/SourceSpecificMulticast/ssm-support-plan.md)
+for fabric prerequisites (PIM-SSM, MLDv2, raised `mld_max_msf`).
+
 ## Receive workers
 
 Each worker:
