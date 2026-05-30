@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/lightwebinc/shard-common/bootstrap"
 	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
 
@@ -137,6 +139,26 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// SSM: resolve per-control-group bootstrap source lists and the
+	// static data-plane publisher list (lab/CI) into a single map keyed
+	// by group address. Production manifest-driven discovery for
+	// data-plane groups lands in a follow-up: the beacon listener already
+	// observes BRC-137 manifests via the beacon group; an OnChange path
+	// can mutate this map dynamically. For now, fail-closed startup on
+	// the configured bootstrap lists.
+	var gs listener.GroupSources
+	var beaconSrcs, manifestSrcs, subAnnSrcs []netip.Addr
+	if cfg.SourceMode == "ssm" {
+		var err error
+		gs, beaconSrcs, manifestSrcs, subAnnSrcs, err = buildSSMSources(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("ssm bootstrap: %w", err)
+		}
+		// Silence unused-warnings when none of the control-group lists
+		// are configured; the per-listener wiring below uses each list.
+		_ = manifestSrcs
+	}
+
 	tracker.Start(ctx)
 
 	// Start metrics server.
@@ -159,6 +181,7 @@ func run() error {
 			Registry:      groupReg,
 			Groups:        announceGroups,
 			Iface:         cfg.Iface,
+			Sources:       subAnnSrcs,
 			DefaultTTL:    cfg.SubtreeGroupDefaultTTL,
 			SenderInclude: cfg.SenderInclude,
 			SenderExclude: cfg.SenderExclude,
@@ -190,6 +213,7 @@ func run() error {
 			Registry: reg,
 			Groups:   []*net.UDPAddr{beaconGrp},
 			Iface:    cfg.Iface,
+			Sources:  beaconSrcs,
 			Rec:      rec,
 			Debug:    cfg.Debug,
 		}
@@ -301,6 +325,9 @@ func run() error {
 		}
 
 		w := listener.New(i, cfg.Iface, cfg.ListenPort, groups, engine, filt, egr, mcastEgr, tracker, rec, cfg.Debug)
+		if gs != nil {
+			w.SetGroupSources(gs)
+		}
 		if headerEgr != nil {
 			w.SetHeaderEgress(headerEgr)
 		}
@@ -462,4 +489,69 @@ func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, erro
 	}
 
 	return groups, nil
+}
+
+// buildSSMSources resolves the per-control-group bootstrap source lists
+// and the lab/CI static publisher list into a single map keyed by
+// IPv6-group-address. The control-group source lists (beacon, manifest,
+// subtree-announce) are returned separately so they can be threaded into
+// the BeaconListener / SubtreeAnnounceListener Sources fields. All
+// resolvers run for the lifetime of ctx; startup is fail-closed.
+//
+// Returns (gs, beaconSrcs, manifestSrcs, subtreeAnnSrcs, err).
+func buildSSMSources(ctx context.Context, cfg *config.Config) (listener.GroupSources, []netip.Addr, []netip.Addr, []netip.Addr, error) {
+	gs := make(listener.GroupSources)
+
+	resolve := func(entries []string) ([]netip.Addr, error) {
+		if len(entries) == 0 {
+			return nil, nil
+		}
+		r := &bootstrap.Resolver{Entries: entries, Refresh: cfg.SSMBootstrapRefresh}
+		if err := r.Start(ctx); err != nil {
+			return nil, err
+		}
+		return r.Current(), nil
+	}
+
+	beaconSrcs, err := resolve(cfg.SSMBootstrapBeacon)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("ssm-bootstrap-beacon: %w", err)
+	}
+	manifestSrcs, err := resolve(cfg.SSMBootstrapManifest)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("ssm-bootstrap-manifest: %w", err)
+	}
+	subAnnSrcs, err := resolve(cfg.SSMBootstrapSubtreeAnn)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("ssm-bootstrap-subtree-announce: %w", err)
+	}
+	staticSrcs, err := resolve(cfg.SSMPublishersStatic)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("ssm-publishers-static: %w", err)
+	}
+
+	// Map control-group sources onto their group addresses too (so the
+	// data-plane Worker's join loop pre-loads them when those groups are
+	// also in its joined-group set, e.g. BlockBroadcast for manifest).
+	put := func(ip net.IP, srcs []netip.Addr) {
+		if len(srcs) == 0 {
+			return
+		}
+		if ga, ok := netip.AddrFromSlice(ip.To16()); ok {
+			gs[ga] = srcs
+		}
+	}
+	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupBeacon), beaconSrcs)
+	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupSubtreeAnnounce), subAnnSrcs)
+	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupSubtreeGroupAnnounce), subAnnSrcs)
+	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupBlockBroadcast), manifestSrcs)
+
+	// Data-plane shard groups (lab/CI static path).
+	if len(staticSrcs) > 0 {
+		for idx := uint32(0); idx < cfg.NumGroups; idx++ {
+			ip := shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupIdx(idx))
+			put(ip, staticSrcs)
+		}
+	}
+	return gs, beaconSrcs, manifestSrcs, subAnnSrcs, nil
 }

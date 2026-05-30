@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/netjoin"
 	"github.com/lightwebinc/shard-listener/filter"
 	"github.com/lightwebinc/shard-listener/metrics"
 	"github.com/lightwebinc/shard-listener/subtreegroup"
@@ -24,6 +26,7 @@ type SubtreeAnnounceListener struct {
 	Registry      *subtreegroup.Registry
 	Groups        []*net.UDPAddr    // control group addresses to join
 	Iface         *net.Interface    // multicast interface
+	Sources       []netip.Addr      // optional SSM source list applied to every Groups entry
 	DefaultTTL    time.Duration     // applied when announcement TTL == 0
 	SenderInclude []*net.IPNet      // nil/empty = accept all non-excluded sources
 	SenderExclude []*net.IPNet      // checked before include
@@ -54,7 +57,7 @@ func (sl *SubtreeAnnounceListener) Start(ctx context.Context) error {
 }
 
 func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDPAddr) error {
-	fd, err := openAnnounceSocket(sl.Iface, grp)
+	fd, err := openAnnounceSocket(sl.Iface, grp, sl.Sources)
 	if err != nil {
 		return err
 	}
@@ -148,7 +151,11 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 // [::]:port, and joins the specified multicast group. SO_REUSEPORT is
 // required so the announce listener coexists with the data worker, which
 // also binds the same port with SO_REUSEPORT.
-func openAnnounceSocket(iface *net.Interface, grp *net.UDPAddr) (int, error) {
+//
+// When sources is empty the join is ASM (IPV6_JOIN_GROUP); when
+// non-empty the join is SSM (one MCAST_JOIN_SOURCE_GROUP per source via
+// netjoin).
+func openAnnounceSocket(iface *net.Interface, grp *net.UDPAddr, sources []netip.Addr) (int, error) {
 	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return -1, fmt.Errorf("socket: %w", err)
@@ -162,11 +169,14 @@ func openAnnounceSocket(iface *net.Interface, grp *net.UDPAddr) (int, error) {
 		_ = unix.Close(fd)
 		return -1, fmt.Errorf("bind [::]::%d: %w", grp.Port, err)
 	}
-	mreq := &unix.IPv6Mreq{Interface: uint32(iface.Index)}
-	copy(mreq.Multiaddr[:], grp.IP.To16())
-	if err := unix.SetsockoptIPv6Mreq(fd, unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq); err != nil {
+	ga, ok := netip.AddrFromSlice(grp.IP.To16())
+	if !ok {
 		_ = unix.Close(fd)
-		return -1, fmt.Errorf("join group %s: %w", grp.IP, err)
+		return -1, fmt.Errorf("bad group address %s", grp.IP)
+	}
+	if err := netjoin.Join(fd, iface.Index, ga, sources); err != nil {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("join group %s (%d sources): %w", grp.IP, len(sources), err)
 	}
 	return fd, nil
 }

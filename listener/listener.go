@@ -25,12 +25,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/netjoin"
 	"github.com/lightwebinc/shard-common/shard"
 
 	"github.com/lightwebinc/shard-listener/dedup"
@@ -50,11 +52,20 @@ const (
 )
 
 // Worker is a single multicast receive goroutine.
+// GroupSources maps a multicast group (16-byte IPv6 in netip.Addr form)
+// to its SSM source list. Groups absent from the map, or with empty
+// source lists, are joined ASM-style via IPV6_JOIN_GROUP. Each control
+// group's source list is the matching sources.bootstrap.<group> bucket;
+// the data-plane source list is the manifest-derived publisher union
+// (or sources.static for lab/CI).
+type GroupSources map[netip.Addr][]netip.Addr
+
 type Worker struct {
 	id                int
 	iface             *net.Interface
 	port              int
 	groups            []*net.UDPAddr // multicast groups to join
+	groupSources      GroupSources   // optional SSM per-group source map
 	engine            *shard.Engine
 	filt              *filter.Filter
 	egr               *egress.Sender
@@ -72,6 +83,13 @@ type Worker struct {
 	txDedup           *txdedup.Store     // nil = cross-listener TxID dedup disabled
 	reassemBuf        *reassembly.Buffer // nil = BRC-130 disabled
 	log               *slog.Logger
+}
+
+// SetGroupSources configures per-group SSM source lists for the data-plane
+// join. Must be called before [Worker.Run]. Groups absent from src (or
+// with empty source lists) are joined ASM-style.
+func (w *Worker) SetGroupSources(src GroupSources) {
+	w.groupSources = src
 }
 
 // SetEgressDedup attaches a duplicate-suppression set keyed on
@@ -182,11 +200,18 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	for _, grp := range w.groups {
-		mreq := &unix.IPv6Mreq{Interface: uint32(w.iface.Index)}
-		copy(mreq.Multiaddr[:], grp.IP.To16())
-		if err := unix.SetsockoptIPv6Mreq(fd, unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq); err != nil {
+		ga, ok := netip.AddrFromSlice(grp.IP.To16())
+		if !ok {
 			_ = unix.Close(fd)
-			return fmt.Errorf("worker %d: join group %s: %w", w.id, grp.IP, err)
+			return fmt.Errorf("worker %d: bad group address %s", w.id, grp.IP)
+		}
+		var srcs []netip.Addr
+		if w.groupSources != nil {
+			srcs = w.groupSources[ga]
+		}
+		if err := netjoin.Join(fd, w.iface.Index, ga, srcs); err != nil {
+			_ = unix.Close(fd)
+			return fmt.Errorf("worker %d: join group %s (%d sources): %w", w.id, grp.IP, len(srcs), err)
 		}
 	}
 

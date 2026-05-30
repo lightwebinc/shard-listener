@@ -72,7 +72,24 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lightwebinc/shard-common/shard"
 )
+
+// splitCSV trims and returns non-empty comma-separated tokens.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // DefaultSubtreeGroupTTL is the default announcement TTL applied when the
 // sender transmits TTL=0 and no -subtree-group-default-ttl is configured.
@@ -105,6 +122,22 @@ type Config struct {
 	ShardInclude   []uint32   // empty = all
 	SubtreeInclude [][32]byte // empty = all allowed
 	SubtreeExclude [][32]byte // empty = none excluded
+
+	// SSM. See SSM Support Plan.
+	// SourceMode: "asm" (default) | "ssm"
+	// SSMBootstrap{Beacon,Manifest,SubtreeAnnounce}: per-control-group
+	//   bootstrap source lists (IPv6 literals or DNS names) used to (S,G)
+	//   join the matching control group. Resolved via shared
+	//   bootstrap.Resolver at startup.
+	// SSMPublishersStatic: lab/CI escape hatch for the data-plane source
+	//   set. Production uses manifest-driven discovery.
+	// SSMBootstrapRefresh: DNS re-resolve interval (default 30s).
+	SourceMode             string
+	SSMBootstrapBeacon     []string
+	SSMBootstrapManifest   []string
+	SSMBootstrapSubtreeAnn []string
+	SSMPublishersStatic    []string
+	SSMBootstrapRefresh    time.Duration
 
 	// NACK
 	NACKJitterMax  time.Duration
@@ -204,9 +237,21 @@ func Load() (*Config, error) {
 	flag.IntVar(&c.ListenPort, "listen-port", envInt("LISTEN_PORT", 9001),
 		"UDP port to receive multicast frames on")
 	flag.StringVar(&c.MCScope, "scope", envStr("MC_SCOPE", "site"),
-		"multicast scope: link | site | org | global")
+		"multicast scope: link | site | org | global (site|global also accepted in SSM mode)")
 	groupIDFlag := flag.String("mc-group-id", envStr("MC_GROUP_ID", "0x000B"),
 		"IANA group-id (bytes 12–13 of the IPv6 multicast address); default 0x000B (IANA Bitcoin)")
+	flag.StringVar(&c.SourceMode, "source-mode", envStr("SOURCE_MODE", "asm"),
+		"multicast addressing model: asm | ssm")
+	ssmBootstrapBeacon := flag.String("ssm-bootstrap-beacon", envStr("SSM_BOOTSTRAP_BEACON", ""),
+		"CSV of retry-endpoint sources for SSM join of the beacon group")
+	ssmBootstrapManifest := flag.String("ssm-bootstrap-manifest", envStr("SSM_BOOTSTRAP_MANIFEST", ""),
+		"CSV of shard-manifest sources for SSM join of the manifest/block-broadcast group")
+	ssmBootstrapSubtreeAnn := flag.String("ssm-bootstrap-subtree-announce", envStr("SSM_BOOTSTRAP_SUBTREE_ANNOUNCE", ""),
+		"CSV of subtree-announce emitter sources for SSM join of that control group")
+	ssmPublishersStatic := flag.String("ssm-publishers-static", envStr("SSM_PUBLISHERS_STATIC", ""),
+		"lab/CI: CSV of data-plane publisher IPv6 sources (production uses manifest discovery)")
+	flag.DurationVar(&c.SSMBootstrapRefresh, "ssm-bootstrap-refresh", envDuration("SSM_BOOTSTRAP_REFRESH", 30*time.Second),
+		"DNS re-resolve interval for SSM bootstrap entries")
 	shardIncludeFlag := flag.String("shard-include", envStr("SHARD_INCLUDE", ""),
 		"comma-separated shard indices/ranges to subscribe (empty = all)")
 	subtreeIncludeFlag := flag.String("subtree-include", envStr("SUBTREE_INCLUDE", ""),
@@ -342,12 +387,48 @@ func Load() (*Config, error) {
 	c.ShardBits = *bits
 	c.NumGroups = 1 << c.ShardBits
 
-	// Resolve multicast scope.
-	prefix, ok := Scopes[c.MCScope]
-	if !ok {
-		return nil, fmt.Errorf("unknown scope %q; valid values: link, site, org, global", c.MCScope)
+	// Resolve multicast scope + source-mode → upper-16-bit prefix.
+	switch strings.ToLower(c.SourceMode) {
+	case "asm":
+		c.SourceMode = "asm"
+		prefix, ok := Scopes[c.MCScope]
+		if !ok {
+			return nil, fmt.Errorf("unknown scope %q; valid values: link, site, org, global", c.MCScope)
+		}
+		c.MCPrefix = prefix
+	case "ssm":
+		c.SourceMode = "ssm"
+		scope, err := shard.ParseScope(c.MCScope)
+		if err != nil {
+			return nil, fmt.Errorf("source-mode=ssm requires -scope site|global: %w", err)
+		}
+		prefix, err := shard.Prefix(shard.SourceModeSSM, scope)
+		if err != nil {
+			return nil, err
+		}
+		c.MCPrefix = prefix
+	default:
+		return nil, fmt.Errorf("invalid source-mode %q (asm|ssm)", c.SourceMode)
 	}
-	c.MCPrefix = prefix
+
+	c.SSMBootstrapBeacon = splitCSV(*ssmBootstrapBeacon)
+	c.SSMBootstrapManifest = splitCSV(*ssmBootstrapManifest)
+	c.SSMBootstrapSubtreeAnn = splitCSV(*ssmBootstrapSubtreeAnn)
+	c.SSMPublishersStatic = splitCSV(*ssmPublishersStatic)
+	if c.SSMBootstrapRefresh <= 0 {
+		return nil, fmt.Errorf("ssm-bootstrap-refresh must be > 0")
+	}
+	if c.SourceMode == "ssm" {
+		if len(c.SSMBootstrapBeacon) == 0 &&
+			len(c.SSMBootstrapManifest) == 0 &&
+			len(c.SSMBootstrapSubtreeAnn) == 0 &&
+			len(c.SSMPublishersStatic) == 0 {
+			return nil, fmt.Errorf("source-mode=ssm requires at least one of -ssm-bootstrap-{beacon,manifest,subtree-announce} or -ssm-publishers-static")
+		}
+		if len(c.SSMPublishersStatic) > 16 && len(c.SSMBootstrapManifest) == 0 {
+			return nil, fmt.Errorf("ssm-publishers-static has %d entries; production at this size must use manifest discovery (set -ssm-bootstrap-manifest)", len(c.SSMPublishersStatic))
+		}
+	}
 
 	// Parse IANA group-id (default 0x000B = IANA Bitcoin allocation).
 	gid, err := parseGroupID(*groupIDFlag)
