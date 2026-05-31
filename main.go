@@ -209,6 +209,11 @@ func run() error {
 	// only wired into the beacon listener when AutoConfigEnabled.
 	manifestReg := commanifest.NewRegistry(0)
 
+	// Workers are constructed below. Pre-declare the slice here so the
+	// auto-config applier's hook closure can capture it for runtime
+	// AddGroup/RemoveGroup against each worker fd.
+	var workers []*listener.Worker
+
 	// Start beacon listener for dynamic endpoint discovery.
 	if cfg.BeaconEnabled {
 		beaconScopePrefix, ok := config.Scopes[cfg.BeaconScope]
@@ -267,6 +272,43 @@ func run() error {
 					// hooks land in a follow-up pass that observes
 					// cfg.AutoConfigLiveResharding here.
 				},
+				OnPilotGroupsChange: func(added, removed []uint16) {
+					if !cfg.AutoJoinFromManifest {
+						return
+					}
+					for _, idx := range added {
+						addr := engine.Addr(uint32(idx), cfg.ListenPort)
+						ga, ok := netip.AddrFromSlice(addr.IP.To16())
+						if !ok {
+							slog.Warn("auto-join: bad group address", "idx", idx)
+							continue
+						}
+						for _, w := range workers {
+							if err := w.AddGroup(ga, nil); err != nil {
+								slog.Warn("auto-join AddGroup failed",
+									"group", ga.String(), "worker", w, "err", err)
+							}
+						}
+					}
+					for _, idx := range removed {
+						addr := engine.Addr(uint32(idx), cfg.ListenPort)
+						ga, ok := netip.AddrFromSlice(addr.IP.To16())
+						if !ok {
+							continue
+						}
+						// Static -shard-include entries are NEVER leaved.
+						if inStaticInclude(cfg.ShardInclude, idx) {
+							continue
+						}
+						for _, w := range workers {
+							if err := w.RemoveGroup(ga, nil); err != nil {
+								slog.Warn("auto-join RemoveGroup failed",
+									"group", ga.String(), "worker", w, "err", err)
+							}
+						}
+					}
+					slog.Info("auto-join applied", "added", added, "removed", removed)
+				},
 			},
 		}
 		wg.Add(1)
@@ -321,7 +363,9 @@ func run() error {
 		}
 	}
 
-	// Start workers.
+	// Start workers. Collect them so the auto-join applier can drive
+	// runtime AddGroup/RemoveGroup against every worker fd.
+	workers = make([]*listener.Worker, 0, cfg.NumWorkers)
 	for i := range cfg.NumWorkers {
 		egr, err := egress.New(cfg.EgressAddr, cfg.EgressProto, cfg.StripHeader)
 		if err != nil {
@@ -423,6 +467,7 @@ func run() error {
 			buf.SetVerifyMerkle(true)
 		}
 		w.SetReassemblyBuffer(buf)
+		workers = append(workers, w)
 		wg.Add(1)
 		go func(worker *listener.Worker) {
 			defer wg.Done()
@@ -604,4 +649,17 @@ func buildSSMSources(ctx context.Context, cfg *config.Config) (listener.GroupSou
 		}
 	}
 	return gs, beaconSrcs, manifestSrcs, subAnnSrcs, nil
+}
+
+// inStaticInclude reports whether the given shard index is in the
+// operator's static -shard-include list. Pilot-driven RemoveGroup MUST
+// skip these entries: static includes are never leaved per the
+// auto-shard-config plan.
+func inStaticInclude(static []uint32, idx uint16) bool {
+	for _, v := range static {
+		if v == uint32(idx) {
+			return true
+		}
+	}
+	return false
 }

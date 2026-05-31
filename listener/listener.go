@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -64,7 +65,7 @@ type Worker struct {
 	id                int
 	iface             *net.Interface
 	port              int
-	groups            []*net.UDPAddr // multicast groups to join
+	groups            []*net.UDPAddr // multicast groups to join at startup
 	groupSources      GroupSources   // optional SSM per-group source map
 	engine            *shard.Engine
 	filt              *filter.Filter
@@ -83,6 +84,16 @@ type Worker struct {
 	txDedup           *txdedup.Store     // nil = cross-listener TxID dedup disabled
 	reassemBuf        *reassembly.Buffer // nil = BRC-130 disabled
 	log               *slog.Logger
+
+	// Runtime join management for BRC-137 auto-join and live-resharding
+	// bridging mode. joinFd is the worker's IPv6 multicast socket; it is
+	// set in Run after openRawSocket succeeds, and -1 before Run and
+	// after Run returns. joinMu guards joinedGroups and the underlying
+	// setsockopt calls so concurrent AddGroup/RemoveGroup calls from
+	// auto-config / applier goroutines do not race.
+	joinMu       sync.Mutex
+	joinFd       int                     // -1 when worker is not running
+	joinedGroups map[netip.Addr]struct{} // currently-joined data-plane groups
 }
 
 // SetGroupSources configures per-group SSM source lists for the data-plane
@@ -143,6 +154,7 @@ func New(
 		tracker:  tracker,
 		rec:      rec,
 		debug:    debug,
+		joinFd:   -1,
 		log:      slog.Default().With("component", "listener", "worker", id),
 	}
 }
@@ -186,6 +198,65 @@ func (w *Worker) SetVerifyPayloadHash(v bool) {
 	w.verifyPayloadHash = v
 }
 
+// AddGroup joins the worker's socket to the given multicast group at
+// runtime (BRC-137 auto-join and live-resharding bridging-mode primitive).
+// sources is the SSM source filter; pass nil/empty for an ASM join.
+//
+// Safe to call concurrently from goroutines other than the receive loop.
+// Returns an error if the worker has not started yet or has already
+// stopped.
+func (w *Worker) AddGroup(group netip.Addr, sources []netip.Addr) error {
+	w.joinMu.Lock()
+	defer w.joinMu.Unlock()
+	if w.joinFd < 0 {
+		return fmt.Errorf("worker %d: AddGroup before Run", w.id)
+	}
+	if _, ok := w.joinedGroups[group]; ok {
+		return nil // idempotent
+	}
+	if err := netjoin.Join(w.joinFd, w.iface.Index, group, sources); err != nil {
+		return fmt.Errorf("worker %d: AddGroup %s: %w", w.id, group, err)
+	}
+	w.joinedGroups[group] = struct{}{}
+	return nil
+}
+
+// RemoveGroup leaves the given multicast group at runtime. Safe to call
+// concurrently. Idempotent (no-op if the group is not currently joined).
+// Returns an error if the worker has not started yet or has already
+// stopped.
+func (w *Worker) RemoveGroup(group netip.Addr, sources []netip.Addr) error {
+	w.joinMu.Lock()
+	defer w.joinMu.Unlock()
+	if w.joinFd < 0 {
+		return fmt.Errorf("worker %d: RemoveGroup before Run", w.id)
+	}
+	if _, ok := w.joinedGroups[group]; !ok {
+		return nil
+	}
+	if err := netjoin.Leave(w.joinFd, w.iface.Index, group, sources); err != nil {
+		return fmt.Errorf("worker %d: RemoveGroup %s: %w", w.id, group, err)
+	}
+	delete(w.joinedGroups, group)
+	return nil
+}
+
+// JoinedGroups returns a snapshot of currently-joined multicast groups.
+// Returned slice is owned by the caller. Returns nil when the worker is
+// not running.
+func (w *Worker) JoinedGroups() []netip.Addr {
+	w.joinMu.Lock()
+	defer w.joinMu.Unlock()
+	if w.joinedGroups == nil {
+		return nil
+	}
+	out := make([]netip.Addr, 0, len(w.joinedGroups))
+	for g := range w.joinedGroups {
+		out = append(out, g)
+	}
+	return out
+}
+
 // Run opens a SO_REUSEPORT socket, joins all multicast groups, and processes
 // frames until ctx is cancelled.
 //
@@ -198,6 +269,17 @@ func (w *Worker) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("worker %d: open socket: %w", w.id, err)
 	}
+
+	w.joinMu.Lock()
+	w.joinFd = fd
+	w.joinedGroups = make(map[netip.Addr]struct{})
+	w.joinMu.Unlock()
+	defer func() {
+		w.joinMu.Lock()
+		w.joinFd = -1
+		w.joinedGroups = nil
+		w.joinMu.Unlock()
+	}()
 
 	for _, grp := range w.groups {
 		ga, ok := netip.AddrFromSlice(grp.IP.To16())
@@ -213,6 +295,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			_ = unix.Close(fd)
 			return fmt.Errorf("worker %d: join group %s (%d sources): %w", w.id, grp.IP, len(srcs), err)
 		}
+		w.joinMu.Lock()
+		w.joinedGroups[ga] = struct{}{}
+		w.joinMu.Unlock()
 	}
 
 	if w.rec != nil {

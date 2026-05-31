@@ -1,8 +1,10 @@
 package listener
 
 import (
+	"context"
 	"crypto/sha256"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -964,5 +966,43 @@ func TestProcessFrame_TxDedup_Disabled_ForwardsBoth(t *testing.T) {
 done2:
 	if count != 2 {
 		t.Errorf("without txdedup: expected 2 forwards, got %d", count)
+	}
+}
+
+func TestWorker_AddRemoveGroup_BeforeRunErrors(t *testing.T) {
+	addr, _, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+
+	grp := netip.MustParseAddr("ff05::b:0001")
+	if err := w.AddGroup(grp, nil); err == nil {
+		t.Errorf("AddGroup before Run must error")
+	}
+	if err := w.RemoveGroup(grp, nil); err == nil {
+		t.Errorf("RemoveGroup before Run must error")
+	}
+	if got := w.JoinedGroups(); got != nil {
+		t.Errorf("JoinedGroups before Run = %v, want nil", got)
+	}
+}
+
+func TestWorker_JoinedGroups_AfterRunReturnsNil(t *testing.T) {
+	// After Run returns, joinedGroups is cleared; new Add/Remove call
+	// must error and JoinedGroups must return nil.
+	addr, _, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = w.Run(ctx) // runs briefly then ctx times out
+
+	if got := w.JoinedGroups(); got != nil {
+		t.Errorf("after Run: JoinedGroups = %v, want nil", got)
+	}
+	if err := w.AddGroup(netip.MustParseAddr("ff05::b:1"), nil); err == nil {
+		t.Errorf("AddGroup after Run must error")
 	}
 }
