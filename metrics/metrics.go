@@ -94,6 +94,17 @@ type Recorder struct {
 
 	// Beacon registry endpoint count (updated by evict loop)
 	beaconRegistryEndpoints atomic.Int64
+
+	// BRC-137 ShardManifest counters and gauges. Updated by the
+	// auto-config consumer subsystem (shard-common/manifest).
+	manifestReceived       metric.Int64Counter
+	manifestPilotsKnown    atomic.Int64
+	manifestQuorumMetBits  atomic.Int32 // bitmap: bit0 shard_bits, bit1 source_mode, bit2 successor
+	manifestDivergence     metric.Int64Counter
+	manifestAdoption       metric.Int64Counter
+	manifestReshardState   atomic.Int32 // 0 steady, 1 bridging, 2 cutover-pending
+	manifestReshardWindow  atomic.Int64 // seconds until TransitionEpoch (negative briefly during cutover)
+	manifestReshardEmitDup metric.Int64Counter
 }
 
 // New constructs and returns a Recorder.
@@ -304,6 +315,59 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 
 	if r.beaconAdvertsReceived, err = meter.Int64Counter("bsl_beacon_adverts_received_total",
 		metric.WithDescription("Valid ADVERT beacon datagrams upserted into the endpoint registry")); err != nil {
+		return nil, err
+	}
+
+	if r.manifestReceived, err = meter.Int64Counter("multicast_manifest_received_total",
+		metric.WithDescription("BRC-137 ShardManifest datagrams accepted and upserted into the manifest registry")); err != nil {
+		return nil, err
+	}
+	if r.manifestDivergence, err = meter.Int64Counter("multicast_manifest_divergence_total",
+		metric.WithDescription("Authoritative-peer disagreements observed by the auto-config evaluator (BRC-137 §Divergence telemetry)")); err != nil {
+		return nil, err
+	}
+	if r.manifestAdoption, err = meter.Int64Counter("multicast_manifest_adoption_total",
+		metric.WithDescription("Times the auto-config evaluator newly adopted a value (bootstrap, quorum-shift, pin-removed)")); err != nil {
+		return nil, err
+	}
+	if r.manifestReshardEmitDup, err = meter.Int64Counter("multicast_manifest_resharding_emit_duplicates_total",
+		metric.WithDescription("Listener-side duplicates absorbed by egress dedup during a live re-shard bridging window")); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_pilots_known",
+		metric.WithDescription("Distinct authoritative announcers currently within TTL"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(r.manifestPilotsKnown.Load())
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_quorum_met_bits",
+		metric.WithDescription("Bit0=shard_bits, bit1=source_mode, bit2=successor quorum-met flags"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(int64(r.manifestQuorumMetBits.Load()))
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_resharding_state",
+		metric.WithDescription("0=steady, 1=bridging, 2=cutover-pending"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(int64(r.manifestReshardState.Load()))
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_resharding_window_seconds",
+		metric.WithDescription("Seconds until TransitionEpoch; negative briefly during cutover; 0 when not bridging"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(r.manifestReshardWindow.Load())
+			return nil
+		}),
+	); err != nil {
 		return nil, err
 	}
 	if _, err = meter.Int64ObservableGauge("bsl_beacon_registry_endpoints",
@@ -524,6 +588,86 @@ func (r *Recorder) BeaconAdvertReceived() {
 // SetBeaconRegistryEndpoints updates the beacon registry endpoint count gauge.
 func (r *Recorder) SetBeaconRegistryEndpoints(n int) {
 	r.beaconRegistryEndpoints.Store(int64(n))
+}
+
+// ManifestReceived records a valid BRC-137 ShardManifest upserted into
+// the manifest registry. nil-safe.
+func (r *Recorder) ManifestReceived() {
+	if r == nil {
+		return
+	}
+	r.manifestReceived.Add(context.Background(), 1)
+}
+
+// ManifestSetPilotsKnown updates the pilots-known gauge from the
+// evaluator's most-recent snapshot. nil-safe.
+func (r *Recorder) ManifestSetPilotsKnown(n int) {
+	if r == nil {
+		return
+	}
+	r.manifestPilotsKnown.Store(int64(n))
+}
+
+// ManifestSetQuorumMetBits encodes per-field quorum-met flags into a
+// single bitmap gauge. Bit positions: 0=shard_bits, 1=source_mode,
+// 2=successor.
+func (r *Recorder) ManifestSetQuorumMetBits(bits int32) {
+	if r == nil {
+		return
+	}
+	r.manifestQuorumMetBits.Store(bits)
+}
+
+// ManifestDivergence increments the divergence counter for one field
+// observation. kind: "peer-disagree", "pin-disagree", or "crc-fail".
+func (r *Recorder) ManifestDivergence(field, kind string) {
+	if r == nil {
+		return
+	}
+	r.manifestDivergence.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("field", field),
+		attribute.String("kind", kind),
+	))
+}
+
+// ManifestAdoption increments the adoption counter when the evaluator
+// newly adopts a value. reason: "bootstrap", "quorum-shift",
+// "pin-removed".
+func (r *Recorder) ManifestAdoption(field, reason string) {
+	if r == nil {
+		return
+	}
+	r.manifestAdoption.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("field", field),
+		attribute.String("reason", reason),
+	))
+}
+
+// ManifestSetReshardState updates the re-sharding state gauge.
+// 0=steady, 1=bridging, 2=cutover-pending.
+func (r *Recorder) ManifestSetReshardState(state int32) {
+	if r == nil {
+		return
+	}
+	r.manifestReshardState.Store(state)
+}
+
+// ManifestSetReshardWindowSeconds updates the seconds-until-cutover
+// gauge. May be negative briefly during cutover.
+func (r *Recorder) ManifestSetReshardWindowSeconds(s int64) {
+	if r == nil {
+		return
+	}
+	r.manifestReshardWindow.Store(s)
+}
+
+// ManifestReshardEmitDuplicate records one egress-dedup duplicate
+// absorbed during a live re-shard bridging window.
+func (r *Recorder) ManifestReshardEmitDuplicate() {
+	if r == nil {
+		return
+	}
+	r.manifestReshardEmitDup.Add(context.Background(), 1)
 }
 
 // WorkerReady signals a worker has entered its receive loop.

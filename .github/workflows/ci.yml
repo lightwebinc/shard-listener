@@ -18,9 +18,24 @@ jobs:
         with:
           path: shard-listener
 
+      - name: Resolve shard-common ref
+        id: common_ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if [ -n "$BRANCH" ] && gh api "repos/lightwebinc/shard-common/branches/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+            echo "Using shard-common@$BRANCH (matching feature branch found)"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+            echo "Using shard-common@main (no matching feature branch)"
+          fi
+
       - uses: actions/checkout@v6
         with:
           repository: lightwebinc/shard-common
+          ref: ${{ steps.common_ref.outputs.ref }}
           path: shard-common
 
       - uses: actions/setup-go@v6
@@ -42,14 +57,40 @@ jobs:
         with:
           path: shard-listener
 
+      - name: Resolve shard-common ref
+        id: common_ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if [ -n "$BRANCH" ] && gh api "repos/lightwebinc/shard-common/branches/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve shard-proxy ref
+        id: proxy_ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          if [ -n "$BRANCH" ] && gh api "repos/lightwebinc/shard-proxy/branches/$BRANCH" >/dev/null 2>&1; then
+            echo "ref=$BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v6
         with:
           repository: lightwebinc/shard-common
+          ref: ${{ steps.common_ref.outputs.ref }}
           path: shard-common
 
       - uses: actions/checkout@v6
         with:
           repository: lightwebinc/shard-proxy
+          ref: ${{ steps.proxy_ref.outputs.ref }}
           path: shard-proxy
 
       - uses: actions/setup-go@v6

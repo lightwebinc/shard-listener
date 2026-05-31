@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/manifest"
 	"github.com/lightwebinc/shard-common/netjoin"
 
 	"github.com/lightwebinc/shard-listener/metrics"
@@ -28,6 +30,13 @@ type BeaconListener struct {
 	Sources  []netip.Addr      // optional SSM source list applied to every group in Groups
 	Rec      *metrics.Recorder // nil = no metrics
 	Debug    bool
+
+	// ManifestRegistry, when non-nil, receives every BRC-137
+	// ShardManifest datagram (MsgType 0x40) decoded off the beacon
+	// socket. ADVERTs (MsgType 0x20) continue to flow into Registry.
+	// When nil, manifest datagrams are silently dropped (logged at
+	// Debug).
+	ManifestRegistry *manifest.Registry
 }
 
 // Start listens for ADVERT beacons on all configured groups.
@@ -108,7 +117,10 @@ func (bl *BeaconListener) listenGroup(ctx context.Context, grp *net.UDPAddr) err
 	// Set a read buffer size
 	_ = conn.SetReadBuffer(1 << 16) // 64 KiB
 
-	buf := make([]byte, ADVERTSize+64) // extra room for future extensions
+	// Buffer must accommodate the larger of ADVERT and ShardManifest
+	// payloads. ShardManifest with a full bitmap (ShardBits=12) plus
+	// sources and a Successor block fits well under 2 KiB.
+	buf := make([]byte, 2048)
 
 	for {
 		select {
@@ -119,7 +131,7 @@ func (bl *BeaconListener) listenGroup(ctx context.Context, grp *net.UDPAddr) err
 
 		// Short deadline so we re-check ctx periodically
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		n, _, err := conn.ReadFromUDP(buf)
+		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
@@ -134,30 +146,80 @@ func (bl *BeaconListener) listenGroup(ctx context.Context, grp *net.UDPAddr) err
 			}
 		}
 
-		advert, err := DecodeADVERT(buf[:n])
-		if err != nil {
-			if bl.Debug {
-				log.Printf("discovery: ignoring invalid ADVERT from %s: %v", grp.IP, err)
-			}
+		// Demux on MsgType byte at offset 6 per BRC-126 / BRC-137.
+		if n < 7 {
 			continue
 		}
-
-		// Ignore ADVERT with Draining flag
-		if advert.Flags&FlagDraining != 0 {
+		switch buf[6] {
+		case MsgTypeADVERT:
+			bl.handleADVERT(buf[:n], grp)
+		case frame.MsgTypeShardManifest:
+			bl.handleManifest(buf[:n], src, grp)
+		default:
 			if bl.Debug {
-				log.Printf("discovery: ignoring draining endpoint %s (instance %08X)", advert.NACKAddr, advert.InstanceID)
+				log.Printf("discovery: ignoring unknown MsgType 0x%02X on %s", buf[6], grp.IP)
 			}
-			continue
 		}
+	}
+}
 
-		bl.Registry.Upsert(advert)
-		if bl.Rec != nil {
-			bl.Rec.BeaconAdvertReceived()
-		}
+// handleADVERT decodes a BRC-126 ADVERT and upserts the corresponding
+// retry-endpoint entry. Draining endpoints are skipped.
+func (bl *BeaconListener) handleADVERT(buf []byte, grp *net.UDPAddr) {
+	advert, err := DecodeADVERT(buf)
+	if err != nil {
 		if bl.Debug {
-			log.Printf("discovery: upserted endpoint [%s]:%d tier=%d pref=%d instance=%08X",
-				advert.NACKAddr, advert.NACKPort, advert.Tier, advert.Preference, advert.InstanceID)
+			log.Printf("discovery: ignoring invalid ADVERT from %s: %v", grp.IP, err)
 		}
+		return
+	}
+	if advert.Flags&FlagDraining != 0 {
+		if bl.Debug {
+			log.Printf("discovery: ignoring draining endpoint %s (instance %08X)", advert.NACKAddr, advert.InstanceID)
+		}
+		return
+	}
+	bl.Registry.Upsert(advert)
+	if bl.Rec != nil {
+		bl.Rec.BeaconAdvertReceived()
+	}
+	if bl.Debug {
+		log.Printf("discovery: upserted endpoint [%s]:%d tier=%d pref=%d instance=%08X",
+			advert.NACKAddr, advert.NACKPort, advert.Tier, advert.Preference, advert.InstanceID)
+	}
+}
+
+// handleManifest decodes a BRC-137 ShardManifest and upserts it into the
+// configured manifest registry. Drops with a debug-log when no registry
+// is configured (auto-config disabled).
+func (bl *BeaconListener) handleManifest(buf []byte, src *net.UDPAddr, grp *net.UDPAddr) {
+	if bl.ManifestRegistry == nil {
+		if bl.Debug {
+			log.Printf("discovery: manifest received on %s but no registry configured", grp.IP)
+		}
+		return
+	}
+	m, err := frame.DecodeShardManifest(buf)
+	if err != nil {
+		if bl.Debug {
+			log.Printf("discovery: ignoring invalid manifest from %s: %v", src.IP, err)
+		}
+		return
+	}
+	srcAddr, ok := netip.AddrFromSlice(src.IP.To16())
+	if !ok {
+		if bl.Debug {
+			log.Printf("discovery: bad src address from %s", src.IP)
+		}
+		return
+	}
+	bl.ManifestRegistry.Upsert(srcAddr, m)
+	if bl.Rec != nil {
+		bl.Rec.ManifestReceived()
+	}
+	if bl.Debug {
+		log.Printf("discovery: upserted manifest from [%s] instance=%08X shardBits=%d flags=0x%02X",
+			src.IP, m.InstanceID, m.ShardBits, m.Flags)
 	}
 }
 
