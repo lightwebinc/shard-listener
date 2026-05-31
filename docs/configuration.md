@@ -401,6 +401,68 @@ used by the retry endpoints.
 
 ---
 
+## Auto-Shard-Config (BRC-137)
+
+The listener can consume BRC-137 ShardManifest announcements off the same
+beacon group, applying the normative consumer profile (Authoritative
+quorum, hysteresis, ±1 ShardBits shift bound, manual-pin precedence).
+Default off; opt-in via `-manifest-consumer-enabled`. See the
+[Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/AutoShardConfig/auto-shard-config-plan.md)
+for the system-level design.
+
+### `-manifest-consumer-enabled` / `MANIFEST_CONSUMER_ENABLED` (default: `false`)
+
+Master switch. When false, the beacon listener drops any
+`MsgType=0x40` (ShardManifest) datagram it sees and behavior matches
+today exactly. When true, manifests are decoded, upserted into a
+`shard-common/manifest.Registry`, and evaluated on a 1 s tick.
+
+### `-manifest-bootstrap` / `MANIFEST_BOOTSTRAP` (default: `optional`)
+
+`optional` ⇒ start with CLI/env values; pilot adjustments applied
+opportunistically. `required` ⇒ refuse data-plane bind until quorum is
+reached for `ShardBits` (and `SourceModeSSM` when SSM). `/readyz`
+returns 503 throughout the wait.
+
+### `-pilot-quorum` / `PILOT_QUORUM` (default: `2`)
+
+Minimum distinct authoritative announcers (keyed on `(SrcIPv6,
+InstanceID)`) required for adoption. `1` is permitted but logs a
+warning at startup; production deployments should keep `≥ 2`.
+
+### `-pilot-hysteresis` / `PILOT_HYSTERESIS` (default: `0`)
+
+Duration a candidate value must hold quorum before adoption. `0`
+selects `2 × AnnounceInterval` of the candidate manifest (BRC-137
+default per §Safety).
+
+### `-shard-include-from-manifest` / `SHARD_INCLUDE_FROM_MANIFEST` (default: `false`)
+
+When set, the listener's effective subscription =
+`union(-shard-include, pilot_groups)`, where `pilot_groups` is the
+union of `Flags.GroupsValid` payloads from `Flags.PilotOnly=1`
+manifests that satisfy quorum. Pilot-added groups are leaved when no
+pilot still claims them; static `-shard-include` entries are NEVER
+leaved.
+
+### `-live-resharding` / `LIVE_RESHARDING` (default: `false`)
+
+Opt-in BRC-137 bridging mode. When false (default), a `ShardBits` or
+`SourceModeSSM` adoption flips `/readyz` and exits non-zero so the
+orchestrator can roll the pod. When true, the listener tracks a
+Successor view but the actual bridging coordination is driven by the
+pilot's Successor block + the worker's runtime `AddGroup`/`RemoveGroup`
+path. Enabling this requires `-egress-dedup-cap > 0` and
+`-egress-dedup-ttl ≥ 4s` (validated at startup) so the listener's egress
+dedup can absorb the duplicate frames a bridging proxy emits.
+
+### `-bridging-window` / `BRIDGING_WINDOW` (default: `0`)
+
+Local floor on the bridging duration. `0` ⇒ honour the pilot's
+`TransitionEpoch` verbatim; nonzero ⇒ `MAX(pilot, this)`.
+
+---
+
 ## Subtree Group Announcements (BRC-127)
 
 When configured, the listener joins the `GroupSubtreeGroupAnnounce`
