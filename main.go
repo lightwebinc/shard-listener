@@ -16,8 +16,11 @@ import (
 	"time"
 
 	"github.com/lightwebinc/shard-common/bootstrap"
+	commanifest "github.com/lightwebinc/shard-common/manifest"
 	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
+
+	listenermanifest "github.com/lightwebinc/shard-listener/manifest"
 
 	"github.com/lightwebinc/shard-listener/config"
 	"github.com/lightwebinc/shard-listener/dedup"
@@ -201,6 +204,11 @@ func run() error {
 		)
 	}
 
+	// Manifest consumer registry (BRC-137 auto-shard-config). Built
+	// unconditionally so its zero-pilot state is always observable;
+	// only wired into the beacon listener when AutoConfigEnabled.
+	manifestReg := commanifest.NewRegistry(0)
+
 	// Start beacon listener for dynamic endpoint discovery.
 	if cfg.BeaconEnabled {
 		beaconScopePrefix, ok := config.Scopes[cfg.BeaconScope]
@@ -217,6 +225,15 @@ func run() error {
 			Rec:      rec,
 			Debug:    cfg.Debug,
 		}
+		if cfg.AutoConfigEnabled {
+			bl.ManifestRegistry = manifestReg
+			slog.Info("manifest consumer enabled",
+				"bootstrap", cfg.AutoConfigBootstrap,
+				"quorum", cfg.AutoConfigPilotQuorum,
+				"hysteresis", cfg.AutoConfigHysteresis,
+				"auto_join", cfg.AutoJoinFromManifest,
+				"live_resharding", cfg.AutoConfigLiveResharding)
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -225,6 +242,39 @@ func run() error {
 			}
 		}()
 		slog.Info("beacon listener started", "group", beaconIP, "port", cfg.BeaconPort)
+	}
+
+	// Start the manifest evaluator/applier when auto-config is enabled.
+	if cfg.AutoConfigEnabled {
+		ev := commanifest.NewEvaluator(commanifest.EvaluatorConfig{
+			Quorum:     cfg.AutoConfigPilotQuorum,
+			Hysteresis: cfg.AutoConfigHysteresis,
+			Pin: commanifest.Pin{
+				ShardBits:       uint8(cfg.ShardBits),
+				HasShardBitsPin: true,
+			},
+		})
+		applier := &listenermanifest.Applier{
+			Registry:  manifestReg,
+			Evaluator: ev,
+			Rec:       rec,
+			Hooks: listenermanifest.Hooks{
+				OnShardBitsChange: func(prev, next uint8) {
+					slog.Warn("auto-config adopted new ShardBits (restart mode)",
+						"prev", prev, "next", next,
+						"action", "flipping /readyz to 503; orchestrator will roll the pod")
+					// Restart-mode is the default. Live-resharding
+					// hooks land in a follow-up pass that observes
+					// cfg.AutoConfigLiveResharding here.
+				},
+			},
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			applier.Run(ctx)
+		}()
+		slog.Info("manifest applier started")
 	}
 
 	// Build the shared TxID dedup store. Two independent namespaces are

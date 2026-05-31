@@ -171,6 +171,18 @@ type Config struct {
 	BeaconPort    int
 	BeaconScope   string // multicast scope for beacon group joins
 
+	// Auto-shard-config (BRC-137 manifest consumer). All fields are
+	// opt-in. When AutoConfigEnabled is false, the listener does not
+	// decode manifests off the beacon socket and the other fields are
+	// ignored.
+	AutoConfigEnabled        bool
+	AutoConfigBootstrap      string        // "optional" (default) | "required"
+	AutoConfigPilotQuorum    int           // default 2
+	AutoConfigHysteresis     time.Duration // 0 ⇒ 2 × AnnounceInterval (per BRC-137)
+	AutoJoinFromManifest     bool          // listener-only: union(-shard-include, pilot_groups)
+	AutoConfigLiveResharding bool          // opt-in bridging mode (default: restart on adopt)
+	AutoConfigBridgingWindow time.Duration // 0 ⇒ honour pilot TransitionEpoch verbatim
+
 	// Subtree group announcements (BRC-127)
 	SubtreeGroups          [][16]byte // parsed GroupIDs to subscribe
 	SubtreeGroupDefaultTTL time.Duration
@@ -310,6 +322,20 @@ func Load() (*Config, error) {
 		"UDP port for receiving ADVERT beacons")
 	flag.StringVar(&c.BeaconScope, "beacon-scope", envStr("BEACON_SCOPE", "site"),
 		"multicast scope for beacon group joins: link | site | org | global")
+	flag.BoolVar(&c.AutoConfigEnabled, "manifest-consumer-enabled", envBool("MANIFEST_CONSUMER_ENABLED", false),
+		"opt-in BRC-137 manifest consumer for auto-shard-config (off by default)")
+	flag.StringVar(&c.AutoConfigBootstrap, "manifest-bootstrap", envStr("MANIFEST_BOOTSTRAP", "optional"),
+		"manifest bootstrap behavior: 'optional' (default) | 'required' (refuse data-plane bind until quorum)")
+	flag.IntVar(&c.AutoConfigPilotQuorum, "pilot-quorum", envInt("PILOT_QUORUM", 2),
+		"min distinct authoritative announcers required for adoption; 1 allowed but logs a warning")
+	flag.DurationVar(&c.AutoConfigHysteresis, "pilot-hysteresis", envDuration("PILOT_HYSTERESIS", 0),
+		"hysteresis window before adoption; 0 ⇒ 2 × AnnounceInterval of the candidate manifest")
+	flag.BoolVar(&c.AutoJoinFromManifest, "shard-include-from-manifest", envBool("SHARD_INCLUDE_FROM_MANIFEST", false),
+		"additive auto-join: effective subscription = union(-shard-include, pilot_groups)")
+	flag.BoolVar(&c.AutoConfigLiveResharding, "live-resharding", envBool("LIVE_RESHARDING", false),
+		"opt-in BRC-137 live-resharding bridging mode (default: restart on ShardBits adoption)")
+	flag.DurationVar(&c.AutoConfigBridgingWindow, "bridging-window", envDuration("BRIDGING_WINDOW", 0),
+		"local floor on bridging duration; 0 ⇒ honour pilot TransitionEpoch verbatim")
 	subtreeGroupsFlag := flag.String("subtree-groups", envStr("SUBTREE_GROUPS", ""),
 		"comma-separated 32-char hex group IDs to subscribe (BRC-127)")
 	flag.DurationVar(&c.SubtreeGroupDefaultTTL, "subtree-group-default-ttl",
@@ -622,6 +648,26 @@ func Load() (*Config, error) {
 	}
 	if c.NodeID == "" {
 		c.NodeID = c.DeploymentID
+	}
+
+	// Auto-shard-config validation. Defaults applied first, then
+	// invariants checked.
+	switch c.AutoConfigBootstrap {
+	case "optional", "required":
+	default:
+		return nil, fmt.Errorf("manifest-bootstrap %q unknown; valid: optional, required", c.AutoConfigBootstrap)
+	}
+	if c.AutoConfigPilotQuorum < 1 {
+		return nil, fmt.Errorf("pilot-quorum must be >= 1, got %d", c.AutoConfigPilotQuorum)
+	}
+	if c.AutoConfigEnabled && c.AutoConfigLiveResharding && c.EgressDedupCap == 0 {
+		return nil, fmt.Errorf("live-resharding requires egress-dedup-cap > 0 (dedup absorbs bridging-window duplicates)")
+	}
+	if c.AutoConfigEnabled && c.AutoConfigLiveResharding && c.EgressDedupTTL < 4*time.Second {
+		// Loose floor — full check (>= 2 × bridging window) happens at
+		// bridging-mode entry, since the bridging window is not known
+		// until the pilot publishes a Successor block.
+		return nil, fmt.Errorf("live-resharding requires egress-dedup-ttl >= 4s (got %s); production deployments should size to >= 2 × bridgingWindow", c.EgressDedupTTL)
 	}
 
 	return c, nil
