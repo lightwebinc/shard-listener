@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	prometheusexporter "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/resource"
 
 	promclient "github.com/prometheus/client_golang/prometheus"
@@ -33,30 +35,39 @@ const ServiceName = "shard-listener"
 // Version is set at build time via -ldflags "-X metrics.Version=<ver>".
 var Version = "dev"
 
-// Recorder holds all pre-allocated OTel instrument handles and readiness state.
+// Recorder holds all pre-allocated metric handles and readiness state.
+//
+// Hot-path counters (framesReceived/Forwarded/Dropped/Deduped/... ) use
+// prometheus client_golang directly because the OTel SDK Add path adds
+// ~⅓ of total CPU on a packet-rate-bound workload (measured on shard-proxy
+// at 256 B; refer to multicast-skills/performance-testing.md). Cold-path
+// counters stay on OTel.
 type Recorder struct {
 	provider   *sdkmetric.MeterProvider
 	promReg    promclient.Gatherer
+	promOtel   *promclient.Registry // shared with OTel exporter; hot-path counters registered here too
 	numWorkers int
 	startTime  time.Time
 	readyCount atomic.Int32
 	draining   atomic.Bool
 	shutdownFn func(context.Context) error
 
-	// Ingress counters
-	framesReceived       metric.Int64Counter // by worker, iface, version
-	framesDropped        metric.Int64Counter // by reason
-	framesForwarded      metric.Int64Counter // by worker, proto
-	framesInvalidPayload metric.Int64Counter // by worker; SHA256d(payload) != TxID
-	// BRC-130 reassembly counters
+	// ── Hot-path counters — direct prometheus client_golang ──
+	promFramesReceived       *promclient.CounterVec // worker, iface, version
+	promFramesDropped        *promclient.CounterVec // worker, reason
+	promFramesForwarded      *promclient.CounterVec // worker, proto
+	promFramesInvalidPayload *promclient.CounterVec // worker
+	promFramesDeduped        *promclient.CounterVec // worker
+	promFramesTxDeduped      *promclient.CounterVec // worker
+	promEgressErrors         *promclient.CounterVec // worker
+	promMCEgressErrors       *promclient.CounterVec // worker
+
+	// BRC-130 reassembly counters — cold path (only fires on > MTU frames).
 	frameReassemblyStarted      metric.Int64Counter
 	frameReassemblyCompleted    metric.Int64Counter
 	frameReassemblyAbandoned    metric.Int64Counter
 	frameReassemblyHashMismatch metric.Int64Counter
-	framesDeduped               metric.Int64Counter // by worker; suppressed retransmit before egress
-	framesTxDeduped             metric.Int64Counter // by worker; suppressed by Redis TxID claim
 	txDedupErrors               metric.Int64Counter // Redis errors during TxID claim
-	egressErrors                metric.Int64Counter
 
 	// Egress / ingress TxID dedup outcomes (txidset.Store callbacks)
 	egressClaimLocalHit metric.Int64Counter
@@ -141,6 +152,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	mpOpts := []sdkmetric.Option{
 		sdkmetric.WithReader(promExp),
 		sdkmetric.WithResource(res),
+		// Exemplars require a trace context per measurement and add ~11%
+		// of cumulative CPU on the hot path (aggregate.Builder.filter).
+		// shard-listener doesn't emit traces, so they are never useful.
+		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
 	}
 
 	var shutdownFuncs []func(context.Context) error
@@ -182,10 +197,51 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 
 	meter := mp.Meter(ServiceName)
 
-	if r.framesReceived, err = meter.Int64Counter("bsl_frames_received_total",
-		metric.WithDescription("Multicast frames received")); err != nil {
-		return nil, err
+	// Hot-path counters: direct prometheus client_golang. Same names and
+	// label sets as before so dashboards keep working.
+	r.promFramesReceived = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_frames_received_total",
+		Help: "Multicast frames received",
+	}, []string{"worker", "network_interface_name", "version"})
+	r.promFramesDropped = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_frames_dropped_total",
+		Help: "Frames dropped before egress",
+	}, []string{"worker", "reason"})
+	r.promFramesForwarded = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_frames_forwarded_total",
+		Help: "Frames forwarded to downstream unicast",
+	}, []string{"worker", "proto"})
+	r.promFramesInvalidPayload = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_frames_invalid_payload_total",
+		Help: "BRC-124/BRC-128 frames dropped because SHA256d(payload) != TxID",
+	}, []string{"worker"})
+	r.promFramesDeduped = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_frames_deduped_total",
+		Help: "BRC-124/BRC-128 retransmits suppressed before egress (egress dedup)",
+	}, []string{"worker"})
+	r.promFramesTxDeduped = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_frames_tx_deduped_total",
+		Help: "Frames suppressed by Redis TxID claim (cross-listener dedup)",
+	}, []string{"worker"})
+	r.promEgressErrors = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_egress_errors_total",
+		Help: "Errors sending to downstream",
+	}, []string{"worker"})
+	r.promMCEgressErrors = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_mc_egress_errors_total",
+		Help: "Errors sending to multicast egress",
+	}, []string{"worker"})
+	for _, c := range []promclient.Collector{
+		r.promFramesReceived, r.promFramesDropped, r.promFramesForwarded,
+		r.promFramesInvalidPayload, r.promFramesDeduped, r.promFramesTxDeduped,
+		r.promEgressErrors, r.promMCEgressErrors,
+	} {
+		if regErr := reg.Register(c); regErr != nil {
+			return nil, fmt.Errorf("metrics: register hot-path counter: %w", regErr)
+		}
 	}
+	r.promOtel = reg
+
 	if r.frameReassemblyStarted, err = meter.Int64Counter("bsl_reassembly_started_total",
 		metric.WithDescription("BRC-130 reassembly slots opened (first fragment of a TxID received)")); err != nil {
 		return nil, err
@@ -200,26 +256,6 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.frameReassemblyHashMismatch, err = meter.Int64Counter("bsl_reassembly_hash_mismatch_total",
 		metric.WithDescription("Completed reassemblies dropped because SHA256d(payload) != TxID")); err != nil {
-		return nil, err
-	}
-	if r.framesDropped, err = meter.Int64Counter("bsl_frames_dropped_total",
-		metric.WithDescription("Frames dropped before egress")); err != nil {
-		return nil, err
-	}
-	if r.framesForwarded, err = meter.Int64Counter("bsl_frames_forwarded_total",
-		metric.WithDescription("Frames forwarded to downstream unicast")); err != nil {
-		return nil, err
-	}
-	if r.framesInvalidPayload, err = meter.Int64Counter("bsl_frames_invalid_payload_total",
-		metric.WithDescription("BRC-124/BRC-128 frames dropped because SHA256d(payload) != TxID")); err != nil {
-		return nil, err
-	}
-	if r.framesDeduped, err = meter.Int64Counter("bsl_frames_deduped_total",
-		metric.WithDescription("BRC-124/BRC-128 retransmits suppressed before egress (egress dedup)")); err != nil {
-		return nil, err
-	}
-	if r.framesTxDeduped, err = meter.Int64Counter("bsl_frames_tx_deduped_total",
-		metric.WithDescription("Frames suppressed by Redis TxID claim (cross-listener dedup)")); err != nil {
 		return nil, err
 	}
 	if r.txDedupErrors, err = meter.Int64Counter("bsl_txid_dedup_errors_total",
@@ -256,14 +292,6 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.ingressMarkDropped, err = meter.Int64Counter("bsl_ingress_mark_dropped_total",
 		metric.WithDescription("Ingress-set courtesy marks dropped because the async queue was full or local-only mode is active")); err != nil {
-		return nil, err
-	}
-	if r.egressErrors, err = meter.Int64Counter("bsl_egress_errors_total",
-		metric.WithDescription("Errors sending to downstream")); err != nil {
-		return nil, err
-	}
-	if r.mcEgressErrors, err = meter.Int64Counter("bsl_mc_egress_errors_total",
-		metric.WithDescription("Errors sending to multicast egress")); err != nil {
 		return nil, err
 	}
 	if r.headerForwarded, err = meter.Int64Counter("bsl_header_forwarded_total",
@@ -397,11 +425,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 // FrameReceived records receipt of a multicast frame.
 // version should be "brc12" (legacy 44-byte) or "brc124" (BRC-124/BRC-128, 92-byte).
 func (r *Recorder) FrameReceived(workerID int, iface, version string) {
-	r.framesReceived.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.Int("worker", workerID),
-		attribute.String("network.interface.name", iface),
-		attribute.String("version", version),
-	))
+	r.promFramesReceived.WithLabelValues(strconv.Itoa(workerID), iface, version).Inc()
 }
 
 // FrameDropped records a dropped frame.
@@ -409,27 +433,19 @@ func (r *Recorder) FrameReceived(workerID int, iface, version string) {
 // "subtree_include_miss", "sender_filter", "frag_decode_error",
 // "no_reassembly_buffer".
 func (r *Recorder) FrameDropped(workerID int, reason string) {
-	r.framesDropped.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.Int("worker", workerID),
-		attribute.String("reason", reason),
-	))
+	r.promFramesDropped.WithLabelValues(strconv.Itoa(workerID), reason).Inc()
 }
 
 // FrameForwarded records a successfully forwarded frame.
 func (r *Recorder) FrameForwarded(workerID int, proto string) {
-	r.framesForwarded.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.Int("worker", workerID),
-		attribute.String("proto", proto),
-	))
+	r.promFramesForwarded.WithLabelValues(strconv.Itoa(workerID), proto).Inc()
 }
 
 // FrameInvalidPayload records a BRC-124/BRC-128 frame dropped because
 // SHA256d(payload) did not match the frame's TxID. Only emitted when
 // payload-hash verification is enabled on the worker.
 func (r *Recorder) FrameInvalidPayload(workerID int) {
-	r.framesInvalidPayload.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.Int("worker", workerID),
-	))
+	r.promFramesInvalidPayload.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
 
 // ReassemblyStarted records the opening of a new BRC-130 reassembly slot.
@@ -459,18 +475,14 @@ func (r *Recorder) ReassemblyHashMismatch() {
 // recently. The gap-state suppression metric (GapSuppressed) is a separate
 // signal: it tracks gap-tracker fills, not egress dedup.
 func (r *Recorder) FrameDeduped(workerID int) {
-	r.framesDeduped.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.Int("worker", workerID),
-	))
+	r.promFramesDeduped.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
 
 // FrameTxDeduped records a frame suppressed by the Redis TxID claim gate
 // (cross-listener deduplication). The frame was already claimed by another
 // listener in the same Redis-backed dedup group.
 func (r *Recorder) FrameTxDeduped(workerID int) {
-	r.framesTxDeduped.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.Int("worker", workerID),
-	))
+	r.promFramesTxDeduped.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
 
 // TxDedupError records a Redis error during a TxID claim attempt. The frame
@@ -508,16 +520,12 @@ func (r *Recorder) IngressMarkDropped() { r.ingressMarkDropped.Add(context.Backg
 
 // EgressError records a send failure to downstream.
 func (r *Recorder) EgressError(workerID int) {
-	r.egressErrors.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.Int("worker", workerID),
-	))
+	r.promEgressErrors.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
 
 // MCEgressError records a send failure on the multicast egress path.
 func (r *Recorder) MCEgressError(workerID int) {
-	r.mcEgressErrors.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.Int("worker", workerID),
-	))
+	r.promMCEgressErrors.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
 
 // HeaderForwarded records a block header extracted and forwarded to header egress.
