@@ -83,9 +83,6 @@ type Recorder struct {
 	headerForwarded    metric.Int64Counter
 	headerEgressErrors metric.Int64Counter
 
-	// Multicast egress counters
-	mcEgressErrors metric.Int64Counter
-
 	// NACK / gap counters
 	gapsDetected     metric.Int64Counter
 	gapsSuppressed   metric.Int64Counter // cancelled by retransmit fill or ACK response
