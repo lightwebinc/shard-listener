@@ -347,14 +347,15 @@ and/or address-space translation.
 | `-mc-egress-iface` | Outbound interface (`IPV6_MULTICAST_IF`) |
 | `-mc-egress-port` | Destination UDP port (default: same as `-listen-port`) |
 | `-mc-egress-scope` | Scope for egress groups (default: same as `-scope`) |
-| `-mc-egress-base-addr` | IPv6 bytes 2–12 for egress group space |
+| `-mc-egress-group-id` | IANA group-id (bytes 12–13) for egress groups (default: same as `-mc-group-id`) |
 | `-mc-egress-hoplimit` | `IPV6_MULTICAST_HOPS` (default 1) |
 
 Multicast egress fires independently of unicast egress — both paths execute
 for every accepted frame. `strip-header` applies to both egress modes.
 
-The per-frame address derivation is zero-alloc: bytes 0–12 are fixed at
-construction; only bytes 13–15 (group index) are overwritten per datagram.
+The per-frame address derivation is zero-alloc: bytes 0–13 are fixed at
+construction (scope prefix, zero IANA boundary, 16-bit group-id); only bytes
+14–15 (shard group index) are overwritten per datagram.
 
 ## Logging & Tracing
 
