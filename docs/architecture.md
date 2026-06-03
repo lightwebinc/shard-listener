@@ -356,6 +356,27 @@ for every accepted frame. `strip-header` applies to both egress modes.
 The per-frame address derivation is zero-alloc: bytes 0–12 are fixed at
 construction; only bytes 13–15 (group index) are overwritten per datagram.
 
+## Logging & Tracing
+
+The listener uses the shared `shard-common/logging` package: `run` calls
+`logging.Init` once, installing a process-wide `slog` default carrying the
+`service.{name,instance.id,version}` identity triple (shared with the OTLP
+metrics resource attributes). `-log-format json` emits one JSON object per line
+on stdout for fleet aggregation; `-log-level` is runtime-togglable via
+`POST /loglevel` and SIGHUP. At startup the listener emits a one-shot
+`host.inventory` event (OS/CPU/mem/NIC incl. IPv4+IPv6, multicast sysctls) and
+a `bsl_host_info` gauge.
+
+**Category-8 OS/NIC logging:** the pilot-driven auto-join path in `main.go`
+classifies `AddGroup` failures — an `ENOBUFS` from exceeding `net.ipv6.mld_max_msf`
+(the kernel's per-socket source-filter cap, the canonical fleet-scale SSM join
+failure) is logged at Error with the errno and a remediation hint, distinct from
+generic join failures.
+
+**Tracing** is opt-in (`-trace-sampling > 0` + `-otlp-endpoint`) and
+control-plane only — the receive/reassembly hot paths take no span. See the
+[Unified Logging Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/UnifiedLogging/unified-logging-plan.md).
+
 ## Testing
 
 Worker sockets bind to `[::]:listen-port`, which accepts **both multicast and

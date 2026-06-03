@@ -610,6 +610,28 @@ Metric export interval for the OTLP push exporter. Default `30s`. Ignored when
 `OTLP_ENDPOINT` is empty. Tune down for tighter observability or up to reduce
 collector load.
 
+### `-log-format` / `LOG_FORMAT` (default: `text`)
+
+Structured-log output format: `text` (human-readable, stderr; dev default) or
+`json` (one JSON object per line on stdout, for fleet aggregation via a
+node-local collector). Every line carries the `service.{name,instance.id,version}`
+identity triple shared with the OTLP metrics resource attributes. See the
+[Unified Logging Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/UnifiedLogging/unified-logging-plan.md).
+
+### `-log-level` / `LOG_LEVEL` (default: `info`)
+
+`debug` | `info` | `warn` | `error`. Runtime-togglable without a restart via
+`POST /loglevel?level=<lvl>` on the metrics server and via SIGHUP (toggles
+debug↔configured level). `-debug` is retained as a deprecated alias for
+`-log-level=debug`.
+
+### `-trace-sampling` / `TRACE_SAMPLING` (default: `0`)
+
+Distributed-trace head sampling ratio `0.0`–`1.0`. `0` installs a no-op tracer
+(zero cost). When `> 0` with an `-otlp-endpoint`, control-plane flows (NACK →
+recovery, manifest adoption) are traced and exported via the collector; the
+receive hot path is never traced.
+
 ### `-deployment-id` / `DEPLOYMENT_ID` (default: hostname)
 
 Logical deployment identifier. All HA listener siblings sharing a Redis
