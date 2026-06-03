@@ -215,7 +215,11 @@ type Config struct {
 
 	DeploymentID         string
 	NodeID               string
+	EgressDedupBackend   string // redis|aerospike|memory|none (empty infers redis if addr set, else none)
 	EgressDedupRedisAddr string
+	EgressDedupAeroHosts []string
+	EgressDedupAeroNS    string
+	EgressDedupAeroSet   string
 	EgressDedupPrefix    string
 	EgressDedupTTL2      time.Duration // separate field so deprecation logic can compare
 	EgressDedupLocalCap  int
@@ -223,9 +227,15 @@ type Config struct {
 	// Optional courtesy SETNX into the local proxy's ingress namespace so
 	// the proxy knows the TxID has been seen on the multicast network (e.g.
 	// arrived via a cross-site bridge or other path the proxy did not see).
+	// The two stores are addressed independently: either may use a different
+	// backend or endpoint.
 	//
-	// IngressSetRedisAddr empty disables the courtesy mark.
+	// IngressSetBackend none AND IngressSetRedisAddr empty disables the mark.
+	IngressSetBackend   string
 	IngressSetRedisAddr string
+	IngressSetAeroHosts []string
+	IngressSetAeroNS    string
+	IngressSetAeroSet   string
 	IngressSetPrefix    string
 	IngressSetTTL       time.Duration
 	IngressSetLocalCap  int
@@ -372,8 +382,16 @@ func Load() (*Config, error) {
 		"per-deployment dedup identifier; HA siblings must share the same value (default: hostname)")
 	flag.StringVar(&c.NodeID, "node-id", envStr("NODE_ID", ""),
 		"per-node informational identifier used in metrics labels (default: hostname)")
+	flag.StringVar(&c.EgressDedupBackend, "egress-dedup-backend", envStr("EGRESS_DEDUP_BACKEND", ""),
+		"tier-2 egress dedup backend: redis|aerospike|memory|none (empty infers redis when -egress-dedup-redis-addr set, else none)")
 	flag.StringVar(&c.EgressDedupRedisAddr, "egress-dedup-redis-addr", envStr("EGRESS_DEDUP_REDIS_ADDR", ""),
-		"Redis address for per-deployment egress TxID dedup; empty = local-only LRU")
+		"Redis-protocol address (Redis/Valkey/Dragonfly) for per-deployment egress TxID dedup; empty = local-only LRU")
+	egAeroHosts := flag.String("egress-dedup-aerospike-hosts", envStr("EGRESS_DEDUP_AEROSPIKE_HOSTS", ""),
+		"Aerospike seed nodes host:port (comma-separated) for egress dedup; required when -egress-dedup-backend=aerospike")
+	flag.StringVar(&c.EgressDedupAeroNS, "egress-dedup-aerospike-namespace", envStr("EGRESS_DEDUP_AEROSPIKE_NAMESPACE", "cache"),
+		"Aerospike namespace for egress dedup")
+	flag.StringVar(&c.EgressDedupAeroSet, "egress-dedup-aerospike-set", envStr("EGRESS_DEDUP_AEROSPIKE_SET", "bsl-egr"),
+		"Aerospike set for egress dedup")
 	flag.StringVar(&c.EgressDedupPrefix, "egress-dedup-prefix", envStr("EGRESS_DEDUP_PREFIX", "bsl:egr:"),
 		"Redis key prefix for per-deployment egress dedup; deployment-id is appended")
 	flag.DurationVar(&c.EgressDedupTTL2, "egress-dedup-ttl-redis", envDuration("EGRESS_DEDUP_TTL_REDIS", 60*time.Second),
@@ -381,8 +399,16 @@ func Load() (*Config, error) {
 	flag.IntVar(&c.EgressDedupLocalCap, "egress-dedup-local-cap", envInt("EGRESS_DEDUP_LOCAL_CAP", 1<<20),
 		"tier-1 local LRU capacity for the egress TxID dedup gate (0 = disable feature)")
 
+	flag.StringVar(&c.IngressSetBackend, "ingress-set-backend", envStr("INGRESS_SET_BACKEND", ""),
+		"tier-2 ingress-mark backend: redis|aerospike|memory|none (empty infers redis when -ingress-set-redis-addr set, else none)")
 	flag.StringVar(&c.IngressSetRedisAddr, "ingress-set-redis-addr", envStr("INGRESS_SET_REDIS_ADDR", ""),
-		"Redis address for courtesy SETNX into the local proxy's ingress namespace (empty = disabled)")
+		"Redis-protocol address for courtesy SETNX into the local proxy's ingress namespace (empty = disabled)")
+	ingAeroHosts := flag.String("ingress-set-aerospike-hosts", envStr("INGRESS_SET_AEROSPIKE_HOSTS", ""),
+		"Aerospike seed nodes host:port (comma-separated) for ingress mark; required when -ingress-set-backend=aerospike")
+	flag.StringVar(&c.IngressSetAeroNS, "ingress-set-aerospike-namespace", envStr("INGRESS_SET_AEROSPIKE_NAMESPACE", "cache"),
+		"Aerospike namespace for ingress mark")
+	flag.StringVar(&c.IngressSetAeroSet, "ingress-set-aerospike-set", envStr("INGRESS_SET_AEROSPIKE_SET", "bsp-tx"),
+		"Aerospike set for ingress mark")
 	flag.StringVar(&c.IngressSetPrefix, "ingress-set-prefix", envStr("INGRESS_SET_PREFIX", "bsp:tx:"),
 		"Redis key prefix for ingress-set courtesy marks; MUST match the local proxy's -txid-dedup-prefix")
 	flag.DurationVar(&c.IngressSetTTL, "ingress-set-ttl", envDuration("INGRESS_SET_TTL", 10*time.Minute),
@@ -636,6 +662,42 @@ func Load() (*Config, error) {
 	}
 	if c.TxidDedupTTL > 0 {
 		c.EgressDedupTTL2 = c.TxidDedupTTL
+	}
+
+	// Parse Aerospike seed nodes for the two dedup stores.
+	for _, h := range strings.Split(*egAeroHosts, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			c.EgressDedupAeroHosts = append(c.EgressDedupAeroHosts, h)
+		}
+	}
+	for _, h := range strings.Split(*ingAeroHosts, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			c.IngressSetAeroHosts = append(c.IngressSetAeroHosts, h)
+		}
+	}
+
+	// Infer tier-2 backend kinds when not set explicitly: redis if an address
+	// was provided (back-compat), else none (tier-1 LRU only / mark disabled).
+	if c.EgressDedupBackend == "" {
+		if c.EgressDedupRedisAddr != "" {
+			c.EgressDedupBackend = "redis"
+		} else {
+			c.EgressDedupBackend = "none"
+		}
+	}
+	if c.IngressSetBackend == "" {
+		if c.IngressSetRedisAddr != "" {
+			c.IngressSetBackend = "redis"
+		} else {
+			c.IngressSetBackend = "none"
+		}
+	}
+	for _, b := range []string{c.EgressDedupBackend, c.IngressSetBackend} {
+		switch b {
+		case "redis", "aerospike", "memory", "none":
+		default:
+			return nil, fmt.Errorf("dedup backend %q unknown; valid: redis, aerospike, memory, none", b)
+		}
 	}
 
 	// Default DeploymentID / NodeID to hostname when unset.

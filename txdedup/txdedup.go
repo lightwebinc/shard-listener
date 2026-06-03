@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/lightwebinc/shard-common/cache"
 	"github.com/lightwebinc/shard-common/txidset"
 )
 
@@ -71,20 +72,26 @@ type Store struct {
 type Config struct {
 	// Egress (per-deployment dedup before downstream forward).
 	//
-	// EgressRedisAddr empty → tier-1 local-only.
+	// EgressBackend is the modular tier-2 cache backend (redis/aerospike/
+	// memory). When set, it takes precedence over EgressRedisAddr and its
+	// lifecycle is owned by the caller. EgressBackend nil + EgressRedisAddr
+	// empty → tier-1 local-only.
 	// EgressPrefix is appended with ":<DeploymentID>:" before use, so the
-	// final Redis key shape is "<EgressPrefix><DeploymentID>:<hex-txid>".
+	// final key shape is "<EgressPrefix><DeploymentID>:<hex-txid>".
 	// DeploymentID empty falls back to a single-deployment legacy key shape
 	// "<EgressPrefix><hex-txid>" — preserves behaviour of the old single-key
 	// txdedup.
+	EgressBackend   cache.Backend
 	EgressRedisAddr string
 	EgressPrefix    string
 	EgressTTL       time.Duration
 	EgressLocalCap  int
 	DeploymentID    string
 
-	// Ingress mark (courtesy SETNX to proxy's namespace). Empty
+	// Ingress mark (courtesy SETNX to proxy's namespace). IngressBackend is
+	// the modular backend (caller-owned). Empty IngressBackend AND
 	// IngressRedisAddr disables the courtesy mark entirely.
+	IngressBackend   cache.Backend
 	IngressRedisAddr string
 	IngressPrefix    string
 	IngressTTL       time.Duration
@@ -120,6 +127,7 @@ func NewWithConfig(cfg Config) (*Store, error) {
 
 	egRec := egressRecAdapter{rec: cfg.Recorder}
 	eg, err := txidset.New(txidset.Config{
+		Backend:       cfg.EgressBackend,
 		RedisAddr:     cfg.EgressRedisAddr,
 		TTL:           cfg.EgressTTL,
 		LocalCapacity: cfg.EgressLocalCap,
@@ -131,7 +139,7 @@ func NewWithConfig(cfg Config) (*Store, error) {
 
 	s := &Store{egress: eg, egressPrefix: egPrefix}
 
-	if cfg.IngressRedisAddr != "" || cfg.IngressPrefix != "" {
+	if cfg.IngressBackend != nil || cfg.IngressRedisAddr != "" || cfg.IngressPrefix != "" {
 		if cfg.IngressTTL <= 0 {
 			_ = eg.Close()
 			return nil, fmt.Errorf("txdedup: IngressTTL must be > 0 when ingress mark is configured")
@@ -144,6 +152,7 @@ func NewWithConfig(cfg Config) (*Store, error) {
 		}
 		inRec := ingressRecAdapter{rec: cfg.Recorder}
 		ing, err := txidset.New(txidset.Config{
+			Backend:       cfg.IngressBackend,
 			RedisAddr:     cfg.IngressRedisAddr,
 			TTL:           cfg.IngressTTL,
 			LocalCapacity: cfg.IngressLocalCap,

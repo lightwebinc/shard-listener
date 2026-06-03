@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/lightwebinc/shard-common/bootstrap"
+	"github.com/lightwebinc/shard-common/cache"
 	commanifest "github.com/lightwebinc/shard-common/manifest"
 	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
@@ -327,24 +328,56 @@ func run() error {
 	// LocalCap=0 on the egress side disables the feature entirely.
 	var txDedupStore *txdedup.Store
 	if cfg.EgressDedupLocalCap > 0 {
+		egBackend, ebErr := cache.Open(context.Background(), cache.Config{
+			Backend:       cfg.EgressDedupBackend,
+			RedisAddr:     cfg.EgressDedupRedisAddr,
+			AeroHosts:     cfg.EgressDedupAeroHosts,
+			AeroNamespace: cfg.EgressDedupAeroNS,
+			AeroSet:       cfg.EgressDedupAeroSet,
+		})
+		if ebErr != nil {
+			return fmt.Errorf("egress dedup backend: %w", ebErr)
+		}
+		ingBackend, ibErr := cache.Open(context.Background(), cache.Config{
+			Backend:       cfg.IngressSetBackend,
+			RedisAddr:     cfg.IngressSetRedisAddr,
+			AeroHosts:     cfg.IngressSetAeroHosts,
+			AeroNamespace: cfg.IngressSetAeroNS,
+			AeroSet:       cfg.IngressSetAeroSet,
+		})
+		if ibErr != nil {
+			if egBackend != nil {
+				_ = egBackend.Close()
+			}
+			return fmt.Errorf("ingress-set backend: %w", ibErr)
+		}
 		txDedupStore, err = txdedup.NewWithConfig(txdedup.Config{
-			EgressRedisAddr:  cfg.EgressDedupRedisAddr,
-			EgressPrefix:     cfg.EgressDedupPrefix,
-			EgressTTL:        cfg.EgressDedupTTL2,
-			EgressLocalCap:   cfg.EgressDedupLocalCap,
-			DeploymentID:     cfg.DeploymentID,
-			IngressRedisAddr: cfg.IngressSetRedisAddr,
-			IngressPrefix:    cfg.IngressSetPrefix,
-			IngressTTL:       cfg.IngressSetTTL,
-			IngressLocalCap:  cfg.IngressSetLocalCap,
-			Recorder:         rec,
+			EgressBackend:   egBackend,
+			EgressPrefix:    cfg.EgressDedupPrefix,
+			EgressTTL:       cfg.EgressDedupTTL2,
+			EgressLocalCap:  cfg.EgressDedupLocalCap,
+			DeploymentID:    cfg.DeploymentID,
+			IngressBackend:  ingBackend,
+			IngressPrefix:   cfg.IngressSetPrefix,
+			IngressTTL:      cfg.IngressSetTTL,
+			IngressLocalCap: cfg.IngressSetLocalCap,
+			Recorder:        rec,
 		})
 		if err != nil {
 			return fmt.Errorf("txid dedup: %w", err)
 		}
-		defer func() { _ = txDedupStore.Close() }()
+		defer func() {
+			_ = txDedupStore.Close()
+			if egBackend != nil {
+				_ = egBackend.Close()
+			}
+			if ingBackend != nil {
+				_ = ingBackend.Close()
+			}
+		}()
 
 		slog.Info("egress TxID dedup enabled",
+			"backend", cfg.EgressDedupBackend,
 			"redis_addr", cfg.EgressDedupRedisAddr,
 			"prefix", txDedupStore.EgressPrefix(),
 			"ttl", cfg.EgressDedupTTL2,

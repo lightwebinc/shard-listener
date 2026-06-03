@@ -623,13 +623,26 @@ deployment of one out of the box.
 Informational identifier surfaced in metrics labels. Does not participate
 in the dedup decision.
 
+The egress dedup and the courtesy ingress mark each use a modular
+`shard-common/cache` backend, selected independently. See
+[`bsv-multicast/docs/ModularCacheBackend/`](../../bsv-multicast/docs/ModularCacheBackend/modular-cache-backend.md)
+for the interface and backend matrix.
+
+### `-egress-dedup-backend` / `EGRESS_DEDUP_BACKEND` (default: inferred)
+
+Tier-2 backend for the egress dedup store: `redis|aerospike|memory|none`. Empty
+infers `redis` when `-egress-dedup-redis-addr` is set, else `none` (tier-1 LRU
+only). Aerospike seed nodes are set with `-egress-dedup-aerospike-hosts`
+(comma-separated `host:port`), namespace `-egress-dedup-aerospike-namespace`
+(default `cache`), set `-egress-dedup-aerospike-set` (default `bsl-egr`).
+
 ### `-egress-dedup-redis-addr` / `EGRESS_DEDUP_REDIS_ADDR`
 
-Redis address for the per-deployment egress TxID dedup. Empty falls back
-to a tier-1 in-process LRU only — useful for single-listener deployments
-or when Redis is unavailable.
+Redis-protocol address (Redis/Valkey/Dragonfly) for the per-deployment egress
+TxID dedup. Empty falls back to a tier-1 in-process LRU only — useful for
+single-listener deployments or when the backend is unavailable.
 
-Final Redis key shape: `<EGRESS_DEDUP_PREFIX><DEPLOYMENT_ID>:<hex-txid>`.
+Final key shape: `<EGRESS_DEDUP_PREFIX><DEPLOYMENT_ID>:<hex-txid>`.
 
 ### `-egress-dedup-prefix` / `EGRESS_DEDUP_PREFIX` (default `bsl:egr:`)
 
@@ -647,9 +660,17 @@ delay across HA siblings. Distinct from the legacy `-egress-dedup-ttl`
 Tier-1 local LRU capacity for the egress dedup gate. Set to 0 to disable
 the per-deployment dedup feature entirely.
 
+### `-ingress-set-backend` / `INGRESS_SET_BACKEND` (default: inferred)
+
+Tier-2 backend for the courtesy ingress mark: `redis|aerospike|memory|none`.
+Empty infers `redis` when `-ingress-set-redis-addr` is set, else `none`
+(mark disabled). Aerospike knobs mirror the egress store:
+`-ingress-set-aerospike-hosts` / `-ingress-set-aerospike-namespace` (default
+`cache`) / `-ingress-set-aerospike-set` (default `bsp-tx`).
+
 ### `-ingress-set-redis-addr` / `INGRESS_SET_REDIS_ADDR`
 
-Optional Redis address for the courtesy SETNX into the local proxy's
+Optional Redis-protocol address for the courtesy SETNX into the local proxy's
 ingress namespace. Lets the local proxy know that a TxID is already on
 the multicast network even when the proxy itself never saw the upstream
 delivery (cross-site bridged TxIDs, side-channel ingress, etc.). Empty
