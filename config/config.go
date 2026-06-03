@@ -243,10 +243,13 @@ type Config struct {
 	DrainTimeout time.Duration
 
 	// Observability
-	MetricsAddr  string
-	InstanceID   string
-	OTLPEndpoint string
-	OTLPInterval time.Duration
+	MetricsAddr   string
+	InstanceID    string
+	OTLPEndpoint  string
+	OTLPInterval  time.Duration
+	LogFormat     string  // "text" (default) | "json"
+	LogLevel      string  // debug|info|warn|error
+	TraceSampling float64 // 0..1 head sampling ratio; 0 disables tracing
 }
 
 // Load parses flags and environment variables, validates all values, and
@@ -360,7 +363,13 @@ func Load() (*Config, error) {
 	flag.IntVar(&c.NumWorkers, "workers", envInt("NUM_WORKERS", runtime.NumCPU()),
 		"number of worker goroutines (0 = runtime.NumCPU)")
 	flag.BoolVar(&c.Debug, "debug", envBool("DEBUG", false),
-		"enable per-frame debug logging")
+		"enable per-frame debug logging; deprecated alias for -log-level=debug")
+	flag.StringVar(&c.LogFormat, "log-format", envStr("LOG_FORMAT", "text"),
+		"log output format: text (default, stderr) | json (stdout, for fleet aggregation)")
+	flag.StringVar(&c.LogLevel, "log-level", envStr("LOG_LEVEL", "info"),
+		"log level: debug|info|warn|error (overridden to debug when -debug is set)")
+	flag.Float64Var(&c.TraceSampling, "trace-sampling", envFloat("TRACE_SAMPLING", 0),
+		"distributed-trace head sampling ratio 0..1 (0 = tracing off; exports via -otlp-endpoint)")
 	flag.BoolVar(&c.VerifyPayloadHash, "verify-payload-hash", envBool("VERIFY_PAYLOAD_HASH", false),
 		"verify SHA256d(payload) == TxID on BRC-124/BRC-128 frames; drop on mismatch")
 	flag.BoolVar(&c.SubtreeDataEnabled, "subtree-data-enabled", envBool("SUBTREE_DATA_ENABLED", false),
@@ -830,6 +839,15 @@ func envBool(key string, def bool) bool {
 	if v := os.Getenv(key); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
+		}
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return def

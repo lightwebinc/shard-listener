@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -17,9 +18,12 @@ import (
 
 	"github.com/lightwebinc/shard-common/bootstrap"
 	"github.com/lightwebinc/shard-common/cache"
+	"github.com/lightwebinc/shard-common/hostinfo"
+	"github.com/lightwebinc/shard-common/logging"
 	commanifest "github.com/lightwebinc/shard-common/manifest"
 	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
+	"github.com/lightwebinc/shard-common/tracing"
 
 	listenermanifest "github.com/lightwebinc/shard-listener/manifest"
 
@@ -49,11 +53,18 @@ func run() error {
 		return fmt.Errorf("config: %w", err)
 	}
 
-	logLevel := slog.LevelInfo
+	logLevel := logging.ParseLevel(cfg.LogLevel)
 	if cfg.Debug {
 		logLevel = slog.LevelDebug
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+	levelVar := logging.Init(logging.Options{
+		Service:    metrics.ServiceName,
+		InstanceID: cfg.InstanceID,
+		Version:    metrics.Version,
+		Level:      logLevel,
+		Format:     logging.ParseFormat(cfg.LogFormat),
+	})
+	logging.InstallSIGHUPToggle(levelVar, logLevel)
 
 	slog.Info("shard-listener starting",
 		"shard_bits", cfg.ShardBits,
@@ -93,6 +104,31 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("metrics: %w", err)
 	}
+	rec.SetLevelVar(levelVar)
+
+	// One-shot host inventory: descriptive payload as a log event, slim
+	// numerics mirrored as the bsl_host_info gauge.
+	inv := hostinfo.Gather(metrics.ServiceName, metrics.Version)
+	rec.SetHostInfo(inv)
+	slog.Info("host.inventory", "inventory", inv)
+
+	// Opt-in distributed tracing (no-op unless -trace-sampling > 0 with an OTLP
+	// endpoint). Control-plane only (NACK/manifest); never the receive hot path.
+	_, traceShutdown, terr := tracing.Init(context.Background(), tracing.Options{
+		Service:      metrics.ServiceName,
+		InstanceID:   cfg.InstanceID,
+		Version:      metrics.Version,
+		OTLPEndpoint: cfg.OTLPEndpoint,
+		Sampling:     cfg.TraceSampling,
+	})
+	if terr != nil {
+		slog.Warn("tracing init failed; continuing without traces", "err", terr)
+	}
+	defer func() {
+		tctx, tcancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer tcancel()
+		_ = traceShutdown(tctx)
+	}()
 
 	// Build the shard engine.
 	engine := shard.New(cfg.MCPrefix, cfg.MCGroupID, cfg.ShardBits)
@@ -286,8 +322,16 @@ func run() error {
 						}
 						for _, w := range workers {
 							if err := w.AddGroup(ga, nil); err != nil {
-								slog.Warn("auto-join AddGroup failed",
-									"group", ga.String(), "worker", w, "err", err)
+								var errno syscall.Errno
+								if errors.As(err, &errno) && errno == syscall.ENOBUFS {
+									// mld_max_msf source-filter exhaustion is the
+									// canonical fleet-scale join failure (category-8).
+									slog.Error("auto-join failed: MLD source-filter exhausted; raise net.ipv6.mld_max_msf",
+										"group", ga.String(), "err", err, "errno", errno.Error(), "syscall", "setsockopt")
+								} else {
+									slog.Warn("auto-join AddGroup failed",
+										"group", ga.String(), "worker", w, "err", err)
+								}
 							}
 						}
 					}
