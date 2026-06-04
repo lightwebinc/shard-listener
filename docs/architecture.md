@@ -376,7 +376,7 @@ generic join failures.
 
 **Tracing** is opt-in (`-trace-sampling > 0` + `-otlp-endpoint`) and
 control-plane only — the receive/reassembly hot paths take no span. See the
-[Unified Logging Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/UnifiedLogging/unified-logging-plan.md).
+[Unified Logging Plan](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md).
 
 ## Testing
 

@@ -616,7 +616,7 @@ Structured-log output format: `text` (human-readable, stderr; dev default) or
 `json` (one JSON object per line on stdout, for fleet aggregation via a
 node-local collector). Every line carries the `service.{name,instance.id,version}`
 identity triple shared with the OTLP metrics resource attributes. See the
-[Unified Logging Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/UnifiedLogging/unified-logging-plan.md).
+[Unified Logging Plan](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md).
 
 ### `-log-level` / `LOG_LEVEL` (default: `info`)
 
@@ -647,7 +647,7 @@ in the dedup decision.
 
 The egress dedup and the courtesy ingress mark each use a modular
 `shard-common/cache` backend, selected independently. See
-[`bsv-multicast/docs/ModularCacheBackend/`](../../bsv-multicast/docs/ModularCacheBackend/modular-cache-backend.md)
+[`shard-common/docs/cache-backend.md`](https://github.com/lightwebinc/shard-common/blob/main/docs/cache-backend.md)
 for the interface and backend matrix.
 
 ### `-egress-dedup-backend` / `EGRESS_DEDUP_BACKEND` (default: inferred)
