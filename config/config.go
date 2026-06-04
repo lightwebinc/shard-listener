@@ -125,7 +125,7 @@ type Config struct {
 
 	// SSM. See SSM Support Plan.
 	// SourceMode: "asm" (default) | "ssm"
-	// SSMBootstrap{Beacon,Manifest,SubtreeAnnounce}: per-control-group
+	// SSMBootstrap{Beacon,Manifest,SubtreeGroupAnnounce}: per-control-group
 	//   bootstrap source lists (IPv6 literals or DNS names) used to (S,G)
 	//   join the matching control group. Resolved via shared
 	//   bootstrap.Resolver at startup.
@@ -191,7 +191,7 @@ type Config struct {
 	SenderExclude          []*net.IPNet // checked before include
 
 	// BRC-132 subtree data
-	SubtreeDataEnabled      bool // join GroupSubtreeAnnounce (0xFFFB)
+	SubtreeDataEnabled      bool // join GroupSubtreeDataAnnounce (0xFFFB)
 	SubtreeDataVerifyMerkle bool // optional post-reassembly Merkle root check
 
 	// Runtime
@@ -373,7 +373,7 @@ func Load() (*Config, error) {
 	flag.BoolVar(&c.VerifyPayloadHash, "verify-payload-hash", envBool("VERIFY_PAYLOAD_HASH", false),
 		"verify SHA256d(payload) == TxID on BRC-124/BRC-128 frames; drop on mismatch")
 	flag.BoolVar(&c.SubtreeDataEnabled, "subtree-data-enabled", envBool("SUBTREE_DATA_ENABLED", false),
-		"enable BRC-132 subtree data reception: join GroupSubtreeAnnounce (0xFFFB) group")
+		"enable BRC-132 subtree data reception: join GroupSubtreeDataAnnounce (0xFFFB) group")
 	flag.BoolVar(&c.SubtreeDataVerifyMerkle, "subtree-data-verify-merkle", envBool("SUBTREE_DATA_VERIFY_MERKLE", false),
 		"optional post-reassembly Merkle root verification for BRC-132 frames (expensive at 1M nodes)")
 	flag.IntVar(&c.EgressDedupCap, "egress-dedup-cap", envInt("EGRESS_DEDUP_CAP", 0),

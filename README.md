@@ -17,7 +17,7 @@ tier-based escalation.
 
 ```
 FF05::<shard>:9001  ──multicast──►  shard-listener  ──UDP/TCP──►  downstream :9100
-[Control Groups]    ──multicast──►  (BRC-127 SubtreeAnnounce) └─multicast►  FF02::<shard>
+[Control Groups]    ──multicast──►  (BRC-127 SubtreeGroupAnnounce) └─multicast►  FF02::<shard>
                                            │  shard + subtree filter
                                      gap detected
                                            │
@@ -30,7 +30,7 @@ FF05::<shard>:9001  ──multicast──►  shard-listener  ──UDP/TCP─�
 - **SO_REUSEPORT** multi-worker receive with kernel-level source affinity
 - **Shard filter** — subscribe to a subset of shard groups (empty = all)
 - **Subtree filter** — include/exclude by 32-byte SubtreeID (BRC-124/BRC-128 frames)
-- **BRC-127 subtree group announcements** — dynamic group-based filtering via multicast SubtreeAnnounce datagrams with TTL eviction and sender ACLs
+- **BRC-127 subtree group announcements** — dynamic group-based filtering via multicast SubtreeGroupAnnounce datagrams with TTL eviction and sender ACLs
 - **Gap tracking** — per-flow HashKey/SeqNum monotonic counter gap detection (BRC-124/BRC-128)
 - **NACK dispatch** — 64-byte NACK datagrams (HashKey + StartSeq/EndSeq + SubtreeID) with 16-byte ACK/MISS response handling
 - **Beacon discovery** — dynamic retry endpoint registry via BRC-126 ADVERT beacons

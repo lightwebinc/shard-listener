@@ -93,9 +93,9 @@ type Recorder struct {
 	nacksUnrecovered metric.Int64Counter // retries exhausted or TTL exceeded
 
 	// BRC-127 subtree group announce counters
-	subtreeAnnouncesReceived metric.Int64Counter
-	subtreeAnnouncesRejected metric.Int64Counter
-	subtreeGroupEvictions    metric.Int64Counter
+	subtreeGroupAnnouncesReceived metric.Int64Counter
+	subtreeGroupAnnouncesRejected metric.Int64Counter
+	subtreeGroupEvictions         metric.Int64Counter
 
 	// Subtree group registry size (updated by evict loop)
 	subtreeGroupEntries atomic.Int64
@@ -319,12 +319,12 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 
-	if r.subtreeAnnouncesReceived, err = meter.Int64Counter("bsl_subtree_announces_received_total",
-		metric.WithDescription("Valid SubtreeAnnounce datagrams processed (BRC-127)")); err != nil {
+	if r.subtreeGroupAnnouncesReceived, err = meter.Int64Counter("bsl_subtree_group_announces_received_total",
+		metric.WithDescription("Valid SubtreeGroupAnnounce datagrams processed (BRC-127)")); err != nil {
 		return nil, err
 	}
-	if r.subtreeAnnouncesRejected, err = meter.Int64Counter("bsl_subtree_announces_rejected_total",
-		metric.WithDescription("SubtreeAnnounce datagrams rejected before registry update")); err != nil {
+	if r.subtreeGroupAnnouncesRejected, err = meter.Int64Counter("bsl_subtree_group_announces_rejected_total",
+		metric.WithDescription("SubtreeGroupAnnounce datagrams rejected before registry update")); err != nil {
 		return nil, err
 	}
 	if r.subtreeGroupEvictions, err = meter.Int64Counter("bsl_subtree_group_evictions_total",
@@ -566,15 +566,15 @@ func (r *Recorder) GapUnrecovered(flow string) {
 	r.nacksUnrecovered.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
 }
 
-// SubtreeAnnounceReceived records a valid SubtreeAnnounce datagram processed.
-func (r *Recorder) SubtreeAnnounceReceived() {
-	r.subtreeAnnouncesReceived.Add(context.Background(), 1)
+// SubtreeGroupAnnounceReceived records a valid SubtreeGroupAnnounce datagram processed.
+func (r *Recorder) SubtreeGroupAnnounceReceived() {
+	r.subtreeGroupAnnouncesReceived.Add(context.Background(), 1)
 }
 
-// SubtreeAnnounceRejected records a rejected SubtreeAnnounce datagram.
+// SubtreeGroupAnnounceRejected records a rejected SubtreeGroupAnnounce datagram.
 // reason: "too_short", "decode_error", "sender_filter".
-func (r *Recorder) SubtreeAnnounceRejected(reason string) {
-	r.subtreeAnnouncesRejected.Add(context.Background(), 1, metric.WithAttributes(
+func (r *Recorder) SubtreeGroupAnnounceRejected(reason string) {
+	r.subtreeGroupAnnouncesRejected.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("reason", reason),
 	))
 }

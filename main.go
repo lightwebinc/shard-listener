@@ -217,7 +217,7 @@ func run() error {
 			annIP := shard.GroupAddr(scopePrefix, cfg.MCGroupID, shard.GroupSubtreeGroupAnnounce)
 			announceGroups = append(announceGroups, &net.UDPAddr{IP: annIP, Port: cfg.ListenPort})
 		}
-		sal := &discovery.SubtreeAnnounceListener{
+		sal := &discovery.SubtreeGroupAnnounceListener{
 			Registry:      groupReg,
 			Groups:        announceGroups,
 			Iface:         cfg.Iface,
@@ -656,7 +656,7 @@ func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, erro
 
 	// Join the subtree data group when BRC-132 reception is enabled.
 	if cfg.SubtreeDataEnabled {
-		subtreeDataIP := shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupSubtreeAnnounce)
+		subtreeDataIP := shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupSubtreeDataAnnounce)
 		groups = append(groups, &net.UDPAddr{IP: subtreeDataIP, Port: cfg.ListenPort})
 	}
 
@@ -667,7 +667,7 @@ func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, erro
 // and the lab/CI static publisher list into a single map keyed by
 // IPv6-group-address. The control-group source lists (beacon, manifest,
 // subtree-announce) are returned separately so they can be threaded into
-// the BeaconListener / SubtreeAnnounceListener Sources fields. All
+// the BeaconListener / SubtreeGroupAnnounceListener Sources fields. All
 // resolvers run for the lifetime of ctx; startup is fail-closed.
 //
 // Returns (gs, beaconSrcs, manifestSrcs, subtreeAnnSrcs, err).
@@ -714,7 +714,7 @@ func buildSSMSources(ctx context.Context, cfg *config.Config) (listener.GroupSou
 		}
 	}
 	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupBeacon), beaconSrcs)
-	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupSubtreeAnnounce), subAnnSrcs)
+	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupSubtreeDataAnnounce), subAnnSrcs)
 	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupSubtreeGroupAnnounce), subAnnSrcs)
 	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupBlockBroadcast), manifestSrcs)
 

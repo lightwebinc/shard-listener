@@ -26,9 +26,9 @@ type TrackerConfig struct {
 // Mirrors shard.GroupBlockBroadcast = 0xFFFE without importing the shard package.
 const groupBlockBroadcast uint32 = 0xFFFE
 
-// groupSubtreeAnnounce is the reserved group index for BRC-132 subtree data frames.
-// Mirrors shard.GroupSubtreeAnnounce = 0xFFFB without importing the shard package.
-const groupSubtreeAnnounce uint32 = 0xFFFB
+// groupSubtreeDataAnnounce is the reserved group index for BRC-132 subtree data frames.
+// Mirrors shard.GroupSubtreeDataAnnounce = 0xFFFB without importing the shard package.
+const groupSubtreeDataAnnounce uint32 = 0xFFFB
 
 // groupAnchorFlow is the virtual group index for BRC-134 anchor transaction frames.
 // Anchors share the GroupBlockBroadcast multicast address on the wire but use a
@@ -41,7 +41,7 @@ func flowLabel(groupIdx uint32) string {
 	switch groupIdx {
 	case groupBlockBroadcast:
 		return "brc131"
-	case groupSubtreeAnnounce:
+	case groupSubtreeDataAnnounce:
 		return "brc132"
 	case groupAnchorFlow:
 		return "brc134"

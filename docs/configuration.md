@@ -66,7 +66,7 @@ group `(S,G)` join under Posture C.
 ### `-ssm-bootstrap-subtree-announce` / `SSM_BOOTSTRAP_SUBTREE_ANNOUNCE` (default: `""`)
 
 CSV of source IPs that emit subtree-announce frames. Used as the SSM
-source set for both `GroupSubtreeAnnounce` (0xFFFB) and
+source set for both `GroupSubtreeDataAnnounce` (0xFFFB) and
 `GroupSubtreeGroupAnnounce` (0xFFFC).
 
 ### `-ssm-publishers-static` / `SSM_PUBLISHERS_STATIC` (default: `""`)
@@ -466,7 +466,7 @@ Local floor on the bridging duration. `0` ⇒ honour the pilot's
 ## Subtree Group Announcements (BRC-127)
 
 When configured, the listener joins the `GroupSubtreeGroupAnnounce`
-(`0xFFFC`) control-plane multicast group and receives `SubtreeAnnounce`
+(`0xFFFC`) control-plane multicast group and receives `SubtreeGroupAnnounce`
 datagrams from block assemblers (via the proxy TCP ingress). Announced
 SubtreeIDs are added to a dynamic registry with TTL-based eviction. The
 filter treats registry membership as an additional pass condition alongside
@@ -528,7 +528,7 @@ Empty means exclude nothing.
 ## BRC-132 Subtree Data Reception
 
 BRC-132 carries subtree-level Merkle data (hashes or full nodes) for a given Bitcoin block
-subtree. Subtree data frames arrive on `GroupSubtreeAnnounce` (`FF0X::B:FFFB`), which
+subtree. Subtree data frames arrive on `GroupSubtreeDataAnnounce` (`FF0X::B:FFFB`), which
 the listener joins only when enabled. They bypass shard/subtree filtering and are forwarded
 directly to the configured egress endpoint. Gap tracking runs on a per-subtree flow so that
 NACK retransmission can recover lost fragments independently for each subtree.
@@ -536,7 +536,7 @@ NACK retransmission can recover lost fragments independently for each subtree.
 ### `-subtree-data-enabled` / `SUBTREE_DATA_ENABLED` (default: `false`)
 
 Enable BRC-132 subtree data reception. When `true`, the listener joins
-`GroupSubtreeAnnounce` (`0xFFFB`) in addition to its shard groups and `GroupBlockBroadcast`.
+`GroupSubtreeDataAnnounce` (`0xFFFB`) in addition to its shard groups and `GroupBlockBroadcast`.
 When `false` (the default), the group is not joined and BRC-132 frames are never received.
 
 ### `-subtree-data-verify-merkle` / `SUBTREE_DATA_VERIFY_MERKLE` (default: `false`)

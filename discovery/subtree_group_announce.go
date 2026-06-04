@@ -18,11 +18,12 @@ import (
 	"github.com/lightwebinc/shard-listener/subtreegroup"
 )
 
-// SubtreeAnnounceListener joins the BRC-127 subtree announcement multicast
-// group on one or more configured scopes and populates a [subtreegroup.Registry]
-// with received SubtreeAnnounce datagrams. Call Start to begin listening;
+// SubtreeGroupAnnounceListener joins the BRC-127 subtree group announcement
+// multicast group (GroupSubtreeGroupAnnounce, 0xFFFC) on one or more configured
+// scopes and populates a [subtreegroup.Registry]
+// with received SubtreeGroupAnnounce datagrams. Call Start to begin listening;
 // cancel the context to stop.
-type SubtreeAnnounceListener struct {
+type SubtreeGroupAnnounceListener struct {
 	Registry      *subtreegroup.Registry
 	Groups        []*net.UDPAddr    // control group addresses to join
 	Iface         *net.Interface    // multicast interface
@@ -34,10 +35,10 @@ type SubtreeAnnounceListener struct {
 	Debug         bool
 }
 
-// Start listens for SubtreeAnnounce datagrams on all configured groups.
+// Start listens for SubtreeGroupAnnounce datagrams on all configured groups.
 // It also starts a background eviction goroutine (1 s tick).
 // Blocks until ctx is cancelled.
-func (sl *SubtreeAnnounceListener) Start(ctx context.Context) error {
+func (sl *SubtreeGroupAnnounceListener) Start(ctx context.Context) error {
 	go sl.evictLoop(ctx)
 
 	errCh := make(chan error, len(sl.Groups))
@@ -56,7 +57,7 @@ func (sl *SubtreeAnnounceListener) Start(ctx context.Context) error {
 	}
 }
 
-func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDPAddr) error {
+func (sl *SubtreeGroupAnnounceListener) listenGroup(ctx context.Context, grp *net.UDPAddr) error {
 	fd, err := openAnnounceSocket(sl.Iface, grp, sl.Sources)
 	if err != nil {
 		return err
@@ -71,7 +72,7 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 		_ = unix.Close(fd)
 	}()
 
-	buf := make([]byte, frame.SubtreeAnnounceSize+64)
+	buf := make([]byte, frame.SubtreeGroupAnnounceSize+64)
 
 	for {
 		n, from, err := unix.Recvfrom(fd, buf, 0)
@@ -91,16 +92,16 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 			if ctx.Err() != nil {
 				return nil
 			}
-			slog.Warn("subtree_announce: read error", "group", grp.IP, "err", err)
+			slog.Warn("subtree_group_announce: read error", "group", grp.IP, "err", err)
 			continue
 		}
 
-		if n < frame.SubtreeAnnounceSize {
+		if n < frame.SubtreeGroupAnnounceSize {
 			if sl.Rec != nil {
-				sl.Rec.SubtreeAnnounceRejected("too_short")
+				sl.Rec.SubtreeGroupAnnounceRejected("too_short")
 			}
 			if sl.Debug {
-				slog.Debug("subtree_announce: datagram too short", "n", n)
+				slog.Debug("subtree_group_announce: datagram too short", "n", n)
 			}
 			continue
 		}
@@ -108,21 +109,21 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 		src := sockaddrToUDP(from)
 		if !sl.senderAllowed(src) {
 			if sl.Rec != nil {
-				sl.Rec.SubtreeAnnounceRejected("sender_filter")
+				sl.Rec.SubtreeGroupAnnounceRejected("sender_filter")
 			}
 			if sl.Debug {
-				slog.Debug("subtree_announce: sender rejected by filter", "src", src.IP)
+				slog.Debug("subtree_group_announce: sender rejected by filter", "src", src.IP)
 			}
 			continue
 		}
 
-		ann, err := frame.DecodeSubtreeAnnounce(buf[:n])
+		ann, err := frame.DecodeSubtreeGroupAnnounce(buf[:n])
 		if err != nil {
 			if sl.Rec != nil {
-				sl.Rec.SubtreeAnnounceRejected("decode_error")
+				sl.Rec.SubtreeGroupAnnounceRejected("decode_error")
 			}
 			if sl.Debug {
-				slog.Debug("subtree_announce: decode error", "err", err)
+				slog.Debug("subtree_group_announce: decode error", "err", err)
 			}
 			continue
 		}
@@ -133,11 +134,11 @@ func (sl *SubtreeAnnounceListener) listenGroup(ctx context.Context, grp *net.UDP
 		}
 		sl.Registry.Add(ann.GroupID, ann.SubtreeID, ttl)
 		if sl.Rec != nil {
-			sl.Rec.SubtreeAnnounceReceived()
+			sl.Rec.SubtreeGroupAnnounceReceived()
 		}
 
 		if sl.Debug {
-			slog.Debug("subtree_announce: added entry",
+			slog.Debug("subtree_group_announce: added entry",
 				"group", hex.EncodeToString(ann.GroupID[:]),
 				"subtree", hex.EncodeToString(ann.SubtreeID[:]),
 				"ttl", ttl,
@@ -192,12 +193,12 @@ func sockaddrToUDP(sa unix.Sockaddr) *net.UDPAddr {
 // senderAllowed applies exclude → include filtering on the UDP source.
 // Returns true if the announcement should be processed. Delegates to
 // [filter.SenderACL] so the same logic backs the data-plane worker check.
-func (sl *SubtreeAnnounceListener) senderAllowed(src *net.UDPAddr) bool {
+func (sl *SubtreeGroupAnnounceListener) senderAllowed(src *net.UDPAddr) bool {
 	acl := filter.SenderACL{Include: sl.SenderInclude, Exclude: sl.SenderExclude}
 	return acl.Allow(src.IP)
 }
 
-func (sl *SubtreeAnnounceListener) evictLoop(ctx context.Context) {
+func (sl *SubtreeGroupAnnounceListener) evictLoop(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {

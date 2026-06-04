@@ -2,7 +2,7 @@
 // maps 128-bit group IDs to sets of 32-byte subtree IDs. Listeners use it to
 // implement dynamic subtree-group-based frame filtering (BRC-127).
 //
-// Entries are added by [SubtreeAnnounceListener] as announcements arrive and
+// Entries are added by [SubtreeGroupAnnounceListener] as announcements arrive and
 // expire automatically when not refreshed before their TTL elapses. [Evict]
 // must be called periodically (e.g. on a 1-second tick) to purge stale entries.
 //

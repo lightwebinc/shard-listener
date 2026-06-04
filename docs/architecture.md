@@ -21,7 +21,7 @@ BSV senders
 shard-proxy
    │ BRC-124/BRC-128 frames → FF05::B:<shard>      (data plane)
    │ BRC-131/BRC-134 frames → FF0E::B:FFFE          (GroupBlockBroadcast, always global)
-   │ BRC-132 frames         → FF05::B:FFFB          (GroupSubtreeAnnounce)
+   │ BRC-132 frames         → FF05::B:FFFB          (GroupSubtreeDataAnnounce)
    │ BRC-127 datagrams      → FF05::B:FFFC          (GroupSubtreeGroupAnnounce)
    ▼
 Multicast fabric (site-scoped FF05::/16)
@@ -45,7 +45,7 @@ When `-source-mode=ssm` the listener joins every multicast group as
 `(S,G)` via `MCAST_JOIN_SOURCE_GROUP` instead of `(*,G)` via
 `IPV6_JOIN_GROUP`. The branch lives in the shared
 `shard-common/netjoin` package; the data-plane Worker, BeaconListener,
-and SubtreeAnnounceListener all call the same `netjoin.Join(fd, ifIdx,
+and SubtreeGroupAnnounceListener all call the same `netjoin.Join(fd, ifIdx,
 group, sources)` helper which selects the syscall based on the source
 list length.
 
@@ -56,7 +56,7 @@ Source lists per group come from two places:
 | Data groups (`FF35::B:idx`)    | `-ssm-publishers-static` (lab/CI) or manifest-derived publisher union (production)             |
 | Beacon (`:FFFD`)               | `-ssm-bootstrap-beacon` — the retry-endpoint pod IPs (retry-endpoint emits NACK ADVERTs)       |
 | Manifest / BlockBroadcast      | `-ssm-bootstrap-manifest` — the shard-manifest pod IPs                                         |
-| SubtreeAnnounce (`:FFFB/FFFC`) | `-ssm-bootstrap-subtree-announce`                                                              |
+| SubtreeGroupAnnounce (`:FFFB/FFFC`) | `-ssm-bootstrap-subtree-announce`                                                              |
 
 Bootstrap lists are resolved via the shared `bootstrap.Resolver`
 (`shard-common/bootstrap`): DNS names or IPv6 literals; fail-closed
@@ -73,7 +73,7 @@ for fabric prerequisites (PIM-SSM, MLDv2, raised `mld_max_msf`).
 Each worker:
 1. Opens a UDP socket with `SO_REUSEPORT` on the configured listen port.
 2. Joins all configured multicast groups on the configured interface (shard groups +
-   `GroupBlockBroadcast` always; `GroupSubtreeAnnounce` when `-subtree-data-enabled`;
+   `GroupBlockBroadcast` always; `GroupSubtreeDataAnnounce` when `-subtree-data-enabled`;
    `GroupSubtreeGroupAnnounce` when `-subtree-groups` is set).
 3. Dispatches each received datagram via `processFrame`, which branches on the frame
    version byte before decode:
@@ -208,14 +208,14 @@ for BRC-12 frames because `SeqNum` is zero.
 | Constant | Index | Canonical Address (group-id `0x000B`) | Purpose |
 |---|---|---|---|
 | `GroupBlockHeader` | 0xFFFA | egress-scope `FF0X::<egress-gid>:FFFA` | Block header egress channel (BRC-135) |
-| `GroupSubtreeAnnounce` | 0xFFFB | FF05::B:FFFB (data-plane scope) | BRC-132 subtree data frames |
+| `GroupSubtreeDataAnnounce` | 0xFFFB | FF05::B:FFFB (data-plane scope) | BRC-132 subtree data frames |
 | `GroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC (data-plane scope) | BRC-127 subtree group announcements |
 | `GroupBeacon` | 0xFFFD | FF05::B:FFFD (site) / FF0E::B:FFFD (global) | ADVERT beacon (BRC-126 discovery) |
 | `GroupBlockBroadcast` | 0xFFFE | **FF0E::B:FFFE (always global)** | BRC-131 block control + BRC-134 anchor frames |
 | _(virtual)_ | 0xFFF9 | — | BRC-134 anchor flow identity for gap tracking |
 
 The listener always joins `GroupBlockBroadcast` and `GroupBeacon`. It joins
-`GroupSubtreeAnnounce` only when `-subtree-data-enabled=true`, and
+`GroupSubtreeDataAnnounce` only when `-subtree-data-enabled=true`, and
 `GroupSubtreeGroupAnnounce` when `-subtree-groups` is configured.
 
 ## BRC-131 Block Control Frame Processing
@@ -258,13 +258,13 @@ is delivered via `DeliverReassembledBlock`, which re-encodes it as a valid wire 
 
 ## BRC-132 Subtree Data Frame Processing
 
-`GroupSubtreeAnnounce` (0xFFFB) is joined only when `-subtree-data-enabled=true`.
+`GroupSubtreeDataAnnounce` (0xFFFB) is joined only when `-subtree-data-enabled=true`.
 BRC-132 frames on this group are dispatched to `processSubtreeDataFrame`:
 
 1. Calls `frame.DecodeSubtreeData` to validate and extract subtree fields.
 2. Bypasses the shard/subtree filter.
 3. Forwards the raw frame via `egress.Sender.SendSubtreeData` to the configured downstream.
-4. Calls `nack.Tracker.Observe(uint32(GroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)`
+4. Calls `nack.Tracker.Observe(uint32(GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)`
    for gap tracking. Each distinct `SubtreeID` is sequenced independently.
 
 The listener forwards the raw payload without parsing. `MsgType` `0x01` = hashes-only

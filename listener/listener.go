@@ -674,7 +674,7 @@ func (w *Worker) processSubtreeDataFrame(raw []byte) {
 
 	// Gap tracking on the subtree data flow uses SubtreeID as the flow scope.
 	if w.tracker != nil && sf.SeqNum != 0 {
-		w.tracker.Observe(uint32(shard.GroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
+		w.tracker.Observe(uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
 	}
 
 	if w.debug {
@@ -847,7 +847,7 @@ func (w *Worker) DeliverReassembledSubtreeData(payload []byte, sf *frame.Subtree
 	}
 
 	if w.tracker != nil && sf.SeqNum != 0 {
-		w.tracker.Observe(uint32(shard.GroupSubtreeAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
+		w.tracker.Observe(uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
 	}
 
 	if w.debug {
