@@ -20,6 +20,7 @@ type mockEndpoint struct {
 	addr      *net.UDPAddr
 	count     atomic.Int64
 	missCount int64 // when count <= missCount, respond MISS; else ACK
+	silent    bool  // if true, read and count but never reply (simulate timeout)
 }
 
 func newMockEndpoint(t *testing.T, missCount int64) *mockEndpoint {
@@ -46,6 +47,9 @@ func (m *mockEndpoint) run() {
 			return
 		}
 		n := m.count.Add(1)
+		if m.silent {
+			continue // never reply: the listener will hit respTimeout
+		}
 		resp := nack.MsgTypeMISS
 		var seqNum uint64
 		if n > m.missCount {

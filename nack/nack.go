@@ -15,8 +15,9 @@ import (
 // TrackerConfig holds tuning parameters for the gap tracker.
 type TrackerConfig struct {
 	JitterMax         time.Duration // Max random hold-off before first NACK (NORM suppression window)
+	BackoffBase       time.Duration // Base delay for retry backoff; doubles per failed round (default 500ms)
 	BackoffMax        time.Duration // Cap on exponential backoff between retries
-	MaxRetries        int           // Max NACK attempts before declaring unrecoverable
+	MaxRetries        int           // Max failed recovery rounds before declaring unrecoverable (tier hops are free)
 	GapTTL            time.Duration // Max lifetime of a gap entry (~Bitcoin block interval)
 	TailTTL           time.Duration // Max idle time before a flow entry is evicted; 0 = GapTTL
 	SeqResetThreshold uint64        // If seqNum <= threshold on an established flow, treat as proxy restart (default 100)
@@ -64,15 +65,25 @@ type flowState struct {
 }
 
 // gapEntry holds retry state for a single missing frame.
+//
+// retries and failRounds track two different things. retries counts every NACK
+// attempt (including the immediate tier-escalation hops that walk retry1 →
+// retry2 → retry3 on a MISS) and is used only for observability. failRounds
+// counts consecutive *failed recovery rounds* — a timeout, or a MISS once the
+// deepest tier has been reached — and drives both the exponential backoff
+// magnitude and the unrecoverable cap. Escalating through tiers is free: it
+// does not grow the backoff or consume the retry budget, so a deep topology
+// gets the same number of real retries at the warm cache as a shallow one.
 type gapEntry struct {
 	hashKey     uint64
 	seqNum      uint64 // the missing sequence number
 	groupIdx    uint32
 	subtreeID   [32]byte // for NACK SubtreeID field
-	retries     int
+	retries     int      // total NACK attempts (observability only)
+	failRounds  int      // consecutive failed recovery rounds (backoff + eviction cap)
 	nextAttempt time.Time
 	deadline    time.Time // absolute eviction deadline
-	endpointIdx int       // round-robin index into registry snapshot
+	endpointIdx int       // index into registry snapshot, clamped to the deepest tier
 }
 
 // Tracker is the gap state machine. Construct with [New] and call [Start] to
@@ -102,12 +113,18 @@ type Tracker struct {
 func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *metrics.Recorder, registry *discovery.Registry) *Tracker {
 	const defaultMaxConcurrent = 64
 	const defaultRespTimeout = 300 * time.Millisecond
+	const defaultBackoffBase = 500 * time.Millisecond
 
 	if registry == nil {
 		registry = discovery.NewRegistry()
 	}
 	if len(retryEndpoints) > 0 {
 		registry.Seed(retryEndpoints)
+	}
+	// Guard against a zero base, which would make every backoff zero and spin
+	// the gap through the dispatch queue without pause.
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = defaultBackoffBase
 	}
 
 	return &Tracker{
@@ -292,7 +309,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 				)
 				continue
 			}
-			if e.retries >= t.cfg.MaxRetries {
+			if e.failRounds >= t.cfg.MaxRetries {
 				delete(fs.pending, seq)
 				if t.rec != nil {
 					t.rec.GapUnrecovered(fs.flowType)
@@ -433,14 +450,21 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	}
 }
 
-// advanceEndpoint updates retry state after a NACK attempt.
+// advanceEndpoint updates retry state after a NACK attempt. It distinguishes
+// tier escalation (free, instant progress toward the warm cache) from a failed
+// recovery round (which backs off and consumes the retry budget):
 //
-//   - immediate=true (MISS): retry now at the next endpoint, provided we have
-//     not yet exhausted the endpoint list. Once endpointIdx reaches
-//     numEndpoints, the gap has tried every tier; further MISS responses use
-//     exponential backoff to give the deepest cache time to warm before
-//     retrying. numEndpoints==0 disables this clamp (used by error paths).
-//   - immediate=false (timeout/error): exponential backoff.
+//   - immediate=true (MISS) with tiers still to try: escalate to the next
+//     endpoint and retry immediately. This is discovery, not failure, so the
+//     fail-round counter resets and no backoff applies.
+//   - otherwise (MISS at the deepest tier, or any timeout/error): count a
+//     failed round and back off exponentially from BackoffBase, doubling per
+//     round and capped at BackoffMax, with full jitter to de-synchronise
+//     listeners. endpointIdx still advances so a timeout fails over toward the
+//     deepest tier; the clamp in sendNACK keeps further attempts pinned there.
+//
+// numEndpoints is the live endpoint count (0 from error paths, which cannot
+// know it and are always treated as a failed round).
 func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool, numEndpoints int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -459,14 +483,22 @@ func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool, numEndpoints int)
 
 	exhausted := numEndpoints > 0 && entry.endpointIdx >= numEndpoints
 	if immediate && !exhausted {
+		// Clean tier escalation: instant retry at the next tier.
+		entry.failRounds = 0
 		entry.nextAttempt = time.Now()
-	} else {
-		backoff := time.Duration(1<<uint(entry.retries)) * 500 * time.Millisecond
-		if backoff > t.cfg.BackoffMax {
-			backoff = t.cfg.BackoffMax
-		}
-		entry.nextAttempt = time.Now().Add(backoff)
+		return
 	}
+
+	// Failed recovery round: exponential backoff seeded by consecutive failures,
+	// not total attempts, so escalation depth never inflates the delay.
+	entry.failRounds++
+	backoff := t.cfg.BackoffBase << uint(entry.failRounds-1)
+	if backoff > t.cfg.BackoffMax || backoff <= 0 { // <=0 guards shift overflow
+		backoff = t.cfg.BackoffMax
+	}
+	// Full jitter over [backoff/2, backoff].
+	half := backoff / 2
+	entry.nextAttempt = time.Now().Add(half + time.Duration(rand.Int64N(int64(half)+1)))
 }
 
 // PendingGaps returns the total number of unresolved gap entries across all flows.

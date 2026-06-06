@@ -164,10 +164,11 @@ func run() error {
 	// Build NACK tracker.
 	tracker := nack.New(
 		nack.TrackerConfig{
-			JitterMax:  cfg.NACKJitterMax,
-			BackoffMax: cfg.NACKBackoffMax,
-			MaxRetries: cfg.NACKMaxRetries,
-			GapTTL:     cfg.NACKGapTTL,
+			JitterMax:   cfg.NACKJitterMax,
+			BackoffBase: cfg.NACKBackoffBase,
+			BackoffMax:  cfg.NACKBackoffMax,
+			MaxRetries:  cfg.NACKMaxRetries,
+			GapTTL:      cfg.NACKGapTTL,
 		},
 		cfg.RetryEndpoints,
 		cfg.Iface,

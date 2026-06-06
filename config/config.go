@@ -34,8 +34,9 @@
 //	-header-mc-egress-hoplimit   HEADER_MC_EGRESS_HOPLIMIT   1                IPV6_MULTICAST_HOPS for headers
 //	-retry-endpoints      RETRY_ENDPOINTS                       Comma-separated host:port retry nodes
 //	-nack-jitter-max      NACK_JITTER_MAX      200ms            Max NACK suppression jitter
+//	-nack-backoff-base    NACK_BACKOFF_BASE    500ms            Base retry backoff (doubles per failed round)
 //	-nack-backoff-max     NACK_BACKOFF_MAX      5s               Cap on exponential backoff per gap
-//	-nack-max-retries     NACK_MAX_RETRIES      5                Max NACK attempts per gap
+//	-nack-max-retries     NACK_MAX_RETRIES      5                Max failed recovery rounds per gap
 //	-nack-gap-ttl         NACK_GAP_TTL         10m              Max gap state lifetime
 //	-beacon-enabled       BEACON_ENABLED       true             Enable ADVERT beacon listener
 //	-beacon-port          BEACON_PORT          9300             UDP port for beacon reception
@@ -140,10 +141,11 @@ type Config struct {
 	SSMBootstrapRefresh    time.Duration
 
 	// NACK
-	NACKJitterMax  time.Duration
-	NACKBackoffMax time.Duration
-	NACKMaxRetries int
-	NACKGapTTL     time.Duration
+	NACKJitterMax   time.Duration
+	NACKBackoffBase time.Duration
+	NACKBackoffMax  time.Duration
+	NACKMaxRetries  int
+	NACKGapTTL      time.Duration
 
 	// Multicast egress (domain bridging)
 	MCEgressEnabled  bool
@@ -323,10 +325,12 @@ func Load() (*Config, error) {
 		"comma-separated host:port of multicast-retry caching nodes")
 	flag.DurationVar(&c.NACKJitterMax, "nack-jitter-max", envDuration("NACK_JITTER_MAX", 200*time.Millisecond),
 		"max random hold-off before NACK dispatch (NORM suppression window)")
+	flag.DurationVar(&c.NACKBackoffBase, "nack-backoff-base", envDuration("NACK_BACKOFF_BASE", 500*time.Millisecond),
+		"base delay for retry backoff; doubles per failed recovery round (not per tier-escalation hop)")
 	flag.DurationVar(&c.NACKBackoffMax, "nack-backoff-max", envDuration("NACK_BACKOFF_MAX", 5*time.Second),
 		"cap on exponential backoff per gap")
 	flag.IntVar(&c.NACKMaxRetries, "nack-max-retries", envInt("NACK_MAX_RETRIES", 5),
-		"max NACK attempts per gap before declaring unrecoverable")
+		"max failed recovery rounds per gap before declaring unrecoverable (tier-escalation hops are free)")
 	flag.DurationVar(&c.NACKGapTTL, "nack-gap-ttl", envDuration("NACK_GAP_TTL", 10*time.Minute),
 		"max time to hold a gap entry before evicting (~Bitcoin block interval)")
 	flag.BoolVar(&c.BeaconEnabled, "beacon-enabled", envBool("BEACON_ENABLED", true),
