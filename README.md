@@ -7,6 +7,8 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/lightwebinc/shard-listener)](https://goreportcard.com/report/github.com/lightwebinc/shard-listener)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
+> Part of the [**BSV Layered Multicast**](https://github.com/lightwebinc/bsv-multicast) open-source project — see the main repository for the full architecture, design docs, and BRC specifications.
+
 Multicast subscriber and forwarder for the BSV transaction sharding pipeline.
 Receives BRC-124/BRC-128 frames from the `shard-proxy` multicast fabric, applies
 shard and subtree filters, forwards matching frames to a configurable downstream
