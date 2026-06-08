@@ -2,12 +2,28 @@ package nack_test
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/lightwebinc/shard-listener/discovery"
 	"github.com/lightwebinc/shard-listener/nack"
 )
+
+// newThrottlingEndpoint registers an endpoint that responds THROTTLED for the
+// first throttleThen requests, then ACKs. throttleThen is set before the
+// responder goroutine starts to avoid racing the read in run().
+func newThrottlingEndpoint(t *testing.T, throttleThen int64) *mockEndpoint {
+	t.Helper()
+	c, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("udp loopback unavailable: %v", err)
+	}
+	m := &mockEndpoint{conn: c, addr: c.LocalAddr().(*net.UDPAddr), throttleThen: throttleThen}
+	go m.run()
+	t.Cleanup(func() { _ = c.Close() })
+	return m
+}
 
 // TestThrottle_DoesNotConsumeRetryBudgetOrEscalate verifies the listener's
 // handling of a THROTTLED congestion signal. A single endpoint THROTTLEs the
@@ -17,8 +33,7 @@ import (
 // THROTTLED were treated as a failure the gap would be evicted unrecovered
 // before the ACK.
 func TestThrottle_DoesNotConsumeRetryBudgetOrEscalate(t *testing.T) {
-	ep := newMockEndpoint(t, 0) // ACK once past the throttle phase
-	ep.throttleThen = 4         // THROTTLE the first 4 attempts
+	ep := newThrottlingEndpoint(t, 4) // THROTTLE the first 4 attempts, then ACK
 
 	reg := discovery.NewRegistry()
 	upsertEndpoint(t, reg, ep, 0, 128, 1)
