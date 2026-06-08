@@ -447,6 +447,48 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 			"seq_num", e.seqNum,
 		)
 		t.advanceEndpoint(e, true, len(snap))
+	case MsgTypeTHROTTLED:
+		t.log.Debug("NACK: THROTTLED received, holding gap",
+			"endpoint", endpoint.Addr,
+			"seq_num", e.seqNum,
+			"bucket", resp.Flags&0x0F,
+		)
+		t.throttleGap(e, resp.Flags)
+	}
+}
+
+// throttleHintBase is the protocol unit for the THROTTLED backoff hint: the
+// suggested hold is throttleHintBase << bucket, where bucket is the low nibble
+// of the response Flags byte (BRC-126).
+const throttleHintBase = 125 * time.Millisecond
+
+// throttleGap parks a gap after a THROTTLED congestion signal. Unlike a failed
+// round it neither advances the endpoint nor consumes the retry budget — the
+// endpoint is healthy and a multicast repair is likely propagating — so the gap
+// holds for the hinted backoff (jittered) and retries the same endpoint. GapTTL
+// remains the absolute safety net; Fill cancels the gap if the repair arrives.
+func (t *Tracker) throttleGap(e *gapEntry, flags byte) {
+	hold := throttleHintBase << uint(flags&0x0F)
+	if hold > t.cfg.BackoffMax || hold <= 0 { // <=0 guards shift overflow
+		hold = t.cfg.BackoffMax
+	}
+	half := hold / 2
+	wait := half + time.Duration(rand.Int64N(int64(half)+1))
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	fs, ok := t.flows[e.hashKey]
+	if !ok {
+		return
+	}
+	entry, ok := fs.pending[e.seqNum]
+	if !ok {
+		return
+	}
+	entry.retries++
+	entry.nextAttempt = time.Now().Add(wait)
+	if t.rec != nil {
+		t.rec.NACKThrottled(flowLabel(e.groupIdx))
 	}
 }
 

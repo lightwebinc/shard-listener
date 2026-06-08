@@ -16,11 +16,12 @@ import (
 // MsgTypeACK afterwards, the endpoint simulates a deep-tier cache that
 // eventually warms up.
 type mockEndpoint struct {
-	conn      net.PacketConn
-	addr      *net.UDPAddr
-	count     atomic.Int64
-	missCount int64 // when count <= missCount, respond MISS; else ACK
-	silent    bool  // if true, read and count but never reply (simulate timeout)
+	conn         net.PacketConn
+	addr         *net.UDPAddr
+	count        atomic.Int64
+	missCount    int64 // when count <= missCount, respond MISS; else ACK
+	throttleThen int64 // when count <= throttleThen, respond THROTTLED (takes precedence)
+	silent       bool  // if true, read and count but never reply (simulate timeout)
 }
 
 func newMockEndpoint(t *testing.T, missCount int64) *mockEndpoint {
@@ -49,6 +50,12 @@ func (m *mockEndpoint) run() {
 		n := m.count.Add(1)
 		if m.silent {
 			continue // never reply: the listener will hit respTimeout
+		}
+		if n <= m.throttleThen {
+			var tout [nack.ResponseSize]byte
+			nack.EncodeResponse(&nack.Response{MsgType: nack.MsgTypeTHROTTLED}, tout[:])
+			_, _ = m.conn.WriteTo(tout[:], src)
+			continue
 		}
 		resp := nack.MsgTypeMISS
 		var seqNum uint64

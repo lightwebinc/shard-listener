@@ -29,9 +29,10 @@
 //	------  ----  -----
 //	     0     4  Magic (0xE3E1F3E8)
 //	     4     2  ProtoVer (0x02BF)
-//	     6     1  MsgType = 0x11 (MISS) or 0x12 (ACK)
-//	     7     1  Flags (ACK: 0x01=multicast_sent, 0x02=unicast_sent)
-//	     8     8  SeqNum of the retrieved frame (0 for MISS)
+//	     6     1  MsgType = 0x11 (MISS), 0x12 (ACK), or 0x13 (THROTTLED)
+//	     7     1  Flags (ACK: 0x01=multicast_sent, 0x02=unicast_sent;
+//	               THROTTLED: low nibble = backoff-hint bucket)
+//	     8     8  SeqNum of the retrieved frame (0 for MISS; echoed for THROTTLED)
 package nack
 
 import (
@@ -52,6 +53,12 @@ const (
 	// MsgTypeACK identifies a "frame found, retransmit dispatched" response
 	// from a retry endpoint.
 	MsgTypeACK byte = 0x12
+
+	// MsgTypeTHROTTLED is a congestion signal from a retry endpoint: the gap was
+	// rate-limited (sequence or chain tier), so the listener should hold and
+	// retry the same endpoint after a backoff rather than escalate. The Flags
+	// low nibble carries a backoff-hint bucket (hold ≈ throttleHintBase<<bucket).
+	MsgTypeTHROTTLED byte = 0x13
 
 	// ResponseSize is the fixed size of a MISS or ACK response datagram.
 	ResponseSize = 16
@@ -144,7 +151,7 @@ func DecodeResponse(buf []byte) (*Response, error) {
 		return nil, ErrBadResponse
 	}
 	mt := buf[6]
-	if mt != MsgTypeMISS && mt != MsgTypeACK {
+	if mt != MsgTypeMISS && mt != MsgTypeACK && mt != MsgTypeTHROTTLED {
 		return nil, ErrBadResponse
 	}
 	return &Response{

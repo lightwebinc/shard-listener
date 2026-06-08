@@ -90,6 +90,7 @@ type Recorder struct {
 	gapsDetected     metric.Int64Counter
 	gapsSuppressed   metric.Int64Counter // cancelled by retransmit fill or ACK response
 	nacksDispatched  metric.Int64Counter
+	nacksThrottled   metric.Int64Counter // held after a THROTTLED congestion signal
 	nacksUnrecovered metric.Int64Counter // retries exhausted or TTL exceeded
 
 	// BRC-127 subtree group announce counters
@@ -312,6 +313,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.nacksDispatched, err = meter.Int64Counter("bsl_nacks_dispatched_total",
 		metric.WithDescription("NACK datagrams sent to retry endpoints")); err != nil {
+		return nil, err
+	}
+	if r.nacksThrottled, err = meter.Int64Counter("bsl_nacks_throttled_total",
+		metric.WithDescription("Gaps held after a THROTTLED congestion signal")); err != nil {
 		return nil, err
 	}
 	if r.nacksUnrecovered, err = meter.Int64Counter("bsl_gaps_unrecovered_total",
@@ -558,6 +563,12 @@ func (r *Recorder) GapSuppressed(flow string) {
 // flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
 func (r *Recorder) NACKDispatched(flow string) {
 	r.nacksDispatched.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
+}
+
+// NACKThrottled records a gap parked after a THROTTLED congestion signal.
+// flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
+func (r *Recorder) NACKThrottled(flow string) {
+	r.nacksThrottled.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
 }
 
 // GapUnrecovered records a gap evicted after retries exhausted or TTL exceeded.
