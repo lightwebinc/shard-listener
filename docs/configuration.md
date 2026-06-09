@@ -36,7 +36,7 @@ The default `0x000B` corresponds to the IANA-assigned Bitcoin allocation
 
 ## SSM (RFC 4607)
 
-See the [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/SourceSpecificMulticast/ssm-support-plan.md)
+See the [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm)
 for the full design. ASM remains the default; SSM is fully opt-in.
 
 ### `-source-mode` / `SOURCE_MODE` (default: `asm`)
@@ -401,13 +401,13 @@ used by the retry endpoints.
 
 ---
 
-## Auto-Shard-Config (BRC-137)
+## Auto-Shard-Config (BRC-139)
 
-The listener can consume BRC-137 ShardManifest announcements off the same
+The listener can consume BRC-139 ShardManifest announcements off the same
 beacon group, applying the normative consumer profile (Authoritative
 quorum, hysteresis, ±1 ShardBits shift bound, manual-pin precedence).
 Default off; opt-in via `-manifest-consumer-enabled`. See the
-[Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/AutoShardConfig/auto-shard-config-plan.md)
+[Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#automatic-shard-configuration)
 for the system-level design.
 
 ### `-manifest-consumer-enabled` / `MANIFEST_CONSUMER_ENABLED` (default: `false`)
@@ -433,7 +433,7 @@ warning at startup; production deployments should keep `≥ 2`.
 ### `-pilot-hysteresis` / `PILOT_HYSTERESIS` (default: `0`)
 
 Duration a candidate value must hold quorum before adoption. `0`
-selects `2 × AnnounceInterval` of the candidate manifest (BRC-137
+selects `2 × AnnounceInterval` of the candidate manifest (BRC-139
 default per §Safety).
 
 ### `-shard-include-from-manifest` / `SHARD_INCLUDE_FROM_MANIFEST` (default: `false`)
@@ -447,7 +447,7 @@ leaved.
 
 ### `-live-resharding` / `LIVE_RESHARDING` (default: `false`)
 
-Opt-in BRC-137 bridging mode. When false (default), a `ShardBits` or
+Opt-in BRC-139 bridging mode. When false (default), a `ShardBits` or
 `SourceModeSSM` adoption flips `/readyz` and exits non-zero so the
 orchestrator can roll the pod. When true, the listener tracks a
 Successor view but the actual bridging coordination is driven by the

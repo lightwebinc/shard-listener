@@ -1,5 +1,5 @@
 // Package manifest hosts the listener-side applier that consumes the
-// BRC-137 manifest evaluator's adopted view and translates it into
+// BRC-139 manifest evaluator's adopted view and translates it into
 // concrete actions on the listener's join state and metrics.
 //
 // The applier runs on a 1-second tick. It is deliberately simple: every

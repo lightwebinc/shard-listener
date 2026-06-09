@@ -107,7 +107,7 @@ type Recorder struct {
 	// Beacon registry endpoint count (updated by evict loop)
 	beaconRegistryEndpoints atomic.Int64
 
-	// BRC-137 ShardManifest counters and gauges. Updated by the
+	// BRC-139 ShardManifest counters and gauges. Updated by the
 	// auto-config consumer subsystem (shard-common/manifest).
 	manifestReceived       metric.Int64Counter
 	manifestPilotsKnown    atomic.Int64
@@ -352,11 +352,11 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 
 	if r.manifestReceived, err = meter.Int64Counter("multicast_manifest_received_total",
-		metric.WithDescription("BRC-137 ShardManifest datagrams accepted and upserted into the manifest registry")); err != nil {
+		metric.WithDescription("BRC-139 ShardManifest datagrams accepted and upserted into the manifest registry")); err != nil {
 		return nil, err
 	}
 	if r.manifestDivergence, err = meter.Int64Counter("multicast_manifest_divergence_total",
-		metric.WithDescription("Authoritative-peer disagreements observed by the auto-config evaluator (BRC-137 §Divergence telemetry)")); err != nil {
+		metric.WithDescription("Authoritative-peer disagreements observed by the auto-config evaluator (BRC-139 §Divergence telemetry)")); err != nil {
 		return nil, err
 	}
 	if r.manifestAdoption, err = meter.Int64Counter("multicast_manifest_adoption_total",
@@ -609,7 +609,7 @@ func (r *Recorder) SetBeaconRegistryEndpoints(n int) {
 	r.beaconRegistryEndpoints.Store(int64(n))
 }
 
-// ManifestReceived records a valid BRC-137 ShardManifest upserted into
+// ManifestReceived records a valid BRC-139 ShardManifest upserted into
 // the manifest registry. nil-safe.
 func (r *Recorder) ManifestReceived() {
 	if r == nil {

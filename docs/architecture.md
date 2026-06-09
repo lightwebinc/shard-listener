@@ -65,7 +65,7 @@ addressing prefix switches from `FF0x` (ASM) to `FF3x` (SSM) per
 `shard.Prefix(SourceModeSSM, scope)` — FF35 for site, FF3E for global
 (RFC 8815 rejects global-scope ASM).
 
-See the [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/SourceSpecificMulticast/ssm-support-plan.md)
+See the [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm)
 for fabric prerequisites (PIM-SSM, MLDv2, raised `mld_max_msf`).
 
 ## Receive workers
@@ -161,6 +161,13 @@ a gap in one flow does not affect another flow's tail.
 - **ACK**: gap is cancelled (`Fill`); `bsl_gaps_suppressed_total` incremented.
 - **MISS**: endpoint index is advanced immediately (no backoff). The next sweep
   dispatch targets the next endpoint in the sorted registry snapshot.
+- **THROTTLED** (`MsgType 0x13`): honest-congestion backoff hint from the
+  endpoint. The gap is held on the **same** endpoint for the hinted interval
+  (`125 ms << bucket`, bucket carried in the response Flags low nibble); the
+  endpoint index is **not** advanced and the failed-round counter is **not**
+  incremented (no escalation, no retry-budget consumption). Only the
+  sequence/chain tiers emit it, and only when the endpoint runs with
+  `-rl-throttle-response`.
 - **Timeout** (no response within `respTimeout`): exponential backoff applied;
   endpoint index unchanged.
 

@@ -85,7 +85,7 @@ type Worker struct {
 	reassemBuf        *reassembly.Buffer // nil = BRC-130 disabled
 	log               *slog.Logger
 
-	// Runtime join management for BRC-137 auto-join and live-resharding
+	// Runtime join management for BRC-139 auto-join and live-resharding
 	// bridging mode. joinFd is the worker's IPv6 multicast socket; it is
 	// set in Run after openRawSocket succeeds, and -1 before Run and
 	// after Run returns. joinMu guards joinedGroups and the underlying
@@ -199,7 +199,7 @@ func (w *Worker) SetVerifyPayloadHash(v bool) {
 }
 
 // AddGroup joins the worker's socket to the given multicast group at
-// runtime (BRC-137 auto-join and live-resharding bridging-mode primitive).
+// runtime (BRC-139 auto-join and live-resharding bridging-mode primitive).
 // sources is the SSM source filter; pass nil/empty for an ASM join.
 //
 // Safe to call concurrently from goroutines other than the receive loop.

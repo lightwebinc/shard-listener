@@ -31,7 +31,7 @@ type BeaconListener struct {
 	Rec      *metrics.Recorder // nil = no metrics
 	Debug    bool
 
-	// ManifestRegistry, when non-nil, receives every BRC-137
+	// ManifestRegistry, when non-nil, receives every BRC-139
 	// ShardManifest datagram (MsgType 0x40) decoded off the beacon
 	// socket. ADVERTs (MsgType 0x20) continue to flow into Registry.
 	// When nil, manifest datagrams are silently dropped (logged at
@@ -146,7 +146,7 @@ func (bl *BeaconListener) listenGroup(ctx context.Context, grp *net.UDPAddr) err
 			}
 		}
 
-		// Demux on MsgType byte at offset 6 per BRC-126 / BRC-137.
+		// Demux on MsgType byte at offset 6 per BRC-126 / BRC-139.
 		if n < 7 {
 			continue
 		}
@@ -189,7 +189,7 @@ func (bl *BeaconListener) handleADVERT(buf []byte, grp *net.UDPAddr) {
 	}
 }
 
-// handleManifest decodes a BRC-137 ShardManifest and upserts it into the
+// handleManifest decodes a BRC-139 ShardManifest and upserts it into the
 // configured manifest registry. Drops with a debug-log when no registry
 // is configured (auto-config disabled).
 func (bl *BeaconListener) handleManifest(buf []byte, src *net.UDPAddr, grp *net.UDPAddr) {

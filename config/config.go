@@ -173,14 +173,14 @@ type Config struct {
 	BeaconPort    int
 	BeaconScope   string // multicast scope for beacon group joins
 
-	// Auto-shard-config (BRC-137 manifest consumer). All fields are
+	// Auto-shard-config (BRC-139 manifest consumer). All fields are
 	// opt-in. When AutoConfigEnabled is false, the listener does not
 	// decode manifests off the beacon socket and the other fields are
 	// ignored.
 	AutoConfigEnabled        bool
 	AutoConfigBootstrap      string        // "optional" (default) | "required"
 	AutoConfigPilotQuorum    int           // default 2
-	AutoConfigHysteresis     time.Duration // 0 ⇒ 2 × AnnounceInterval (per BRC-137)
+	AutoConfigHysteresis     time.Duration // 0 ⇒ 2 × AnnounceInterval (per BRC-139)
 	AutoJoinFromManifest     bool          // listener-only: union(-shard-include, pilot_groups)
 	AutoConfigLiveResharding bool          // opt-in bridging mode (default: restart on adopt)
 	AutoConfigBridgingWindow time.Duration // 0 ⇒ honour pilot TransitionEpoch verbatim
@@ -340,7 +340,7 @@ func Load() (*Config, error) {
 	flag.StringVar(&c.BeaconScope, "beacon-scope", envStr("BEACON_SCOPE", "site"),
 		"multicast scope for beacon group joins: link | site | org | global")
 	flag.BoolVar(&c.AutoConfigEnabled, "manifest-consumer-enabled", envBool("MANIFEST_CONSUMER_ENABLED", false),
-		"opt-in BRC-137 manifest consumer for auto-shard-config (off by default)")
+		"opt-in BRC-139 manifest consumer for auto-shard-config (off by default)")
 	flag.StringVar(&c.AutoConfigBootstrap, "manifest-bootstrap", envStr("MANIFEST_BOOTSTRAP", "optional"),
 		"manifest bootstrap behavior: 'optional' (default) | 'required' (refuse data-plane bind until quorum)")
 	flag.IntVar(&c.AutoConfigPilotQuorum, "pilot-quorum", envInt("PILOT_QUORUM", 2),
@@ -350,7 +350,7 @@ func Load() (*Config, error) {
 	flag.BoolVar(&c.AutoJoinFromManifest, "shard-include-from-manifest", envBool("SHARD_INCLUDE_FROM_MANIFEST", false),
 		"additive auto-join: effective subscription = union(-shard-include, pilot_groups)")
 	flag.BoolVar(&c.AutoConfigLiveResharding, "live-resharding", envBool("LIVE_RESHARDING", false),
-		"opt-in BRC-137 live-resharding bridging mode (default: restart on ShardBits adoption)")
+		"opt-in BRC-139 live-resharding bridging mode (default: restart on ShardBits adoption)")
 	flag.DurationVar(&c.AutoConfigBridgingWindow, "bridging-window", envDuration("BRIDGING_WINDOW", 0),
 		"local floor on bridging duration; 0 ⇒ honour pilot TransitionEpoch verbatim")
 	subtreeGroupsFlag := flag.String("subtree-groups", envStr("SUBTREE_GROUPS", ""),

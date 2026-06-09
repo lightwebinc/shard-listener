@@ -184,7 +184,7 @@ func run() error {
 	// static data-plane publisher list (lab/CI) into a single map keyed
 	// by group address. Production manifest-driven discovery for
 	// data-plane groups lands in a follow-up: the beacon listener already
-	// observes BRC-137 manifests via the beacon group; an OnChange path
+	// observes BRC-139 manifests via the beacon group; an OnChange path
 	// can mutate this map dynamically. For now, fail-closed startup on
 	// the configured bootstrap lists.
 	var gs listener.GroupSources
@@ -242,7 +242,7 @@ func run() error {
 		)
 	}
 
-	// Manifest consumer registry (BRC-137 auto-shard-config). Built
+	// Manifest consumer registry (BRC-139 auto-shard-config). Built
 	// unconditionally so its zero-pilot state is always observable;
 	// only wired into the beacon listener when AutoConfigEnabled.
 	manifestReg := commanifest.NewRegistry(0)
