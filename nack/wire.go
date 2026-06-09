@@ -55,8 +55,8 @@ const (
 	MsgTypeACK byte = 0x12
 
 	// MsgTypeTHROTTLED is a congestion signal from a retry endpoint: the gap was
-	// rate-limited (sequence or chain tier), so the listener should hold and
-	// retry the same endpoint after a backoff rather than escalate. The Flags
+	// rate-limited (sequence, chain, or group tier), so the listener should hold
+	// and retry the same endpoint after a backoff rather than escalate. The Flags
 	// low nibble carries a backoff-hint bucket (hold ≈ throttleHintBase<<bucket).
 	MsgTypeTHROTTLED byte = 0x13
 

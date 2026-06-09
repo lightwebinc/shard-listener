@@ -166,7 +166,7 @@ a gap in one flow does not affect another flow's tail.
   (`125 ms << bucket`, bucket carried in the response Flags low nibble); the
   endpoint index is **not** advanced and the failed-round counter is **not**
   incremented (no escalation, no retry-budget consumption). Only the
-  sequence/chain tiers emit it, and only when the endpoint runs with
+  sequence/chain/group tiers emit it, and only when the endpoint runs with
   `-rl-throttle-response`.
 - **Timeout** (no response within `respTimeout`): exponential backoff applied;
   endpoint index unchanged.
