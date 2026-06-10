@@ -42,7 +42,7 @@ var Version = "dev"
 // Hot-path counters (framesReceived/Forwarded/Dropped/Deduped/... ) use
 // prometheus client_golang directly because the OTel SDK Add path adds
 // ~⅓ of total CPU on a packet-rate-bound workload (measured on shard-proxy
-// at 256 B; refer to multicast-skills/performance-testing.md). Cold-path
+// at 256 B). Cold-path
 // counters stay on OTel.
 type Recorder struct {
 	provider   *sdkmetric.MeterProvider

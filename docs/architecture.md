@@ -9,9 +9,7 @@ the relevant groups, filters transaction frames by shard index and/or subtree ID
 matching frames to a configurable unicast downstream over UDP or TCP and/or re-emits them
 via multicast egress (domain bridging), and performs NORM-inspired NACK-based gap recovery.
 
-Foundational concepts (shard hierarchy, anycast ingress, frame versions) live in
-[multicast-skills/architecture.md](../../../multicast-skills/architecture.md) and
-[multicast-skills/protocol.md](../../../multicast-skills/protocol.md); BRC-specific wire formats
+BRC-specific wire formats live
 in [bsv-multicast/docs/](../../../bsv-multicast/docs/).
 
 ```
