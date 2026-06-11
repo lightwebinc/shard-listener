@@ -672,8 +672,37 @@ func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, erro
 // resolvers run for the lifetime of ctx; startup is fail-closed.
 //
 // Returns (gs, beaconSrcs, manifestSrcs, subtreeAnnSrcs, err).
+// excludeOwnSource drops the node's own source address from a roster before
+// it feeds (S,G) joins. Joining the node's own source on the PIM interface
+// installs an iif==oif mroute on a collapsed edge — every originated frame
+// re-enters the MFC until hop-limit death (~60x egress amplification; see
+// 1bsv-ops/environments/lab-spine-ssm-geo/LATENCY-GEO.md). Consequence: the
+// listener does not receive own-node frames via multicast; a local mirror is
+// required where own-source completeness matters.
+func excludeOwnSource(srcs []netip.Addr, own netip.Addr) []netip.Addr {
+	if !own.IsValid() {
+		return srcs
+	}
+	out := srcs[:0]
+	for _, s := range srcs {
+		if s != own {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func buildSSMSources(ctx context.Context, cfg *config.Config) (listener.GroupSources, []netip.Addr, []netip.Addr, []netip.Addr, error) {
 	gs := make(listener.GroupSources)
+
+	var own netip.Addr
+	if cfg.LocalSource != "" {
+		a, err := netip.ParseAddr(cfg.LocalSource)
+		if err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("local-source: %w", err)
+		}
+		own = a
+	}
 
 	resolve := func(entries []string) ([]netip.Addr, error) {
 		if len(entries) == 0 {
@@ -683,7 +712,7 @@ func buildSSMSources(ctx context.Context, cfg *config.Config) (listener.GroupSou
 		if err := r.Start(ctx); err != nil {
 			return nil, err
 		}
-		return r.Current(), nil
+		return excludeOwnSource(r.Current(), own), nil
 	}
 
 	beaconSrcs, err := resolve(cfg.SSMBootstrapBeacon)

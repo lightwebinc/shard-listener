@@ -133,7 +133,14 @@ type Config struct {
 	// SSMPublishersStatic: lab/CI escape hatch for the data-plane source
 	//   set. Production uses manifest-driven discovery.
 	// SSMBootstrapRefresh: DNS re-resolve interval (default 30s).
+	// LocalSource: the co-located proxy's BIND_SOURCE on a collapsed node.
+	//   Excluded from every roster-driven (S,G) join — joining the node's
+	//   own source on the PIM interface installs an iif==oif mroute and
+	//   loops originated frames until hop-limit death (~60x amplification;
+	//   see lab-spine-ssm-geo/LATENCY-GEO.md). Consequence: this listener
+	//   does not receive own-node frames via multicast.
 	SourceMode             string
+	LocalSource            string
 	SSMBootstrapBeacon     []string
 	SSMBootstrapManifest   []string
 	SSMBootstrapSubtreeAnn []string
@@ -277,6 +284,8 @@ func Load() (*Config, error) {
 		"CSV of subtree-announce emitter sources for SSM join of that control group")
 	ssmPublishersStatic := flag.String("ssm-publishers-static", envStr("SSM_PUBLISHERS_STATIC", ""),
 		"lab/CI: CSV of data-plane publisher IPv6 sources (production uses manifest discovery)")
+	flag.StringVar(&c.LocalSource, "local-source", envStr("LOCAL_SOURCE", ""),
+		"co-located proxy's BIND_SOURCE; excluded from all (S,G) joins (own-source loop guard)")
 	flag.DurationVar(&c.SSMBootstrapRefresh, "ssm-bootstrap-refresh", envDuration("SSM_BOOTSTRAP_REFRESH", 30*time.Second),
 		"DNS re-resolve interval for SSM bootstrap entries")
 	shardIncludeFlag := flag.String("shard-include", envStr("SHARD_INCLUDE", ""),
