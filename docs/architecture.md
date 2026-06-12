@@ -362,6 +362,39 @@ The per-frame address derivation is zero-alloc: bytes 0–13 are fixed at
 construction (scope prefix, zero IANA boundary, 16-bit group-id); only bytes
 14–15 (shard group index) are overwritten per datagram.
 
+### Egress sink seam (`egress.EgressSink`)
+
+The worker forwards through the `egress.EgressSink` interface rather than a
+concrete `*egress.Sender`. The default single-destination `Sender` satisfies it,
+so the stock listener is unchanged; an alternative sink can be injected via
+`listener.New` to receive every frame the worker would otherwise unicast. The
+interface mirrors `Sender`'s surface exactly (`Send`, `SendBlock`,
+`SendSubtreeData`, `SendRaw`, `Proto`, `Close`) and leaks no routing or policy
+detail — analogous to the proxy's pluggable-ingress seam. A downstream build
+can plug a multi-consumer sink into this seam without forking.
+
+### Multi-consumer fan-out (`fanout` package)
+
+The `fanout` package is the generic, addressing-agnostic capability for serving
+**many consumers with heterogeneous subscriptions from one decode pipeline**.
+Running one listener process per consumer is the wrong answer: Linux delivers
+each multicast datagram to *every* `SO_REUSEPORT` socket, so N processes pay full
+ingress + decode N times before any consumer is served. Instead the worker
+decodes once and `fanout.Sink` (an `EgressSink`) delivers to the matching subset
+of a **consumer table**:
+
+- **Shard dimension** — inverted into a reverse index (`shardIdx → consumers`),
+  so a transaction frame's per-frame cost is `O(consumers-on-that-shard)`, not
+  `O(all-consumers)`. Consumers with no shard restriction are an `allShards` set.
+- **Subtree dimension** — the residual predicate reuses `filter.Filter.Allow`.
+- **Control frames** (BRC-131/132, BRC-135 headers) broadcast to all consumers,
+  matching the worker's bypass-filter semantics for those classes.
+
+`fanout.Sink.Apply(consumers)` atomically swaps the table and rebuilds the index;
+this is the open end of an external control-plane contract (join-set union +
+consumer table). Subscription management, placement, metering, and billing are
+out of scope here and belong to whatever downstream build supplies the table.
+
 ## Logging & Tracing
 
 The listener uses the shared `shard-common/logging` package: `run` calls

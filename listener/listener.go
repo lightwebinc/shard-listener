@@ -69,7 +69,7 @@ type Worker struct {
 	groupSources      GroupSources   // optional SSM per-group source map
 	engine            *shard.Engine
 	filt              *filter.Filter
-	egr               *egress.Sender
+	egr               egress.EgressSink   // default *egress.Sender; swappable fan-out sink
 	mcastEgr          *egress.MCastSender // nil when multicast egress is disabled
 	headerEgr         *egress.Sender      // nil when unicast header egress is disabled
 	headerMCastEgr    *egress.MCastSender // nil when multicast header egress is disabled
@@ -136,7 +136,7 @@ func New(
 	groups []*net.UDPAddr,
 	engine *shard.Engine,
 	filt *filter.Filter,
-	egr *egress.Sender,
+	egr egress.EgressSink,
 	mcastEgr *egress.MCastSender,
 	tracker *nack.Tracker,
 	rec *metrics.Recorder,
