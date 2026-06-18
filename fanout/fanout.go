@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
 
 	"github.com/lightwebinc/shard-listener/egress"
@@ -34,11 +35,21 @@ import (
 // index); a Filt that also restricts shards still works, only redundantly.
 // Sink is this consumer's egress (a unicast *egress.Sender, a multicast
 // re-emit sink, or any EgressSink).
+//
+// OwnIngressIP is the consumer's own ingress identity (the tunnel-inner IPv6
+// the proxy observes on its UP path). When non-zero, a transaction frame whose
+// proxy-stamped HashKey matches seqhash.Hash(OwnIngressIP, groupIdx, SubtreeID)
+// is the consumer's own traffic returning down its egress link and is skipped —
+// removing own-traffic-back on metered unicast tunnels. Zero (the default) keeps
+// the original behaviour: the consumer receives its own traffic. Control frames
+// are never excluded. This is addressing-agnostic: it keys on the originating
+// consumer's ingress identity, not on which edge or spine forwarded the frame.
 type Consumer struct {
-	ID     string
-	Shards []uint32
-	Filt   *filter.Filter
-	Sink   egress.EgressSink
+	ID           string
+	Shards       []uint32
+	Filt         *filter.Filter
+	Sink         egress.EgressSink
+	OwnIngressIP [16]byte
 }
 
 // Sink is an egress.EgressSink that fans each frame out to the matching subset
@@ -110,6 +121,9 @@ func (s *Sink) Send(raw []byte, f *frame.Frame) error {
 				return
 			}
 		}
+		if isOwnTraffic(c, groupIdx, f) {
+			return
+		}
 		if err := c.Sink.Send(raw, f); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -121,6 +135,19 @@ func (s *Sink) Send(raw []byte, f *frame.Frame) error {
 		deliver(c)
 	}
 	return firstErr
+}
+
+// isOwnTraffic reports whether frame f is consumer c's own transaction returning
+// down its egress link, so the fan-out can skip it. It fires only when c opted in
+// (non-zero OwnIngressIP) and the frame's proxy-stamped HashKey matches the one
+// the proxy would derive from c's ingress identity. A false positive requires a
+// 64-bit XXH64 collision (negligible); a frame whose HashKey was not derived from
+// c's ingress IP simply does not match and is delivered, exactly as before.
+func isOwnTraffic(c *Consumer, groupIdx uint32, f *frame.Frame) bool {
+	if c.OwnIngressIP == ([16]byte{}) || f.Version != frame.FrameVerV2 {
+		return false
+	}
+	return f.HashKey == seqhash.Hash(c.OwnIngressIP, groupIdx, f.SubtreeID)
 }
 
 // SendBlock broadcasts a BRC-131 block control frame to every consumer (block

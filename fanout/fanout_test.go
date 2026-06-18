@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
 
 	"github.com/lightwebinc/shard-listener/fanout"
@@ -106,6 +107,52 @@ func TestSubtreeResidualFilter(t *testing.T) {
 	}
 	if c.tx != 1 {
 		t.Fatalf("matching-subtree frame should be delivered, got tx=%d", c.tx)
+	}
+}
+
+func TestOwnTrafficExclusion(t *testing.T) {
+	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
+	s := fanout.New(eng)
+
+	var ownA, ownB [16]byte
+	ownA[15] = 0xAA
+	ownB[15] = 0xBB
+
+	a := &recSink{} // opted in, own-ingress ownA
+	b := &recSink{} // opted in, own-ingress ownB
+	c := &recSink{} // opted out (zero own-ingress) — control: always receives
+	s.Apply([]*fanout.Consumer{
+		{ID: "a", Shards: []uint32{0}, Sink: a, OwnIngressIP: ownA},
+		{ID: "b", Shards: []uint32{0}, Sink: b, OwnIngressIP: ownB},
+		{ID: "c", Shards: []uint32{0}, Sink: c},
+	})
+
+	// Frame originated by A: stamp the HashKey the proxy would derive for ownA.
+	sub := subtreeID(0x07)
+	f := txInShard(0, sub)
+	groupIdx := eng.GroupIndex(&f.TxID)
+	f.HashKey = seqhash.Hash(ownA, groupIdx, sub)
+
+	if err := s.Send(nil, f); err != nil {
+		t.Fatal(err)
+	}
+	// A's own frame is suppressed for A, but cross-delivered to B and the opted-out C.
+	if a.tx != 0 {
+		t.Fatalf("own frame should be excluded for originator, got a.tx=%d", a.tx)
+	}
+	if b.tx != 1 || c.tx != 1 {
+		t.Fatalf("own frame must still cross-deliver: b.tx=%d c.tx=%d", b.tx, c.tx)
+	}
+
+	// A frame with an unrelated (non-proxy) HashKey matches nobody's identity →
+	// exclusion no-ops, everyone receives it.
+	f2 := txInShard(0, sub)
+	f2.HashKey = 0xDEADBEEF
+	if err := s.Send(nil, f2); err != nil {
+		t.Fatal(err)
+	}
+	if a.tx != 1 || b.tx != 2 || c.tx != 2 {
+		t.Fatalf("non-matching HashKey must deliver to all: a=%d b=%d c=%d", a.tx, b.tx, c.tx)
 	}
 }
 
