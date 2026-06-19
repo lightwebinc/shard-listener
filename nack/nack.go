@@ -461,7 +461,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	// is sized for a full BRC frame so a unicast retransmit is not truncated.
 	deadline := time.Now().Add(t.respTimeout)
 	var rbuf [65536]byte
-	gotData, unicastACK := false, false
+	unicastACK := false
 	for {
 		_ = conn.SetReadDeadline(deadline)
 		nr, _, err := conn.ReadFrom(rbuf[:])
@@ -469,22 +469,31 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 			break
 		}
 
+		// A data frame (the unicast retransmit) confirms recovery: re-inject it
+		// through the listener pipeline (Observe auto-fills the gap and fans it
+		// out downstream), cancel, and return — regardless of whether the ACK
+		// arrived first or not.
+		if t.recoverFn != nil && nr >= minRetransmitFrame && binary.BigEndian.Uint32(rbuf[0:4]) == nackMagic {
+			cp := make([]byte, nr)
+			copy(cp, rbuf[:nr])
+			t.recoverFn(cp)
+			t.cancelGap(e)
+			t.log.Debug("NACK: unicast retransmit recovered", "endpoint", endpoint.Addr, "seq_num", e.seqNum, "bytes", nr)
+			return
+		}
+
 		if resp, derr := DecodeResponse(rbuf[:nr]); derr == nil {
 			switch resp.MsgType {
 			case MsgTypeACK:
 				// A unicast-flagged ACK only promises a retransmit; recovery is
-				// confirmed solely when the data frame itself arrives (gotData),
-				// because the retransmit can be lost on the same lossy path. So
-				// do NOT cancel on the ACK alone — keep draining for the data,
-				// and on timeout escalate to another cache. A non-unicast
+				// confirmed solely when the data frame itself arrives, because
+				// the retransmit can be lost on the same lossy path. So do NOT
+				// cancel on the ACK alone — keep draining for the data, and on
+				// timeout escalate to another cache. A non-unicast
 				// (multicast/legacy) ACK keeps the original trust-the-repair
 				// semantics: the data-path Fill closes the gap.
 				if resp.Flags&respFlagUnicastSent != 0 && t.recoverFn != nil {
 					unicastACK = true
-					if gotData {
-						t.cancelGap(e)
-						return
-					}
 					deadline = time.Now().Add(unicastDrainWindow)
 					continue
 				}
@@ -502,25 +511,10 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 			}
 			return
 		}
-
-		// Not a control response: a unicast data retransmit. Re-inject it; the
-		// resulting Observe auto-fills the gap and fans it out downstream.
-		if t.recoverFn != nil && nr >= minRetransmitFrame && binary.BigEndian.Uint32(rbuf[0:4]) == nackMagic {
-			cp := make([]byte, nr)
-			copy(cp, rbuf[:nr])
-			t.recoverFn(cp)
-			gotData = true
-			t.cancelGap(e)
-			t.log.Debug("NACK: unicast retransmit recovered", "endpoint", endpoint.Addr, "seq_num", e.seqNum, "bytes", nr)
-			return
-		}
 		// Unknown datagram; keep draining until the deadline.
 	}
 
-	// Drain ended without the data frame.
-	if gotData {
-		return
-	}
+	// Drain ended without the data frame (a recovered data frame returns inline).
 	if unicastACK {
 		// The cache claimed it has the frame but the unicast retransmit never
 		// arrived (lost in transit). Escalate to another cache rather than
