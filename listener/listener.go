@@ -94,6 +94,13 @@ type Worker struct {
 	joinMu       sync.Mutex
 	joinFd       int                     // -1 when worker is not running
 	joinedGroups map[netip.Addr]struct{} // currently-joined data-plane groups
+
+	// procMu serialises processFrame so a recovered frame re-injected by the
+	// NACK tracker (via Reinject, on the tracker goroutine) is mutually
+	// exclusive with the Run receive loop. The lock is uncontended on the hot
+	// path (single-worker receive) and only meets the rare unicast-recovery
+	// re-injection.
+	procMu sync.Mutex
 }
 
 // SetGroupSources configures per-group SSM source lists for the data-plane
@@ -355,9 +362,23 @@ func (w *Worker) Run(ctx context.Context) error {
 					continue
 				}
 			}
+			w.procMu.Lock()
 			w.processFrame(buf[:n])
+			w.procMu.Unlock()
 		}
 	}
+}
+
+// Reinject feeds a recovered raw frame through the normal receive pipeline
+// (shard filter, own-traffic exclusion, gap tracking, and fan-out egress) as
+// if it had arrived on the wire. It is called by the NACK tracker when a retry
+// endpoint returns a frame over the unicast NACK return channel, so a
+// gap-repaired frame reaches downstream consumers without any client logic.
+// Serialised against the Run loop via procMu.
+func (w *Worker) Reinject(raw []byte) {
+	w.procMu.Lock()
+	w.processFrame(raw)
+	w.procMu.Unlock()
 }
 
 func (w *Worker) processFrame(raw []byte) {

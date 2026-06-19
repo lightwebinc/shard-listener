@@ -485,3 +485,109 @@ func TestObserve_SubtreeGapDoesNotAffectOtherSubtree(t *testing.T) {
 		t.Errorf("PendingGaps = %d, want 1 (only in flowA)", g)
 	}
 }
+
+// ── Unicast NACK recovery (data return channel) ─────────────────────────────────
+
+// dataFrame builds a synthetic frame that is not a control Response: BSV magic at
+// [0:4] and FrameVer (0x01) at [6], padded above minRetransmitFrame.
+func dataFrame() []byte {
+	b := make([]byte, 100)
+	b[0], b[1], b[2], b[3] = 0xE3, 0xE1, 0xF3, 0xE8 // MagicBSV
+	b[6] = 0x01                                     // FrameVer (≠ any control MsgType)
+	return b
+}
+
+// TestSendNACK_UnicastRetransmit_Recovered: a retry returns the data frame on the
+// NACK return channel plus a unicast-flagged ACK; the tracker must re-inject the
+// frame via recoverFn and cancel the gap.
+func TestSendNACK_UnicastRetransmit_Recovered(t *testing.T) {
+	mockConn, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("UDP loopback unavailable: %v", err)
+	}
+	defer func() { _ = mockConn.Close() }()
+
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			_, src, err := mockConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = mockConn.WriteTo(dataFrame(), src) // data first
+			var resp [nack.ResponseSize]byte
+			nack.EncodeResponse(&nack.Response{MsgType: nack.MsgTypeACK, Flags: 0x02, SeqNum: 2}, resp[:])
+			_, _ = mockConn.WriteTo(resp[:], src) // then unicast-flagged ACK
+		}
+	}()
+
+	cfg := nack.TrackerConfig{JitterMax: 0, BackoffMax: time.Second, MaxRetries: 5, GapTTL: 10 * time.Second}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
+
+	recovered := make(chan []byte, 4)
+	tr.SetRecoverFunc(func(raw []byte) { recovered <- raw })
+
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum 2
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	select {
+	case raw := <-recovered:
+		if len(raw) != 100 {
+			t.Errorf("recovered frame len = %d, want 100", len(raw))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("recoverFn never called with the unicast retransmit")
+	}
+	if got := pollGaps(tr, 0, 3*time.Second); got != 0 {
+		t.Errorf("after unicast recovery: PendingGaps = %d, want 0", got)
+	}
+}
+
+// TestSendNACK_UnicastACK_NoData_NotCancelled: a unicast-flagged ACK with NO data
+// frame (retransmit lost in transit) must NOT cancel the gap — recovery is only
+// confirmed by the data itself, so the gap stays pending to escalate/retry.
+func TestSendNACK_UnicastACK_NoData_NotCancelled(t *testing.T) {
+	mockConn, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("UDP loopback unavailable: %v", err)
+	}
+	defer func() { _ = mockConn.Close() }()
+
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			_, src, err := mockConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			var resp [nack.ResponseSize]byte // unicast-flagged ACK only; data "lost"
+			nack.EncodeResponse(&nack.Response{MsgType: nack.MsgTypeACK, Flags: 0x02, SeqNum: 2}, resp[:])
+			_, _ = mockConn.WriteTo(resp[:], src)
+		}
+	}()
+
+	// High retry budget so the gap keeps being retried well past the check —
+	// isolating the "ACK alone must not cancel" behaviour from MaxRetries
+	// eviction. The old bug cancelled on the first ACK (~one respTimeout).
+	cfg := nack.TrackerConfig{JitterMax: 0, BackoffBase: 50 * time.Millisecond, BackoffMax: 100 * time.Millisecond, MaxRetries: 50, GapTTL: 10 * time.Second}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
+	tr.SetRecoverFunc(func(raw []byte) {}) // recoverFn set, but no data will arrive
+
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum 2
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	// The gap must remain pending (still retrying), not be falsely cancelled by
+	// the unicast-flagged ACK whose data never arrived.
+	time.Sleep(500 * time.Millisecond)
+	if got := tr.PendingGaps(); got != 1 {
+		t.Errorf("ACK-without-data falsely cleared the gap: PendingGaps = %d, want 1 (still retrying)", got)
+	}
+}

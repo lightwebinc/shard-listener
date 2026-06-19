@@ -2,6 +2,7 @@ package nack
 
 import (
 	"context"
+	"encoding/binary"
 	"log/slog"
 	"math/rand/v2"
 	"net"
@@ -97,6 +98,17 @@ type Tracker struct {
 	respTimeout   time.Duration // deadline for ACK/MISS response (default 300ms)
 	maxConcurrent int           // semaphore bound for concurrent sendNACK goroutines
 
+	// recoverFn re-injects a frame returned by a retry endpoint over the
+	// unicast NACK return channel back into the listener pipeline (set via
+	// SetRecoverFunc). nil disables unicast recovery (multicast-only repair).
+	recoverFn func(raw []byte)
+
+	// nackSrc is the source address the NACK socket binds to (set via
+	// SetNACKSource). Empty = wildcard (kernel picks per-route). Set this to a
+	// globally routable address on a tunnelled fabric so the retry's unicast
+	// return traffic routes back to this node.
+	nackSrc string
+
 	mu    sync.Mutex
 	flows map[uint64]*flowState // keyed by hashKey
 
@@ -140,6 +152,18 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 		sem:           make(chan struct{}, defaultMaxConcurrent),
 	}
 }
+
+// SetRecoverFunc registers the callback that re-injects a frame returned by a
+// retry endpoint over the unicast NACK return channel. When set, sendNACK
+// drains any data frame the retry unicasts back on the NACK socket and re-feeds
+// it through the listener pipeline (the gap is then auto-filled by Observe).
+// Typically wired to (*listener.Worker).Reinject.
+func (t *Tracker) SetRecoverFunc(f func(raw []byte)) { t.recoverFn = f }
+
+// SetNACKSource binds the NACK socket to a specific source address so NACKs and
+// the retry's unicast return traffic use a globally routable identity. Leave
+// unset (empty) to let the kernel pick the source per-route.
+func (t *Tracker) SetNACKSource(addr string) { t.nackSrc = addr }
 
 // Observe is called by the listener worker on every BRC-124/BRC-128 frame.
 // It detects gaps by comparing seqNum against the last known seqNum for the
@@ -389,7 +413,17 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	// Ephemeral unconnected socket: accept ACK/MISS from any source address.
 	// (Connected sockets filter by exact source; SLAAC addresses on the retry
 	// endpoint would cause silent discard of ACK responses.)
-	conn, err := net.ListenPacket("udp", "[::]:0")
+	//
+	// Bind to nackSrc when set so the NACK (and the retry's return traffic) uses
+	// a globally routable identity. Otherwise the kernel picks a per-route
+	// source — on a tunnelled fabric that is a point-to-point /127 tunnel inner
+	// address, and the retry's reply (a unicast retransmit) is then misrouted
+	// off the tunnel and lost.
+	laddr := "[::]:0"
+	if t.nackSrc != "" {
+		laddr = "[" + t.nackSrc + "]:0"
+	}
+	conn, err := net.ListenPacket("udp", laddr)
 	if err != nil {
 		t.log.Warn("NACK: listen failed", "endpoint", endpoint.Addr, "err", err)
 		t.advanceEndpoint(e, false, 0)
@@ -418,44 +452,98 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 		"retry", e.retries+1,
 	)
 
-	_ = conn.SetReadDeadline(time.Now().Add(t.respTimeout))
-	var respBuf [ResponseSize + 16]byte
-	nr, _, err := conn.ReadFrom(respBuf[:])
-	if err != nil {
-		t.advanceEndpoint(e, false, 0)
-		return
+	// Drain the NACK socket until respTimeout. The retry endpoint may return up
+	// to two datagrams: a unicast retransmit of the missing frame (the data
+	// return channel) and a small ACK/MISS/THROTTLED control response — in
+	// either order. A data frame is re-injected through the listener pipeline
+	// (recoverFn), which repairs the gap for downstream consumers without any
+	// client logic; the control response drives tier/backoff state. The buffer
+	// is sized for a full BRC frame so a unicast retransmit is not truncated.
+	deadline := time.Now().Add(t.respTimeout)
+	var rbuf [65536]byte
+	gotData, unicastACK := false, false
+	for {
+		_ = conn.SetReadDeadline(deadline)
+		nr, _, err := conn.ReadFrom(rbuf[:])
+		if err != nil { // timeout / closed
+			break
+		}
+
+		if resp, derr := DecodeResponse(rbuf[:nr]); derr == nil {
+			switch resp.MsgType {
+			case MsgTypeACK:
+				// A unicast-flagged ACK only promises a retransmit; recovery is
+				// confirmed solely when the data frame itself arrives (gotData),
+				// because the retransmit can be lost on the same lossy path. So
+				// do NOT cancel on the ACK alone — keep draining for the data,
+				// and on timeout escalate to another cache. A non-unicast
+				// (multicast/legacy) ACK keeps the original trust-the-repair
+				// semantics: the data-path Fill closes the gap.
+				if resp.Flags&respFlagUnicastSent != 0 && t.recoverFn != nil {
+					unicastACK = true
+					if gotData {
+						t.cancelGap(e)
+						return
+					}
+					deadline = time.Now().Add(unicastDrainWindow)
+					continue
+				}
+				t.cancelGap(e)
+				t.log.Debug("NACK: ACK received", "endpoint", endpoint.Addr, "seq_num", e.seqNum, "flags", resp.Flags)
+				return
+			case MsgTypeMISS:
+				t.log.Debug("NACK: MISS received, advancing endpoint", "endpoint", endpoint.Addr, "seq_num", e.seqNum)
+				t.advanceEndpoint(e, true, len(snap))
+				return
+			case MsgTypeTHROTTLED:
+				t.log.Debug("NACK: THROTTLED received, holding gap", "endpoint", endpoint.Addr, "seq_num", e.seqNum, "bucket", resp.Flags&0x0F)
+				t.throttleGap(e, resp.Flags)
+				return
+			}
+			return
+		}
+
+		// Not a control response: a unicast data retransmit. Re-inject it; the
+		// resulting Observe auto-fills the gap and fans it out downstream.
+		if t.recoverFn != nil && nr >= minRetransmitFrame && binary.BigEndian.Uint32(rbuf[0:4]) == nackMagic {
+			cp := make([]byte, nr)
+			copy(cp, rbuf[:nr])
+			t.recoverFn(cp)
+			gotData = true
+			t.cancelGap(e)
+			t.log.Debug("NACK: unicast retransmit recovered", "endpoint", endpoint.Addr, "seq_num", e.seqNum, "bytes", nr)
+			return
+		}
+		// Unknown datagram; keep draining until the deadline.
 	}
 
-	resp, err := DecodeResponse(respBuf[:nr])
-	if err != nil {
-		t.log.Debug("NACK: invalid response", "endpoint", endpoint.Addr, "err", err)
-		t.advanceEndpoint(e, false, 0)
+	// Drain ended without the data frame.
+	if gotData {
 		return
 	}
-
-	switch resp.MsgType {
-	case MsgTypeACK:
-		t.cancelGap(e)
-		t.log.Debug("NACK: ACK received, gap cancelled",
-			"endpoint", endpoint.Addr,
-			"seq_num", e.seqNum,
-			"flags", resp.Flags,
-		)
-	case MsgTypeMISS:
-		t.log.Debug("NACK: MISS received, advancing endpoint",
-			"endpoint", endpoint.Addr,
-			"seq_num", e.seqNum,
-		)
+	if unicastACK {
+		// The cache claimed it has the frame but the unicast retransmit never
+		// arrived (lost in transit). Escalate to another cache rather than
+		// dropping the gap — a frame lost on this path may be repairable from a
+		// node that received it over a clean path.
 		t.advanceEndpoint(e, true, len(snap))
-	case MsgTypeTHROTTLED:
-		t.log.Debug("NACK: THROTTLED received, holding gap",
-			"endpoint", endpoint.Addr,
-			"seq_num", e.seqNum,
-			"bucket", resp.Flags&0x0F,
-		)
-		t.throttleGap(e, resp.Flags)
+		return
 	}
+	t.advanceEndpoint(e, false, 0)
 }
+
+// respFlagUnicastSent mirrors the retry-endpoint ACK flag bit indicating a
+// unicast retransmit was dispatched on the NACK return channel (BRC-126).
+const respFlagUnicastSent byte = 0x02
+
+// minRetransmitFrame is the smallest datagram treated as a unicast data
+// retransmit rather than a (16-byte) control response. A BRC frame header is
+// larger; this stays well above ResponseSize.
+const minRetransmitFrame = 64
+
+// unicastDrainWindow bounds the extra wait for the second datagram (data after
+// ACK, or ACK after data) once the first has been seen.
+const unicastDrainWindow = 80 * time.Millisecond
 
 // throttleHintBase is the protocol unit for the THROTTLED backoff hint: the
 // suggested hold is throttleHintBase << bucket, where bucket is the low nibble
