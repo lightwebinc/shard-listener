@@ -169,6 +169,35 @@ a gap in one flow does not affect another flow's tail.
 - **Timeout** (no response within `respTimeout`): exponential backoff applied;
   endpoint index unchanged.
 
+## Unicast NACK recovery (re-inject into fan-out)
+
+By default a repaired frame returns over the **multicast** data plane: the retry
+endpoint re-multicasts it and the listener's normal receive path closes the gap.
+On a fabric where multicast re-injection is blocked for a remote receiver — e.g.
+PIM-SSM RPF only lets the *source* node inject into its own `(S,G)` tree — the
+listener can instead recover frames over the **unicast NACK return channel**:
+
+- `Tracker.SetRecoverFunc(func([]byte))` registers a re-inject callback, wired to
+  `(*listener.Worker).Reinject`. `Reinject` feeds the frame through the normal
+  pipeline (shard filter → own-traffic exclusion → gap tracking → fan-out egress),
+  serialised against the receive loop by `Worker.procMu`, so a recovered frame
+  reaches downstream consumers with no client-side logic.
+- `sendNACK` drains the NACK socket: a retry that has the frame **unicasts it back**
+  to the NACK source (plus a `unicast_sent`-flagged ACK). The tracker re-injects the
+  data frame and cancels the gap. Classification is by size + magic (a control
+  response is 16 bytes; a data frame is a full BRC frame).
+- **The ACK alone never confirms recovery** for a unicast retransmit — only the
+  arriving data frame does. A `unicast_sent` ACK whose data is lost in transit (the
+  retransmit can re-cross the same lossy path) does **not** cancel the gap; it
+  **escalates to the next cache**, so a frame lost on one path is repaired from a
+  node that received it over a clean path. (A non-unicast/legacy ACK keeps the
+  original trust-the-multicast-repair semantics.)
+- `Tracker.SetNACKSource(addr)` binds the NACK socket to a routable source address.
+  This is **required on a tunnelled fabric**: an unbound socket picks a per-route
+  source that can be a point-to-point `/127` tunnel inner address, and the retry's
+  unicast reply is then misrouted off the tunnel and lost. Bind a globally routable
+  `/128` so the return traffic routes back.
+
 ## Beacon discovery
 
 Retry endpoints multicast 56-byte ADVERT datagrams to the beacon group
