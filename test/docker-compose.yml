@@ -12,7 +12,7 @@ services:
       - NET_ADMIN
     environment:
       SHARD_BITS: "${SHARD_BITS:-2}"
-      UDP_LISTEN_PORT: "9000"
+      UDP_LISTEN_PORT: "8725"
       MC_EGRESS_PORT: "9001"
       RECV_TIMEOUT: "${RECV_TIMEOUT:-15s}"
     restart: "no"
