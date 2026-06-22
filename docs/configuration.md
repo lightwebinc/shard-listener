@@ -577,6 +577,42 @@ SHA256d hash of the payload. Frames with mismatched TxIDs are dropped before
 egress and gap tracking, and `bsl_frames_invalid_payload_total` is incremented.
 BRC-12 legacy frames are forwarded verbatim regardless of this setting.
 
+### `-require-block-pow` / `REQUIRE_BLOCK_POW` (default: `false`)
+
+Validate block control frames before fan-out. Inter-domain block announcements
+reach the listener over the multicast fabric without passing our proxy, so the
+listener must independently validate them — this is the permissionless gate
+(validate the artifact, not the emitter):
+
+- **BRC-131 block announce** — the in-frame 80-byte header must satisfy proof
+  of work: `hash(header) ≤ target(nBits)`, and that target must be at least as
+  hard as `-min-pow-bits`. Failing frames are dropped
+  (`bsl_frames_dropped_total{reason="block_pow"}`) and not gap-tracked.
+- **BRC-133 coinbase** — gated by correlation: the listener records the
+  coinbase TxID of every PoW-valid announce and forwards a coinbase frame only
+  if its TxID matches one (`reason="coinbase_uncorrelated"` otherwise).
+
+This is anti-spam at fan-out, not consensus validation (no chain context); the
+consuming node does full validation. Off by default. BRC-134 anchors are
+deliberately ungated.
+
+### `-min-pow-bits` / `MIN_POW_BITS` (default: `0`)
+
+PoW difficulty floor for `-require-block-pow`, in Bitcoin compact `nBits` form
+(e.g. `0x1d00ffff`). `0` checks only that the header is self-consistent, which
+a forger satisfies by claiming trivial difficulty — set a real floor in
+production.
+
+### `-coinbase-corr-cap` / `COINBASE_CORR_CAP` (default: `4096`)
+
+Maximum correlated coinbase TxIDs retained for BRC-133 correlation. `0` disables
+coinbase correlation (PoW on announces still applies). Block announcements are
+low-rate, so the set stays small.
+
+### `-coinbase-corr-ttl` / `COINBASE_CORR_TTL` (default: `10m`)
+
+Maximum age of a correlated coinbase TxID before it expires from the set.
+
 ### `-drain-timeout` / `DRAIN_TIMEOUT` (default: `0`)
 
 Pre-shutdown drain window. When non-zero, `/readyz` returns 503 immediately

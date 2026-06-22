@@ -210,6 +210,15 @@ type Config struct {
 	EgressDedupCap    int           // 0 = disabled
 	EgressDedupTTL    time.Duration // max age of a remembered key
 
+	// Block-control gate (opt-in). Inter-domain BRC-131 announces reach the
+	// listener by multicast without passing our proxy, so the listener
+	// independently validates before fan-out: PoW on the announce, and
+	// coinbase↔block correlation on BRC-133. Off by default.
+	RequireBlockPoW bool
+	MinPoWBits      uint32        // PoW difficulty floor (compact nBits); 0 = self-consistency only
+	CoinbaseCorrCap int           // max correlated coinbase TxIDs held; 0 disables correlation
+	CoinbaseCorrTTL time.Duration // max age of a correlated coinbase TxID
+
 	// Egress TxID dedup (per-deployment): HA listener siblings sharing a
 	// DeploymentID race to win the SETNX claim under EgressDedupPrefix +
 	// DeploymentID + ":" + hex(txid). Only the winner forwards downstream.
@@ -385,6 +394,14 @@ func Load() (*Config, error) {
 		"distributed-trace head sampling ratio 0..1 (0 = tracing off; exports via -otlp-endpoint)")
 	flag.BoolVar(&c.VerifyPayloadHash, "verify-payload-hash", envBool("VERIFY_PAYLOAD_HASH", false),
 		"verify SHA256d(payload) == TxID on BRC-124/BRC-128 frames; drop on mismatch")
+	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", false),
+		"gate BRC-131 announces on header proof-of-work + correlate BRC-133 coinbase with a validated block before fan-out (validates inter-domain block control)")
+	minPoWBits := flag.String("min-pow-bits", envStr("MIN_POW_BITS", "0"),
+		"PoW difficulty floor for -require-block-pow in Bitcoin compact nBits form (e.g. 0x1d00ffff); 0 = header self-consistency only")
+	flag.IntVar(&c.CoinbaseCorrCap, "coinbase-corr-cap", envInt("COINBASE_CORR_CAP", 4096),
+		"max correlated coinbase TxIDs retained for BRC-133 correlation (0 disables coinbase correlation; PoW on announces still applies)")
+	flag.DurationVar(&c.CoinbaseCorrTTL, "coinbase-corr-ttl", envDuration("COINBASE_CORR_TTL", 10*time.Minute),
+		"max age of a correlated coinbase TxID")
 	flag.BoolVar(&c.SubtreeDataEnabled, "subtree-data-enabled", envBool("SUBTREE_DATA_ENABLED", false),
 		"enable BRC-132 subtree data reception: join GroupSubtreeDataAnnounce (0xFFFB) group")
 	flag.BoolVar(&c.SubtreeDataVerifyMerkle, "subtree-data-verify-merkle", envBool("SUBTREE_DATA_VERIFY_MERKLE", false),
@@ -452,6 +469,20 @@ func Load() (*Config, error) {
 		"txid prefix bit width used as the shard key (1–15); must match proxy")
 
 	flag.Parse()
+
+	// Parse the PoW difficulty floor (Bitcoin compact nBits): hex (0x…/bare) or decimal.
+	{
+		s := strings.TrimSpace(*minPoWBits)
+		base := 10
+		if strings.HasPrefix(strings.ToLower(s), "0x") {
+			s, base = s[2:], 16
+		}
+		v, perr := strconv.ParseUint(s, base, 32)
+		if perr != nil {
+			return nil, fmt.Errorf("invalid -min-pow-bits %q: %w", *minPoWBits, perr)
+		}
+		c.MinPoWBits = uint32(v)
+	}
 
 	// Validate shard bit width. Top of the 16-bit shard space is reserved for
 	// control-plane groups (0xFFFC–0xFFFE), so practical bits is bounded at 15.

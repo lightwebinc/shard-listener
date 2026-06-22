@@ -24,6 +24,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/netip"
 	"sync"
@@ -34,6 +35,7 @@ import (
 
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/netjoin"
+	"github.com/lightwebinc/shard-common/pow"
 	"github.com/lightwebinc/shard-common/shard"
 
 	"github.com/lightwebinc/shard-listener/dedup"
@@ -79,10 +81,13 @@ type Worker struct {
 	rec               *metrics.Recorder
 	debug             bool
 	verifyPayloadHash bool
-	senderACL         *filter.SenderACL  // nil = accept every source
-	dedupSet          *dedup.Set         // nil = dedup disabled
-	txDedup           *txdedup.Store     // nil = cross-listener TxID dedup disabled
-	reassemBuf        *reassembly.Buffer // nil = BRC-130 disabled
+	senderACL         *filter.SenderACL   // nil = accept every source
+	dedupSet          *dedup.Set          // nil = dedup disabled
+	txDedup           *txdedup.Store      // nil = cross-listener TxID dedup disabled
+	reassemBuf        *reassembly.Buffer  // nil = BRC-130 disabled
+	requireBlockPoW   bool                // gate BRC-131 announces on header PoW before fan-out
+	powFloor          *big.Int            // PoW difficulty floor; nil = self-consistency only
+	coinbaseCorr      *CoinbaseCorrelator // shared; nil = no coinbase correlation
 	log               *slog.Logger
 
 	// Runtime join management for BRC-139 auto-join and live-resharding
@@ -203,6 +208,26 @@ func (w *Worker) SetSenderACL(a *filter.SenderACL) {
 // bsl_frames_invalid_payload_total is incremented. Defaults to false.
 func (w *Worker) SetVerifyPayloadHash(v bool) {
 	w.verifyPayloadHash = v
+}
+
+// SetBlockPoW enables the block-control gate before fan-out. Inter-domain block
+// announcements reach the listener by multicast without passing our proxy, so
+// the listener must independently validate them. When require is true, a
+// BRC-131 BlockAnnounce is forwarded only if its in-frame 80-byte header
+// satisfies proof of work at a target no easier than floorBits (Bitcoin
+// compact nBits; 0 = self-consistency only), and a BRC-133 coinbase is
+// forwarded only if corr holds its TxID (recorded from a validated block).
+// corr is shared across workers; pass nil to skip coinbase correlation.
+// Validates the artifact, not the emitter — permissionless. Must be called
+// before Run.
+func (w *Worker) SetBlockPoW(require bool, floorBits uint32, corr *CoinbaseCorrelator) {
+	w.requireBlockPoW = require
+	w.coinbaseCorr = corr
+	if require && floorBits != 0 {
+		w.powFloor = pow.CompactToTarget(floorBits)
+	} else {
+		w.powFloor = nil
+	}
 }
 
 // AddGroup joins the worker's socket to the given multicast group at
@@ -582,6 +607,16 @@ func (w *Worker) processBlockFrame(raw []byte) {
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc131")
 	}
 
+	// Block-control gate (opt-in): validate inter-domain announcements before
+	// fan-out — PoW on the announce, coinbase↔block correlation on coinbase.
+	if !w.blockGateAllows(bf, bf.Payload) {
+		if w.debug {
+			w.log.Debug("block frame dropped by block-control gate",
+				"msg_type", bf.MsgType, "content_id", fmt.Sprintf("%x", bf.ContentID[:8]))
+		}
+		return
+	}
+
 	if err := w.egr.SendBlock(raw, bf); err != nil {
 		if w.rec != nil {
 			w.rec.EgressError(w.id)
@@ -803,6 +838,15 @@ func (w *Worker) DeliverReassembledBlock(payload []byte, bf *frame.BlockFrame) {
 
 	if w.rec != nil {
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc131_reassembled")
+	}
+
+	// Same block-control gate on the reassembled (fragmented) path.
+	if !w.blockGateAllows(bf, payload) {
+		if w.debug {
+			w.log.Debug("reassembled block frame dropped by block-control gate",
+				"msg_type", bf.MsgType, "content_id", fmt.Sprintf("%x", bf.ContentID[:8]))
+		}
+		return
 	}
 
 	if err := w.egr.SendBlock(raw, bf); err != nil {

@@ -441,6 +441,19 @@ func run() error {
 		}
 	}
 
+	// Block-control gate (opt-in): one CoinbaseCorrelator shared across all
+	// workers, since a block announce and its coinbase can land on different
+	// worker sockets under SO_REUSEPORT.
+	var coinbaseCorr *listener.CoinbaseCorrelator
+	if cfg.RequireBlockPoW && cfg.CoinbaseCorrCap > 0 {
+		coinbaseCorr = listener.NewCoinbaseCorrelator(cfg.CoinbaseCorrCap, cfg.CoinbaseCorrTTL)
+	}
+	if cfg.RequireBlockPoW {
+		slog.Info("block-control gate enabled",
+			"min_pow_bits", fmt.Sprintf("0x%08x", cfg.MinPoWBits),
+			"coinbase_correlation", coinbaseCorr != nil)
+	}
+
 	// Start workers. Collect them so the auto-join applier can drive
 	// runtime AddGroup/RemoveGroup against every worker fd.
 	workers = make([]*listener.Worker, 0, cfg.NumWorkers)
@@ -517,6 +530,9 @@ func run() error {
 			}
 		}
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
+		if cfg.RequireBlockPoW {
+			w.SetBlockPoW(true, cfg.MinPoWBits, coinbaseCorr)
+		}
 		if senderACL != nil {
 			w.SetSenderACL(senderACL)
 		}
