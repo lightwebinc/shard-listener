@@ -52,6 +52,15 @@ func flowLabel(groupIdx uint32) string {
 	}
 }
 
+// srcStr renders a source IP as a metric label value, lazily (only at the rare
+// gap/NACK emit sites — never on the per-frame hot path). "" for a nil source.
+func srcStr(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
 // flowState tracks one active per-flow sequence stream.
 //
 // Flows are keyed by hashKey = XXH64(senderIPv6 || groupIdx || subtreeID).
@@ -61,6 +70,7 @@ type flowState struct {
 	groupIdx   uint32
 	subtreeID  [32]byte
 	flowType   string               // "brc131" or "brc124"
+	source     net.IP               // multicast source address (for per-source loss attribution)
 	pending    map[uint64]*gapEntry // keyed by missing seqNum
 	lastSeen   time.Time
 }
@@ -80,6 +90,7 @@ type gapEntry struct {
 	seqNum      uint64 // the missing sequence number
 	groupIdx    uint32
 	subtreeID   [32]byte // for NACK SubtreeID field
+	source      net.IP   // multicast source address (per-source loss attribution)
 	retries     int      // total NACK attempts (observability only)
 	failRounds  int      // consecutive failed recovery rounds (backoff + eviction cap)
 	nextAttempt time.Time
@@ -180,7 +191,7 @@ func (t *Tracker) SetNACKSource(addr string) { t.nackSrc = addr }
 //  4. Ignore: seqNum <= lastSeqNum (duplicate or old retransmit).
 //  5. Contiguous: seqNum == lastSeqNum+1 → advance.
 //  6. Gap: seqNum > lastSeqNum+1 → register each missing seqNum.
-func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum uint64, txid [32]byte) {
+func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum uint64, txid [32]byte, source net.IP) {
 	if seqNum == 0 {
 		return
 	}
@@ -201,12 +212,18 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 		t.flows[hashKey] = fs
 	}
 	fs.lastSeen = now
+	// Sources are stable per flow. Keep the latest non-empty source so a recovered
+	// frame re-injected by the tracker (which carries no live source) does not
+	// clobber the real source attribution.
+	if source != nil {
+		fs.source = source
+	}
 
 	// Step 3: auto-fill — close any pending gap whose seqNum matches.
 	if _, found := fs.pending[seqNum]; found {
 		delete(fs.pending, seqNum)
 		if t.rec != nil {
-			t.rec.GapSuppressed(fs.flowType)
+			t.rec.GapSuppressed(fs.flowType, srcStr(fs.source))
 		}
 		// Fall through: update lastSeqNum if this advances the stream.
 	}
@@ -232,7 +249,7 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 			for _, e := range fs.pending {
 				_ = e // gaps from previous proxy lifetime; drop silently
 				if t.rec != nil {
-					t.rec.GapUnrecovered(fs.flowType)
+					t.rec.GapUnrecovered(fs.flowType, srcStr(fs.source))
 				}
 			}
 			fs.pending = make(map[uint64]*gapEntry)
@@ -257,12 +274,13 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 				seqNum:      missing,
 				groupIdx:    groupIdx,
 				subtreeID:   subtreeID,
+				source:      source,
 				nextAttempt: now.Add(jitter),
 				deadline:    now.Add(t.cfg.GapTTL),
 			}
 			fs.pending[missing] = e
 			if t.rec != nil {
-				t.rec.GapDetected(fs.flowType)
+				t.rec.GapDetected(fs.flowType, srcStr(source))
 			}
 		}
 	}
@@ -283,7 +301,7 @@ func (t *Tracker) Fill(hashKey, seqNum uint64) {
 		if _, found := fs.pending[seqNum]; found {
 			delete(fs.pending, seqNum)
 			if t.rec != nil {
-				t.rec.GapSuppressed(fs.flowType)
+				t.rec.GapSuppressed(fs.flowType, srcStr(fs.source))
 			}
 		}
 	}
@@ -325,7 +343,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 			if now.After(e.deadline) {
 				delete(fs.pending, seq)
 				if t.rec != nil {
-					t.rec.GapUnrecovered(fs.flowType)
+					t.rec.GapUnrecovered(fs.flowType, srcStr(e.source))
 				}
 				t.log.Debug("gap evicted (TTL)",
 					"hash_key", hk,
@@ -336,7 +354,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 			if e.failRounds >= t.cfg.MaxRetries {
 				delete(fs.pending, seq)
 				if t.rec != nil {
-					t.rec.GapUnrecovered(fs.flowType)
+					t.rec.GapUnrecovered(fs.flowType, srcStr(e.source))
 				}
 				t.log.Debug("gap evicted (retries)",
 					"hash_key", hk,
@@ -442,7 +460,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	_, _ = conn.WriteTo(buf[:], addr)
 
 	if t.rec != nil {
-		t.rec.NACKDispatched(flowLabel(e.groupIdx))
+		t.rec.NACKDispatched(flowLabel(e.groupIdx), srcStr(e.source))
 	}
 	t.log.Debug("NACK dispatched",
 		"endpoint", endpoint.Addr,
@@ -570,7 +588,7 @@ func (t *Tracker) throttleGap(e *gapEntry, flags byte) {
 	entry.retries++
 	entry.nextAttempt = time.Now().Add(wait)
 	if t.rec != nil {
-		t.rec.NACKThrottled(flowLabel(e.groupIdx))
+		t.rec.NACKThrottled(flowLabel(e.groupIdx), srcStr(e.source))
 	}
 }
 
@@ -652,7 +670,7 @@ func (t *Tracker) cancelGap(e *gapEntry) {
 		if _, found := fs.pending[e.seqNum]; found {
 			delete(fs.pending, e.seqNum)
 			if t.rec != nil {
-				t.rec.GapSuppressed(flowLabel(e.groupIdx))
+				t.rec.GapSuppressed(flowLabel(e.groupIdx), srcStr(e.source))
 			}
 		}
 	}

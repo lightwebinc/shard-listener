@@ -90,6 +90,13 @@ type Worker struct {
 	coinbaseCorr      *CoinbaseCorrelator // shared; nil = no coinbase correlation
 	log               *slog.Logger
 
+	// curSource is the source address of the frame currently being processed,
+	// set under procMu before processFrame so the gap tracker can attribute
+	// per-source loss. nil for tracker-reinjected (recovered) frames. Kept as
+	// net.IP (not a string) so the hot RX path does no per-frame stringification
+	// — the address is stringified only at the rare gap/NACK metric-emit sites.
+	curSource net.IP
+
 	// Runtime join management for BRC-139 auto-join and live-resharding
 	// bridging mode. joinFd is the worker's IPv6 multicast socket; it is
 	// set in Run after openRawSocket succeeds, and -1 before Run and
@@ -375,19 +382,25 @@ func (w *Worker) Run(ctx context.Context) error {
 			continue
 		}
 		if n > 0 {
+			// Extract the source only when something consumes it (sender ACL or the
+			// gap tracker), so a worker with neither pays no per-frame cost.
+			var src net.IP
+			if w.senderACL != nil || w.tracker != nil {
+				src = sockaddrIP(from)
+			}
 			if w.senderACL != nil {
-				ip := sockaddrIP(from)
-				if !w.senderACL.Allow(ip) {
+				if !w.senderACL.Allow(src) {
 					if w.rec != nil {
 						w.rec.FrameDropped(w.id, "sender_filter")
 					}
 					if w.debug {
-						w.log.Debug("sender filter rejected", "src", ip)
+						w.log.Debug("sender filter rejected", "src", src)
 					}
 					continue
 				}
 			}
 			w.procMu.Lock()
+			w.curSource = src
 			w.processFrame(buf[:n])
 			w.procMu.Unlock()
 		}
@@ -402,6 +415,7 @@ func (w *Worker) Run(ctx context.Context) error {
 // Serialised against the Run loop via procMu.
 func (w *Worker) Reinject(raw []byte) {
 	w.procMu.Lock()
+	w.curSource = nil // recovered frame: no live source — don't clobber per-flow source attribution
 	w.processFrame(raw)
 	w.procMu.Unlock()
 }
@@ -523,7 +537,7 @@ func (w *Worker) processFrame(raw []byte) {
 			}
 			// Skip egress, but still observe so gap-fill bookkeeping stays accurate.
 			if w.tracker != nil && f.SeqNum != 0 {
-				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
+				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 			}
 			return
 		}
@@ -541,7 +555,7 @@ func (w *Worker) processFrame(raw []byte) {
 			// Skip egress, but still let the tracker observe the frame so
 			// gap-fill bookkeeping stays accurate.
 			if w.tracker != nil {
-				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
+				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 			}
 			return
 		}
@@ -574,7 +588,7 @@ func (w *Worker) processFrame(raw []byte) {
 
 	// Gap tracking: BRC-124/BRC-128 only, SeqNum must be non-zero (proxy-stamped).
 	if w.tracker != nil && f.Version == frame.FrameVerV2 && f.SeqNum != 0 {
-		w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
+		w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 	}
 
 	if w.debug {
@@ -636,7 +650,7 @@ func (w *Worker) processBlockFrame(raw []byte) {
 	// Gap tracking on the control flow uses a zero SubtreeID.
 	if w.tracker != nil && bf.SeqNum != 0 {
 		var zeroSub [32]byte
-		w.tracker.Observe(uint32(shard.GroupBlockBroadcast), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID)
+		w.tracker.Observe(uint32(shard.GroupBlockBroadcast), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
 	}
 
 	if w.debug {
@@ -730,7 +744,7 @@ func (w *Worker) processSubtreeDataFrame(raw []byte) {
 
 	// Gap tracking on the subtree data flow uses SubtreeID as the flow scope.
 	if w.tracker != nil && sf.SeqNum != 0 {
-		w.tracker.Observe(uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
+		w.tracker.Observe(uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID, w.curSource)
 	}
 
 	if w.debug {
@@ -784,7 +798,7 @@ func (w *Worker) processAnchorFrame(raw []byte) {
 			const anchorGroupIdx = uint32(0xFFF9)
 			var zeroSub [32]byte
 			if w.tracker != nil && f.SeqNum != 0 {
-				w.tracker.Observe(anchorGroupIdx, zeroSub, f.HashKey, f.SeqNum, f.TxID)
+				w.tracker.Observe(anchorGroupIdx, zeroSub, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 			}
 			return
 		}
@@ -807,7 +821,7 @@ func (w *Worker) processAnchorFrame(raw []byte) {
 	if w.tracker != nil && f.SeqNum != 0 {
 		const anchorGroupIdx = uint32(0xFFF9)
 		var zeroSub [32]byte
-		w.tracker.Observe(anchorGroupIdx, zeroSub, f.HashKey, f.SeqNum, f.TxID)
+		w.tracker.Observe(anchorGroupIdx, zeroSub, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 	}
 
 	if w.debug {
@@ -867,7 +881,7 @@ func (w *Worker) DeliverReassembledBlock(payload []byte, bf *frame.BlockFrame) {
 
 	if w.tracker != nil && bf.SeqNum != 0 {
 		var zeroSub [32]byte
-		w.tracker.Observe(uint32(shard.GroupBlockBroadcast), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID)
+		w.tracker.Observe(uint32(shard.GroupBlockBroadcast), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
 	}
 
 	if w.debug {
@@ -912,7 +926,7 @@ func (w *Worker) DeliverReassembledSubtreeData(payload []byte, sf *frame.Subtree
 	}
 
 	if w.tracker != nil && sf.SeqNum != 0 {
-		w.tracker.Observe(uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)
+		w.tracker.Observe(uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID, w.curSource)
 	}
 
 	if w.debug {
@@ -963,7 +977,7 @@ func (w *Worker) DeliverReassembled(payload []byte, f *frame.Frame) {
 				w.rec.FrameTxDeduped(w.id)
 			}
 			if w.tracker != nil && f.SeqNum != 0 {
-				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
+				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 			}
 			return
 		}
@@ -1001,7 +1015,7 @@ func (w *Worker) DeliverReassembled(payload []byte, f *frame.Frame) {
 	}
 
 	if w.tracker != nil && f.SeqNum != 0 {
-		w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID)
+		w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 	}
 }
 

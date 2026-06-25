@@ -28,7 +28,7 @@ func newTestTracker() *nack.Tracker {
 
 func TestObserveFirstFrame_NoGap(t *testing.T) {
 	tr := newTestTracker()
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("first frame: PendingGaps = %d, want 0", g)
 	}
@@ -36,9 +36,9 @@ func TestObserveFirstFrame_NoGap(t *testing.T) {
 
 func TestObserveContiguous_NoGap(t *testing.T) {
 	tr := newTestTracker()
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("contiguous: PendingGaps = %d, want 0", g)
 	}
@@ -47,12 +47,12 @@ func TestObserveContiguous_NoGap(t *testing.T) {
 func TestObserveSeqNumZero_Ignored(t *testing.T) {
 	tr := newTestTracker()
 	// seqNum == 0 means proxy has not stamped the frame; must be ignored.
-	tr.Observe(0, [32]byte{}, flowA, 0, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 0, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("zero seqNum: PendingGaps = %d, want 0", g)
 	}
 	// Flow must initialise correctly on the first non-zero frame.
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("after zero-seqNum: PendingGaps = %d, want 0", g)
 	}
@@ -61,10 +61,10 @@ func TestObserveSeqNumZero_Ignored(t *testing.T) {
 func TestObserveNewFlow_NoGap(t *testing.T) {
 	tr := newTestTracker()
 	// Flow A established.
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
 	// Flow B is an independent flow; its first frame must not create a gap.
-	tr.Observe(0, [32]byte{}, flowB, 1, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowB, 1, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("new flow start: PendingGaps = %d, want 0", g)
 	}
@@ -73,8 +73,8 @@ func TestObserveNewFlow_NoGap(t *testing.T) {
 func TestObserveGap_Detected(t *testing.T) {
 	tr := newTestTracker()
 	// Frame 1 establishes the flow; seqNum 3 arrives next — seqNum 2 is missing.
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 1 {
 		t.Errorf("gap detected: PendingGaps = %d, want 1", g)
 	}
@@ -82,11 +82,11 @@ func TestObserveGap_Detected(t *testing.T) {
 
 func TestObserveDuplicateGap_NotDuplicated(t *testing.T) {
 	tr := newTestTracker()
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
 	// seqNum 3 reveals gap at 2.
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil)
 	// Duplicate of seqNum 3 must not register an additional gap.
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 1 {
 		t.Errorf("duplicate frame: PendingGaps = %d, want 1", g)
 	}
@@ -95,11 +95,11 @@ func TestObserveDuplicateGap_NotDuplicated(t *testing.T) {
 func TestObserveMultipleGroups_IndependentFlows(t *testing.T) {
 	tr := newTestTracker()
 	// flowA (group 0): gap between seqNum 1 and 3.
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil)
 	// flowB (group 1): clean contiguous delivery.
-	tr.Observe(1, [32]byte{}, flowB, 1, [32]byte{})
-	tr.Observe(1, [32]byte{}, flowB, 2, [32]byte{})
+	tr.Observe(1, [32]byte{}, flowB, 1, [32]byte{}, nil)
+	tr.Observe(1, [32]byte{}, flowB, 2, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 1 {
 		t.Errorf("multi-flow: PendingGaps = %d, want 1 (only flowA has gap)", g)
 	}
@@ -107,15 +107,15 @@ func TestObserveMultipleGroups_IndependentFlows(t *testing.T) {
 
 func TestObserveGap_AutoClosed_WhenMatchingSeqNumArrives(t *testing.T) {
 	tr := newTestTracker()
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum=2
 	if g := tr.PendingGaps(); g != 1 {
 		t.Fatalf("before auto-close: PendingGaps = %d, want 1", g)
 	}
 
 	// seqNum=2 arrives (out-of-order retransmit).
 	// Observe auto-closes pending[2]; seqNum(2) <= lastSeqNum(3) so no new gap.
-	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("after retransmit fill: PendingGaps = %d, want 0", g)
 	}
@@ -132,14 +132,14 @@ func TestObserveGap_AutoClosed_WhenMatchingSeqNumArrives(t *testing.T) {
 
 func TestObserveOutOfOrder_NoPhantomGap(t *testing.T) {
 	tr := newTestTracker()
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum=2
 	if g := tr.PendingGaps(); g != 1 {
 		t.Fatalf("setup: PendingGaps = %d, want 1", g)
 	}
 
 	// seqNum=2 arrives late — must close gap AND not create a phantom gap.
-	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("after retransmit: PendingGaps = %d, want 0 (phantom gap created)", g)
 	}
@@ -147,12 +147,12 @@ func TestObserveOutOfOrder_NoPhantomGap(t *testing.T) {
 
 func TestObserveOutOfOrder_LastSeqNumNotRegressed(t *testing.T) {
 	tr := newTestTracker()
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
 	// A duplicate/old seqNum=1 must be silently ignored (no gap registered).
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
 	// Subsequent in-order frame must not create a gap.
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("after old+in-order: PendingGaps = %d, want 0", g)
 	}
@@ -163,10 +163,10 @@ func TestObserveOutOfOrder_LastSeqNumNotRegressed(t *testing.T) {
 func TestObserveMultiFlow_NoFalseGap(t *testing.T) {
 	tr := newTestTracker()
 	// flowA: seqNums 1,2 interleaved with flowB seqNums 1,2.
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowB, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowB, 2, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowB, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowB, 2, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("multi-flow interleaving: PendingGaps = %d, want 0", g)
 	}
@@ -175,12 +175,12 @@ func TestObserveMultiFlow_NoFalseGap(t *testing.T) {
 func TestObserveMultiFlow_GapInOneFlow_OtherUnaffected(t *testing.T) {
 	tr := newTestTracker()
 	// flowA: 1→2→4 (gap at seqNum=3).
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowB, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 4, [32]byte{}) // gap at seqNum=3
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowB, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 4, [32]byte{}, nil) // gap at seqNum=3
 	// flowB continues cleanly.
-	tr.Observe(0, [32]byte{}, flowB, 2, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowB, 2, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 1 {
 		t.Errorf("gap in one flow: PendingGaps = %d, want 1", g)
 	}
@@ -188,11 +188,11 @@ func TestObserveMultiFlow_GapInOneFlow_OtherUnaffected(t *testing.T) {
 
 func TestObserveDuplicate_Suppressed(t *testing.T) {
 	tr := newTestTracker()
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
 	// Exact duplicate of seqNum=2.
-	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("duplicate frame: PendingGaps = %d, want 0", g)
 	}
@@ -201,8 +201,8 @@ func TestObserveDuplicate_Suppressed(t *testing.T) {
 func TestObserveBurstGap_AllMissingsRegistered(t *testing.T) {
 	tr := newTestTracker()
 	// flowA: 1→5 (seqNums 2,3,4 all missing).
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 5, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 5, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 3 {
 		t.Fatalf("burst gap: PendingGaps = %d, want 3", g)
 	}
@@ -225,7 +225,7 @@ func TestSweepOnce_StaleFlowEvicted(t *testing.T) {
 	}
 	tr := nack.New(cfg, nil, nil, nil, nil)
 	// Register a flow.
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
 	if tr.ActiveFlows() == 0 {
 		t.Fatal("flow should be registered")
 	}
@@ -243,8 +243,8 @@ func TestSweepOnce_StaleFlowEvicted(t *testing.T) {
 
 func TestFill_ClosesGap(t *testing.T) {
 	tr := newTestTracker()
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum=2
 	if g := tr.PendingGaps(); g != 1 {
 		t.Fatalf("before Fill: PendingGaps = %d, want 1", g)
 	}
@@ -265,8 +265,8 @@ func TestFill_Nonexistent_NoPanic(t *testing.T) {
 
 func TestFill_ZeroSeqNum_Ignored(t *testing.T) {
 	tr := newTestTracker()
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum=2
 	// Fill with seqNum=0 must be ignored (0 is the "unset" sentinel).
 	tr.Fill(flowA, 0)
 	if g := tr.PendingGaps(); g != 1 {
@@ -276,10 +276,10 @@ func TestFill_ZeroSeqNum_Ignored(t *testing.T) {
 
 func TestFill_MultipleFlows_OnlyClosesCorrectFlow(t *testing.T) {
 	tr := newTestTracker()
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap in flowA at seqNum=2
-	tr.Observe(1, [32]byte{}, flowB, 1, [32]byte{})
-	tr.Observe(1, [32]byte{}, flowB, 3, [32]byte{}) // gap in flowB at seqNum=2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap in flowA at seqNum=2
+	tr.Observe(1, [32]byte{}, flowB, 1, [32]byte{}, nil)
+	tr.Observe(1, [32]byte{}, flowB, 3, [32]byte{}, nil) // gap in flowB at seqNum=2
 	if g := tr.PendingGaps(); g != 2 {
 		t.Fatalf("before fill: PendingGaps = %d, want 2", g)
 	}
@@ -343,8 +343,8 @@ func TestSendNACK_ACK_CancelsGap(t *testing.T) {
 	}
 	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
 
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum=2
 	if tr.PendingGaps() != 1 {
 		t.Fatalf("setup: PendingGaps = %d, want 1", tr.PendingGaps())
 	}
@@ -392,8 +392,8 @@ func TestSendNACK_MISS_AdvancesRetry(t *testing.T) {
 	}
 	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
 
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum=2
 	if tr.PendingGaps() != 1 {
 		t.Fatalf("setup: PendingGaps = %d, want 1", tr.PendingGaps())
 	}
@@ -426,8 +426,8 @@ func TestSendNACK_Timeout_BacksOff(t *testing.T) {
 	}
 	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
 
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum=2
 	if tr.PendingGaps() != 1 {
 		t.Fatalf("setup: PendingGaps = %d, want 1", tr.PendingGaps())
 	}
@@ -453,13 +453,13 @@ func TestObserve_SubtreeIsolation(t *testing.T) {
 	subB[0] = 0xBB
 
 	// flowA uses subA in its hashKey; 3 contiguous frames.
-	tr.Observe(0, subA, flowA, 1, [32]byte{})
-	tr.Observe(0, subA, flowA, 2, [32]byte{})
-	tr.Observe(0, subA, flowA, 3, [32]byte{})
+	tr.Observe(0, subA, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, subA, flowA, 2, [32]byte{}, nil)
+	tr.Observe(0, subA, flowA, 3, [32]byte{}, nil)
 
 	// flowB uses subB; 2 contiguous frames interleaved.
-	tr.Observe(0, subB, flowB, 1, [32]byte{})
-	tr.Observe(0, subB, flowB, 2, [32]byte{})
+	tr.Observe(0, subB, flowB, 1, [32]byte{}, nil)
+	tr.Observe(0, subB, flowB, 2, [32]byte{}, nil)
 
 	// Neither flow has gaps.
 	if g := tr.PendingGaps(); g != 0 {
@@ -474,11 +474,11 @@ func TestObserve_SubtreeGapDoesNotAffectOtherSubtree(t *testing.T) {
 	subB[0] = 0xBB
 
 	// flowA (subA): gap between seqNum 1 and 3.
-	tr.Observe(0, subA, flowA, 1, [32]byte{})
-	tr.Observe(0, subA, flowA, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, subA, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, subA, flowA, 3, [32]byte{}, nil) // gap at seqNum=2
 	// flowB (subB): clean chain.
-	tr.Observe(0, subB, flowB, 1, [32]byte{})
-	tr.Observe(0, subB, flowB, 2, [32]byte{})
+	tr.Observe(0, subB, flowB, 1, [32]byte{}, nil)
+	tr.Observe(0, subB, flowB, 2, [32]byte{}, nil)
 
 	// Exactly one gap: in flowA only.
 	if g := tr.PendingGaps(); g != 1 {
@@ -527,8 +527,8 @@ func TestSendNACK_UnicastRetransmit_Recovered(t *testing.T) {
 	recovered := make(chan []byte, 4)
 	tr.SetRecoverFunc(func(raw []byte) { recovered <- raw })
 
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum 2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum 2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -577,8 +577,8 @@ func TestSendNACK_UnicastACK_NoData_NotCancelled(t *testing.T) {
 	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
 	tr.SetRecoverFunc(func(raw []byte) {}) // recoverFn set, but no data will arrive
 
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum 2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum 2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -48,8 +48,8 @@ func TestThrottle_DoesNotConsumeRetryBudgetOrEscalate(t *testing.T) {
 	tr := nack.New(cfg, nil, nil, nil, reg)
 
 	const flow = uint64(0xD00D)
-	tr.Observe(0, [32]byte{}, flow, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flow, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flow, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flow, 3, [32]byte{}, nil) // gap at seqNum=2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -549,32 +549,40 @@ func (r *Recorder) HeaderEgressError(workerID int) {
 
 // GapDetected records a newly detected sequence gap.
 // flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
-func (r *Recorder) GapDetected(flow string) {
-	r.gapsDetected.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
+// source is the multicast source address the loss is attributed to (per-link
+// delivery health); "" when unknown. Source cardinality is the spine/source count.
+func (r *Recorder) GapDetected(flow, source string) {
+	r.gapsDetected.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 
 // GapSuppressed records a gap cancelled by a retransmit fill or ACK response.
-// flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
-func (r *Recorder) GapSuppressed(flow string) {
-	r.gapsSuppressed.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
+// flow/source as in GapDetected.
+func (r *Recorder) GapSuppressed(flow, source string) {
+	r.gapsSuppressed.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 
 // NACKDispatched records a NACK datagram sent to a retry endpoint.
-// flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
-func (r *Recorder) NACKDispatched(flow string) {
-	r.nacksDispatched.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
+// flow/source as in GapDetected.
+func (r *Recorder) NACKDispatched(flow, source string) {
+	r.nacksDispatched.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 
 // NACKThrottled records a gap parked after a THROTTLED congestion signal.
-// flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
-func (r *Recorder) NACKThrottled(flow string) {
-	r.nacksThrottled.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
+// flow/source as in GapDetected.
+func (r *Recorder) NACKThrottled(flow, source string) {
+	r.nacksThrottled.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 
 // GapUnrecovered records a gap evicted after retries exhausted or TTL exceeded.
-// flow identifies the frame type: "brc131" for block control frames, "brc124" otherwise.
-func (r *Recorder) GapUnrecovered(flow string) {
-	r.nacksUnrecovered.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
+// flow/source as in GapDetected. This is the per-source PERMANENT-loss signal the
+// topology spectral health weights consume.
+func (r *Recorder) GapUnrecovered(flow, source string) {
+	r.nacksUnrecovered.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 
 // SubtreeGroupAnnounceReceived records a valid SubtreeGroupAnnounce datagram processed.

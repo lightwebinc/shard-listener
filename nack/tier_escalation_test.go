@@ -107,8 +107,8 @@ func TestTierEscalation_RecoversAfterDeepTierMiss(t *testing.T) {
 	tr := nack.New(cfg, nil, nil, nil, reg)
 
 	const flowA = uint64(0xAAAAAAAAAAAAAAAA)
-	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum=2
 	if g := tr.PendingGaps(); g != 1 {
 		t.Fatalf("setup: PendingGaps = %d, want 1", g)
 	}
@@ -150,8 +150,8 @@ func TestTierEscalation_LowerTiersNotRetriedAfterMiss(t *testing.T) {
 	tr := nack.New(cfg, nil, nil, nil, reg)
 
 	const flowB = uint64(0xBBBBBBBBBBBBBBBB)
-	tr.Observe(0, [32]byte{}, flowB, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flowB, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flowB, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowB, 3, [32]byte{}, nil) // gap at seqNum=2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func newRecorder(t *testing.T) *Recorder {
@@ -53,10 +55,10 @@ func TestRecorder_AllCountersSafeToCall(t *testing.T) {
 	r.MCEgressError(0)
 	r.HeaderForwarded(0)
 	r.HeaderEgressError(0)
-	r.GapDetected("brc124")
-	r.GapSuppressed("brc124")
-	r.NACKDispatched("brc124")
-	r.GapUnrecovered("brc124")
+	r.GapDetected("brc124", "srcA")
+	r.GapSuppressed("brc124", "srcA")
+	r.NACKDispatched("brc124", "srcA")
+	r.GapUnrecovered("brc124", "srcA")
 	r.SubtreeGroupAnnounceReceived()
 	r.SubtreeGroupAnnounceRejected("decode_error")
 	r.SubtreeGroupEvicted(3, 10)
@@ -64,6 +66,35 @@ func TestRecorder_AllCountersSafeToCall(t *testing.T) {
 	r.SetBeaconRegistryEndpoints(5)
 	r.WorkerReady()
 	r.WorkerDone()
+}
+
+// TestSourceLabelExposed verifies the per-source loss attribution actually
+// reaches the /metrics exposition: a gap/unrecovered emitted for a given source
+// shows up with that source label (the topology spectral-health instrument).
+func TestSourceLabelExposed(t *testing.T) {
+	r := newRecorder(t)
+	r.GapDetected("brc124", "fd00:5::7")
+	r.GapUnrecovered("brc124", "fd00:5::7")
+
+	srv := httptest.NewServer(promhttp.HandlerFor(r.promReg, promhttp.HandlerOpts{}))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	out := string(body)
+
+	for _, want := range []string{
+		`bsl_gaps_detected_total`,
+		`bsl_gaps_unrecovered_total`,
+		`source="fd00:5::7"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("metrics exposition missing %q\n---\n%s", want, out)
+		}
+	}
 }
 
 func TestReadyz_Starting(t *testing.T) {

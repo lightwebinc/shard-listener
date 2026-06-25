@@ -51,8 +51,8 @@ func TestBackoff_EscalationDoesNotConsumeRetryBudget(t *testing.T) {
 	tr := nack.New(cfg, nil, nil, nil, reg)
 
 	const flow = uint64(0xC0FFEE)
-	tr.Observe(0, [32]byte{}, flow, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flow, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flow, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flow, 3, [32]byte{}, nil) // gap at seqNum=2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -86,8 +86,8 @@ func TestBackoff_TimeoutFailsOverToDeepestTier(t *testing.T) {
 	tr := nack.New(cfg, nil, nil, nil, reg)
 
 	const flow = uint64(0xBEEF)
-	tr.Observe(0, [32]byte{}, flow, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flow, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flow, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flow, 3, [32]byte{}, nil) // gap at seqNum=2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -127,8 +127,8 @@ func TestBackoff_DeepTierFirstRetryIsPrompt(t *testing.T) {
 	tr := nack.New(cfg, nil, nil, nil, reg)
 
 	const flow = uint64(0xABCD)
-	tr.Observe(0, [32]byte{}, flow, 1, [32]byte{})
-	tr.Observe(0, [32]byte{}, flow, 3, [32]byte{}) // gap at seqNum=2
+	tr.Observe(0, [32]byte{}, flow, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flow, 3, [32]byte{}, nil) // gap at seqNum=2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
