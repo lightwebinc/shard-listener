@@ -89,6 +89,7 @@ type Recorder struct {
 	// NACK / gap counters
 	gapsDetected     metric.Int64Counter
 	gapsSuppressed   metric.Int64Counter // cancelled by retransmit fill or ACK response
+	flowsRefused     metric.Int64Counter // new flows skipped at the MaxFlows flood-guard cap
 	nacksDispatched  metric.Int64Counter
 	nacksThrottled   metric.Int64Counter // held after a THROTTLED congestion signal
 	nacksUnrecovered metric.Int64Counter // retries exhausted or TTL exceeded
@@ -309,6 +310,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.gapsSuppressed, err = meter.Int64Counter("bsl_gaps_suppressed_total",
 		metric.WithDescription("Gaps cancelled by retransmit fill or ACK response")); err != nil {
+		return nil, err
+	}
+	if r.flowsRefused, err = meter.Int64Counter("bsl_nack_flows_refused_total",
+		metric.WithDescription("New per-source flows skipped at the MaxFlows flood-guard cap")); err != nil {
 		return nil, err
 	}
 	if r.nacksDispatched, err = meter.Int64Counter("bsl_nacks_dispatched_total",
@@ -554,6 +559,11 @@ func (r *Recorder) HeaderEgressError(workerID int) {
 func (r *Recorder) GapDetected(flow, source string) {
 	r.gapsDetected.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
+}
+
+// FlowsRefused counts a new per-source flow skipped at the MaxFlows flood-guard cap.
+func (r *Recorder) FlowsRefused(flow string) {
+	r.flowsRefused.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
 }
 
 // GapSuppressed records a gap cancelled by a retransmit fill or ACK response.

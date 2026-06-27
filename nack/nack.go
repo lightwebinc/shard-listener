@@ -229,6 +229,9 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 		// source until an idle flow ages out and frees a slot.
 		if t.cfg.MaxFlows > 0 && len(t.flows) >= t.cfg.MaxFlows {
 			t.flowsRefused++
+			if t.rec != nil {
+				t.rec.FlowsRefused(flowLabel(groupIdx))
+			}
 			return
 		}
 		fs = &flowState{
