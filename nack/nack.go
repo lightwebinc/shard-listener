@@ -22,6 +22,11 @@ type TrackerConfig struct {
 	GapTTL            time.Duration // Max lifetime of a gap entry (~Bitcoin block interval)
 	TailTTL           time.Duration // Max idle time before a flow entry is evicted; 0 = GapTTL
 	SeqResetThreshold uint64        // If seqNum <= threshold on an established flow, treat as proxy restart (default 100)
+	// MaxFlows caps the per-source flow table so a burst of thousands of DISTINCT new
+	// sources (a flood, before the idle-age-out sweep frees slots) cannot exhaust memory.
+	// At the cap, a NEW source is not gap-tracked (its frames still forward — only NACK
+	// recovery is skipped for it) until a slot frees via age-out. 0 = unbounded (legacy).
+	MaxFlows int
 }
 
 // groupBlockBroadcast is the reserved group index for BRC-131 block control frames.
@@ -120,8 +125,9 @@ type Tracker struct {
 	// return traffic routes back to this node.
 	nackSrc string
 
-	mu    sync.Mutex
-	flows map[uint64]*flowState // keyed by hashKey
+	mu           sync.Mutex
+	flows        map[uint64]*flowState // keyed by hashKey
+	flowsRefused uint64                // new flows skipped at MaxFlows (flood guard); under mu
 
 	// nackQueue receives gap entries ready for NACK dispatch.
 	nackQueue chan *gapEntry
@@ -171,6 +177,21 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 // Typically wired to (*listener.Worker).Reinject.
 func (t *Tracker) SetRecoverFunc(f func(raw []byte)) { t.recoverFn = f }
 
+// FlowCount returns the number of tracked per-source flows (diagnostics/tests).
+func (t *Tracker) FlowCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.flows)
+}
+
+// FlowsRefused returns the cumulative count of new flows skipped at MaxFlows (the flood
+// guard) — a non-zero value signals sustained source-flood pressure.
+func (t *Tracker) FlowsRefused() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.flowsRefused
+}
+
 // SetNACKSource binds the NACK socket to a specific source address so NACKs and
 // the retry's unicast return traffic use a globally routable identity. Leave
 // unset (empty) to let the kernel pick the source per-route.
@@ -203,6 +224,13 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 
 	fs, ok := t.flows[hashKey]
 	if !ok {
+		// Flood guard: at the cap, do NOT create a new flow — the frame still forwards
+		// (the caller egresses independently), only gap/NACK recovery is skipped for this
+		// source until an idle flow ages out and frees a slot.
+		if t.cfg.MaxFlows > 0 && len(t.flows) >= t.cfg.MaxFlows {
+			t.flowsRefused++
+			return
+		}
 		fs = &flowState{
 			groupIdx:  groupIdx,
 			subtreeID: subtreeID,

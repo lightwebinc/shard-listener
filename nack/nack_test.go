@@ -24,6 +24,26 @@ func newTestTracker() *nack.Tracker {
 	return nack.New(cfg, nil, nil, nil, nil)
 }
 
+// TestMaxFlowsFloodGuard: past the MaxFlows cap, NEW sources are not tracked (bounded
+// memory) while already-tracked flows keep registering gaps; the refusal is counted.
+func TestMaxFlowsFloodGuard(t *testing.T) {
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second, MaxFlows: 3}, nil, nil, nil, nil)
+	for i := uint64(1); i <= 5; i++ { // 5 distinct flows, cap 3
+		tr.Observe(0, [32]byte{}, i, 1, [32]byte{}, nil)
+	}
+	if fc := tr.FlowCount(); fc != 3 {
+		t.Fatalf("FlowCount = %d, want 3 (capped)", fc)
+	}
+	if r := tr.FlowsRefused(); r != 2 {
+		t.Fatalf("FlowsRefused = %d, want 2", r)
+	}
+	// An already-tracked flow still registers gaps (recovery unaffected for it).
+	tr.Observe(0, [32]byte{}, 1, 3, [32]byte{}, nil) // seq jumps 1→3 ⇒ gap at 2
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("tracked flow should still register gaps: PendingGaps = %d, want 1", g)
+	}
+}
+
 // ── Observe ───────────────────────────────────────────────────────────────────
 
 func TestObserveFirstFrame_NoGap(t *testing.T) {

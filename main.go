@@ -169,6 +169,7 @@ func run() error {
 			BackoffMax:  cfg.NACKBackoffMax,
 			MaxRetries:  cfg.NACKMaxRetries,
 			GapTTL:      cfg.NACKGapTTL,
+			MaxFlows:    cfg.NACKMaxFlows,
 		},
 		cfg.RetryEndpoints,
 		cfg.Iface,

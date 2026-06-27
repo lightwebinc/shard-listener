@@ -153,6 +153,7 @@ type Config struct {
 	NACKBackoffMax  time.Duration
 	NACKMaxRetries  int
 	NACKGapTTL      time.Duration
+	NACKMaxFlows    int
 
 	// Multicast egress (domain bridging)
 	MCEgressEnabled  bool
@@ -351,6 +352,8 @@ func Load() (*Config, error) {
 		"max failed recovery rounds per gap before declaring unrecoverable (tier-escalation hops are free)")
 	flag.DurationVar(&c.NACKGapTTL, "nack-gap-ttl", envDuration("NACK_GAP_TTL", 10*time.Minute),
 		"max time to hold a gap entry before evicting (~Bitcoin block interval)")
+	flag.IntVar(&c.NACKMaxFlows, "nack-max-flows", envInt("NACK_MAX_FLOWS", 100000),
+		"cap on tracked per-source flows (flood guard; new sources past the cap still forward but skip NACK recovery until idle flows age out); 0 = unbounded")
 	flag.BoolVar(&c.BeaconEnabled, "beacon-enabled", envBool("BEACON_ENABLED", true),
 		"enable ADVERT beacon listener for dynamic endpoint discovery")
 	flag.IntVar(&c.BeaconPort, "beacon-port", envInt("BEACON_PORT", 9300),
