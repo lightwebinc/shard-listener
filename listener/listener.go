@@ -1045,6 +1045,15 @@ func openRawSocket(port int) (int, error) {
 		_ = unix.Close(fd)
 		return -1, fmt.Errorf("SO_REUSEPORT: %w", err)
 	}
+	// SO_REUSEADDR in addition to SO_REUSEPORT: SO_REUSEPORT only lets sockets share a port
+	// when they have the SAME EUID (the kernel anti-hijack rule), so on a COLLAPSED node a
+	// co-resident retry-endpoint running as a different user cannot also join this multicast
+	// group. SO_REUSEADDR uses the sk_reuse bind path, which permits two UDP sockets to share
+	// the port regardless of EUID — the classic multiple-receivers-per-multicast-group pattern.
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("SO_REUSEADDR: %w", err)
+	}
 	// Receive buffer: ignore error — kernel silently caps at rmem_max.
 	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, socketRecvBuf)
 	sa := &unix.SockaddrInet6{Port: port}
