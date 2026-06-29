@@ -366,8 +366,10 @@ A single `egress.Sender` per worker delivers frames to `egress-addr`:
 | `udp` | `net.DialUDP` on startup; `Write` per frame |
 | `tcp` | lazy connect on first frame; reconnect on write error |
 
-`strip-header=true` sends only the raw BSV transaction bytes (frame payload);
-`strip-header=false` (default) sends the complete 92-byte BRC-124/BRC-128 frame verbatim.
+`strip-header=true` (default) sends only the raw BSV transaction bytes (frame
+payload) — what a downstream node/miner expects; `strip-header=false` sends the
+complete 92-byte BRC-124/BRC-128 frame verbatim, for downstreams that re-read
+frames (e.g. domain bridging).
 
 ### Multicast egress (domain bridging)
 

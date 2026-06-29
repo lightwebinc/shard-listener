@@ -38,7 +38,7 @@ FF05::<shard>:9001  ──multicast──►  shard-listener  ──UDP/TCP─�
 - **Beacon discovery** — dynamic retry endpoint registry via BRC-126 ADVERT beacons
 - **Tier escalation** — MISS → immediate advance to next endpoint; ACK → gap cancelled
 - **Semaphore-bounded dispatch** — concurrent NACK goroutines with configurable limit
-- **Egress UDP or TCP** with optional strip-header mode (payload-only)
+- **Egress UDP or TCP** — strip-header (payload-only) by default, since a downstream node reads a raw BSV tx, not a multicast frame; disable for frame-aware downstreams (domain bridging)
 - **Multicast egress** — optional domain bridging; re-emits filtered frames onto a separate multicast address space with configurable scope, interface, port, and hop limit
 - **BRC-135 header egress** — optional; re-emits the 80-byte block header carried in BRC-131 BlockAnnounce frames as a 172-byte BRC-135 frame on a dedicated egress group (`0xFFFA`) for SPV-style consumers
 - **Per-deployment egress TxID dedup** — optional shared store (Redis SETNX) to suppress duplicate egress when multiple listeners cover the same shard subset; honours optional ingress courtesy marks from `shard-proxy`
@@ -94,8 +94,8 @@ a `sink-test-frames` UDP sink. Three scenarios are exercised sequentially:
 1. **Basic delivery** — all frames forwarded; verified by sink count and
    `bsl_frames_forwarded_total` Prometheus metric.
 2. **Shard filter** — `-shard-include 0` passes only the group-0 frame.
-3. **Strip-header** — `-strip-header` forwards raw payload bytes; sink counts
-   raw datagrams.
+3. **Strip-header** — on by default, forwards raw payload bytes (the BSV tx);
+   `-strip-header=false` forwards the full frame. Sink counts raw datagrams.
 
 The suite requires `shard-proxy` checked out at `../shard-proxy`
 (for `send-test-frames`). `make test-e2e` builds all binaries fresh before

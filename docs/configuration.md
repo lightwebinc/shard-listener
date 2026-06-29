@@ -136,10 +136,14 @@ Egress protocol: `udp` or `tcp`.
 - **UDP** — one datagram per frame; no connection state.
 - **TCP** — persistent connection; reconnects automatically on error.
 
-### `-strip-header` / `STRIP_HEADER` (default: `false`)
+### `-strip-header` / `STRIP_HEADER` (default: `true`)
 
-When `true`, only the raw BSV transaction payload is forwarded (no frame
-header). When `false`, the complete 92-byte BRC-124/BRC-128 frame is forwarded verbatim.
+When `true` (the default), only the raw BSV transaction payload is forwarded
+(no frame header) — this is what a downstream node/miner expects, since it
+reads a standard `tx` (BRC-12) or Extended Format (BRC-30) serialisation, not a
+multicast frame. When `false`, the complete 92-byte BRC-124/BRC-128 frame is
+forwarded verbatim; set this only when the downstream re-reads frames itself
+(for example domain bridging into another multicast fabric).
 
 ---
 

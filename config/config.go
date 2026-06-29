@@ -16,7 +16,7 @@
 //	-subtree-exclude      SUBTREE_EXCLUDE                       Hex subtree IDs to drop (empty=none)
 //	-egress-addr          EGRESS_ADDR          127.0.0.1:9100   Downstream unicast host:port
 //	-egress-proto         EGRESS_PROTO         udp              udp | tcp
-//	-strip-header         STRIP_HEADER         false            Send payload-only
+//	-strip-header         STRIP_HEADER         true             Send payload-only (drop frame header)
 //	-mc-egress-enabled    MC_EGRESS_ENABLED    false            Enable multicast egress
 //	-mc-egress-iface      MC_EGRESS_IFACE      (=iface)         Output NIC for multicast send
 //	-mc-egress-port       MC_EGRESS_PORT       (=listen-port)   Egress group UDP port
@@ -308,8 +308,9 @@ func Load() (*Config, error) {
 		"downstream unicast host:port")
 	flag.StringVar(&c.EgressProto, "egress-proto", envStr("EGRESS_PROTO", "udp"),
 		"egress protocol: udp | tcp")
-	flag.BoolVar(&c.StripHeader, "strip-header", envBool("STRIP_HEADER", false),
-		"send payload-only (no frame header) to egress")
+	flag.BoolVar(&c.StripHeader, "strip-header", envBool("STRIP_HEADER", true),
+		"drop the multicast frame header, sending payload-only (raw BSV tx) to egress "+
+			"(default; set false only when the downstream re-reads frames, e.g. domain bridging)")
 	flag.BoolVar(&c.MCEgressEnabled, "mc-egress-enabled", envBool("MC_EGRESS_ENABLED", false),
 		"enable multicast egress (domain bridging)")
 	mcEgressIfaceFlag := flag.String("mc-egress-iface", envStr("MC_EGRESS_IFACE", ""),
