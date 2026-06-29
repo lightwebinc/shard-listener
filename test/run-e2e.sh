@@ -29,7 +29,7 @@ echo "--- Test 1: basic delivery (expect $NUM_GROUPS frames) ---"
 shard-listener \
     -iface lo -scope link -shard-bits "$SHARD_BITS" \
     -listen-port 9001 \
-    -egress-addr "127.0.0.1:9102" -egress-proto udp \
+    -egress-addr "127.0.0.1:9102" -egress-proto udp -strip-header=false \
     -metrics-addr ":9200" -workers 1 -debug &
 L1=$!
 
@@ -70,7 +70,7 @@ shard-listener \
     -iface lo -scope link -shard-bits "$SHARD_BITS" \
     -listen-port 9002 \
     -shard-include 0 \
-    -egress-addr "127.0.0.1:9103" -egress-proto udp \
+    -egress-addr "127.0.0.1:9103" -egress-proto udp -strip-header=false \
     -metrics-addr ":9201" -workers 1 -debug &
 L2=$!
 
@@ -141,7 +141,7 @@ echo "--- Test 4: BRC-130 fragmentation (expect $NUM_GROUPS reassembled frames) 
 shard-listener \
     -iface lo -scope link -shard-bits "$SHARD_BITS" \
     -listen-port 9004 \
-    -egress-addr "127.0.0.1:9105" -egress-proto udp \
+    -egress-addr "127.0.0.1:9105" -egress-proto udp -strip-header=false \
     -metrics-addr ":9203" -workers 1 -debug &
 L4=$!
 
