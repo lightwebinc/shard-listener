@@ -22,6 +22,7 @@ package listener
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -33,6 +34,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/lightwebinc/shard-common/bundle"
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/netjoin"
 	"github.com/lightwebinc/shard-common/pow"
@@ -113,6 +115,13 @@ type Worker struct {
 	// path (single-worker receive) and only meets the rare unicast-recovery
 	// re-injection.
 	procMu sync.Mutex
+
+	// egressSeq assigns a monotonic per-bundle-flow (keyed by the bundle
+	// HashKey) egress SeqNum to decoalesced BRC-142 members: the per-tx SeqNum
+	// does not survive coalescing, so the edge re-stamps a fresh sequence so
+	// downstream consumers retain gap detection. Accessed only from
+	// processBundle, which runs under procMu, so it needs no further locking.
+	egressSeq map[uint64]uint64
 }
 
 // SetGroupSources configures per-group SSM source lists for the data-plane
@@ -461,6 +470,12 @@ func (w *Worker) processFrame(raw []byte) {
 		return
 	}
 
+	// BRC-142 bundle frame (FrameVer 0x08): edge-decoalesce and forward members.
+	if frame.IsBundle(raw) {
+		w.processBundle(raw)
+		return
+	}
+
 	f, err := frame.Decode(raw)
 	if err != nil {
 		if w.rec != nil {
@@ -597,6 +612,133 @@ func (w *Worker) processFrame(raw []byte) {
 			"group", groupIdx,
 			"seq_num", f.SeqNum,
 		)
+	}
+}
+
+// processBundle handles BRC-142 bundle frames (FrameVer 0x08) via
+// edge-decoalesce: it filters at bundle granularity, gap-tracks the bundle
+// stream (so a missing bundle is NACK'd and recovered whole), then splits the
+// bundle into individual BRC-124 frames and forwards each downstream.
+//
+// Dedup is applied to the whole bundle (not per member): the bundle is the
+// retransmission unit, and bundle-level dedup keeps the re-stamped egress
+// sequence consistent if several HA listeners receive the same bundle (only the
+// winner forwards it). Each emitted member is re-stamped with a fresh monotonic
+// egress SeqNum keyed by the bundle flow HashKey, because the per-tx SeqNum did
+// not survive coalescing. Runs under procMu (egressSeq needs no further lock).
+func (w *Worker) processBundle(raw []byte) {
+	b, err := bundle.Decode(raw)
+	if err != nil {
+		if w.rec != nil {
+			w.rec.FrameDropped(w.id, "bundle_decode_error")
+		}
+		if w.debug {
+			w.log.Debug("bundle decode error", "err", err, "len", len(raw))
+		}
+		return
+	}
+	if w.rec != nil {
+		w.rec.FrameReceived(w.id, w.iface.Name, "brc142")
+	}
+
+	groupIdx := uint32(b.GroupIdx)
+
+	// Filter at bundle granularity — a bundle is one (group, subtree).
+	probe := &frame.Frame{Version: frame.FrameVerV2, SubtreeID: b.SubtreeID}
+	if allow, reason := w.filt.Allow(groupIdx, probe); !allow {
+		if w.rec != nil {
+			w.rec.FrameDropped(w.id, reason)
+		}
+		return
+	}
+
+	observe := func() {
+		if w.tracker != nil && b.SeqNum != 0 {
+			var zero [32]byte // a bundle has no single TxID
+			w.tracker.Observe(groupIdx, b.SubtreeID, b.HashKey, b.SeqNum, zero, w.curSource)
+		}
+	}
+
+	// Cross-listener egress dedup, at the BUNDLE level: only the first listener
+	// in a deployment forwards a given bundle. Keyed by a synthetic bundle id
+	// (HashKey ∥ SeqNum) since a bundle has no TxID. Still observe for gap
+	// bookkeeping.
+	if w.txDedup != nil && b.SeqNum != 0 {
+		var bid [32]byte
+		binary.BigEndian.PutUint64(bid[0:8], b.HashKey)
+		binary.BigEndian.PutUint64(bid[8:16], b.SeqNum)
+		claimed, claimErr := w.txDedup.Claim(bid)
+		if claimErr != nil {
+			if w.rec != nil {
+				w.rec.TxDedupError()
+			}
+		} else if !claimed {
+			if w.rec != nil {
+				w.rec.FrameTxDeduped(w.id)
+			}
+			observe()
+			return
+		}
+	}
+
+	// Local egress duplicate suppression (inline frame + its retransmit), at the
+	// bundle level. Still observe so gap-fill bookkeeping stays accurate.
+	if w.dedupSet != nil && b.SeqNum != 0 {
+		if w.dedupSet.SeenAndAdd(dedup.Key{GroupIdx: groupIdx, SubtreeID: b.SubtreeID, SeqNum: b.SeqNum}) {
+			if w.rec != nil {
+				w.rec.FrameDeduped(w.id)
+			}
+			observe()
+			return
+		}
+	}
+
+	observe()
+
+	if w.egressSeq == nil {
+		w.egressSeq = make(map[uint64]uint64)
+	}
+
+	for _, mf := range bundle.Decoalesce(b) {
+		// Re-stamp a fresh monotonic per-flow egress SeqNum (keyed by the bundle
+		// flow HashKey) so downstream consumers retain gap detection.
+		w.egressSeq[b.HashKey]++
+		mf.SeqNum = w.egressSeq[b.HashKey]
+
+		buf := make([]byte, frame.HeaderSize+len(mf.Payload))
+		n, encErr := frame.Encode(mf, buf)
+		if encErr != nil {
+			if w.rec != nil {
+				w.rec.EgressError(w.id)
+			}
+			w.log.Debug("bundle member encode error", "err", encErr)
+			continue
+		}
+		out := buf[:n]
+
+		if err := w.egr.Send(out, mf); err != nil {
+			if w.rec != nil {
+				w.rec.EgressError(w.id)
+			}
+			w.log.Debug("egress send error", "err", err)
+		} else if w.rec != nil {
+			w.rec.FrameForwarded(w.id, w.egr.Proto())
+		}
+
+		if w.mcastEgr != nil {
+			if err := w.mcastEgr.Send(out, mf, groupIdx); err != nil {
+				if w.rec != nil {
+					w.rec.MCEgressError(w.id)
+				}
+				w.log.Debug("mc egress send error", "err", err)
+			} else if w.rec != nil {
+				w.rec.FrameForwarded(w.id, w.mcastEgr.Proto())
+			}
+		}
+	}
+
+	if w.debug {
+		w.log.Debug("bundle decoalesced", "group", groupIdx, "seq_num", b.SeqNum, "members", len(b.Members))
 	}
 }
 
