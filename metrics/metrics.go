@@ -58,6 +58,7 @@ type Recorder struct {
 	// ── Hot-path counters — direct prometheus client_golang ──
 	promFramesReceived       *promclient.CounterVec // worker, iface, version
 	promFramesDropped        *promclient.CounterVec // worker, reason
+	promBundlesRebucketed    *promclient.CounterVec // worker
 	promFramesForwarded      *promclient.CounterVec // worker, proto
 	promFramesInvalidPayload *promclient.CounterVec // worker
 	promFramesDeduped        *promclient.CounterVec // worker
@@ -209,6 +210,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		Name: "bsl_frames_dropped_total",
 		Help: "Frames dropped before egress",
 	}, []string{"worker", "reason"})
+	r.promBundlesRebucketed = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_bundles_rebucketed_total",
+		Help: "BRC-142 bundles re-bucketed to the local ShardBits generation before delivery (cross-generation/re-shard)",
+	}, []string{"worker"})
 	r.promFramesForwarded = promclient.NewCounterVec(promclient.CounterOpts{
 		Name: "bsl_frames_forwarded_total",
 		Help: "Frames forwarded to downstream unicast",
@@ -236,7 +241,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	for _, c := range []promclient.Collector{
 		r.promFramesReceived, r.promFramesDropped, r.promFramesForwarded,
 		r.promFramesInvalidPayload, r.promFramesDeduped, r.promFramesTxDeduped,
-		r.promEgressErrors, r.promMCEgressErrors,
+		r.promEgressErrors, r.promMCEgressErrors, r.promBundlesRebucketed,
 	} {
 		if regErr := reg.Register(c); regErr != nil {
 			return nil, fmt.Errorf("metrics: register hot-path counter: %w", regErr)
@@ -449,6 +454,13 @@ func (r *Recorder) FrameDropped(workerID int, reason string) {
 // FrameForwarded records a successfully forwarded frame.
 func (r *Recorder) FrameForwarded(workerID int, proto string) {
 	r.promFramesForwarded.WithLabelValues(strconv.Itoa(workerID), proto).Inc()
+}
+
+// BundleRebucketed records one BRC-142 bundle re-bucketed to the local ShardBits
+// generation (its members re-coalesced into local-generation groups) before
+// delivery — the cross-generation / re-shard relay operation.
+func (r *Recorder) BundleRebucketed(workerID int) {
+	r.promBundlesRebucketed.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
 
 // FrameInvalidPayload records a BRC-124/BRC-128 frame dropped because

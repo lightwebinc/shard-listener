@@ -54,6 +54,12 @@ const (
 
 	// socketRecvBuf is the UDP receive buffer requested on each worker socket.
 	socketRecvBuf = 64 * 1024 * 1024 // 64 MiB
+
+	// rebucketMaxBytes caps a re-bucketed bundle datagram (BRC-142 §Re-bucketing).
+	// Re-bucketed children are delivered whole only to bundle-capable consumers, so
+	// the public-internet MTU baseline (1500) is the safe size; edge-decoalesced
+	// delivery splits them regardless of this cap.
+	rebucketMaxBytes = 1500
 )
 
 // Worker is a single multicast receive goroutine.
@@ -122,6 +128,16 @@ type Worker struct {
 	// downstream consumers retain gap detection. Accessed only from
 	// processBundle, which runs under procMu, so it needs no further locking.
 	egressSeq map[uint64]uint64
+
+	// rebucketer re-coalesces a bundle built at a different ShardBits generation
+	// into this listener's generation (BRC-142 §Re-bucketing) before delivery, so
+	// cross-generation / re-shard bundles route and filter at the local groups
+	// rather than over-delivering to finer subscribers. Lazily built on the first
+	// mismatched bundle; its per-flow SeqNum map persists across bundles so the
+	// re-bucketed child streams stay monotonic. Used only from processBundle
+	// (under procMu). nil until first needed (the same-generation common case
+	// never touches it).
+	rebucketer *bundle.Rebucketer
 }
 
 // SetGroupSources configures per-group SSM source lists for the data-plane
@@ -641,6 +657,53 @@ func (w *Worker) processBundle(raw []byte) {
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc142")
 	}
 
+	// Generation alignment (BRC-142 §Re-bucketing). A bundle's GroupIdx names a
+	// group at the bundle's own ShardBits; if that differs from this listener's
+	// generation, delivering the bundle as-is would route/filter against the
+	// wrong (cross-generation) groups and over-deliver a coarser parent bundle to
+	// a finer subscriber. Re-bucket to the local ShardBits first — split the
+	// bundle and re-coalesce each member into its correct local-generation group
+	// — then deliver each re-bucketed bundle through the normal path. ShardBits 0
+	// (unset) and the same-generation common case skip this entirely.
+	//
+	// The re-bucketed children are re-stamped on a fresh flow keyed by the parent
+	// HashKey (a deterministic re-emit identity), so their SeqNum streams are
+	// monotonic for gap detection. Caveat: own-traffic exclusion keys on
+	// HashKey = hash(originalSenderIP, group, subtree), which cannot be recomputed
+	// at the local groups from the opaque parent HashKey, so own-traffic exclusion
+	// does not apply to re-bucketed (cross-generation) flows — a documented
+	// re-shard-boundary limitation, not a per-tx regression in the common path.
+	if b.ShardBits != 0 && uint(b.ShardBits) != w.engine.ShardBits() {
+		if w.rebucketer == nil {
+			// carryTxID=true: re-coalescing recomputes a missing TxID as SHA256d,
+			// which is wrong for EF members, so preserve TxIDs across the re-bucket.
+			w.rebucketer = bundle.NewRebucketer(w.engine, rebucketMaxBytes, 0, true)
+		}
+		var sender [16]byte
+		binary.BigEndian.PutUint64(sender[0:8], b.HashKey)
+		children := w.rebucketer.Rebucket(sender, b)
+		if w.rec != nil {
+			w.rec.BundleRebucketed(w.id)
+		}
+		if w.debug {
+			w.log.Debug("bundle re-bucketed", "from_shardbits", b.ShardBits,
+				"to_shardbits", w.engine.ShardBits(), "members", len(b.Members), "children", len(children))
+		}
+		for _, child := range children {
+			w.deliverBundle(child, nil) // nil raw: encoded on demand if delivered whole
+		}
+		return
+	}
+
+	w.deliverBundle(b, raw)
+}
+
+// deliverBundle filters, gap-tracks, dedups, and delivers one generation-aligned
+// bundle (the local-ShardBits common case, or a child produced by re-bucketing).
+// raw is the verbatim datagram for the whole-bundle (consumer-decoalesce) path;
+// it is nil for a re-bucketed child, which is encoded on demand only if a
+// bundle-capable consumer takes it whole. Runs under procMu.
+func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte) {
 	groupIdx := uint32(b.GroupIdx)
 
 	// Filter at bundle granularity — a bundle is one (group, subtree).
@@ -707,13 +770,28 @@ func (w *Worker) processBundle(raw []byte) {
 	// receives decoalesced members on its own re-stamp stream.
 	bs, bundleAware := w.egr.(egress.BundleSink)
 	if bundleAware {
-		if err := bs.SendBundle(raw, b); err != nil {
-			if w.rec != nil {
-				w.rec.EgressError(w.id)
+		// A re-bucketed child has no source datagram; encode it so the bundle-aware
+		// sink can deliver it whole to a capable consumer.
+		if raw == nil {
+			encoded, encErr := b.Encode()
+			if encErr != nil {
+				if w.rec != nil {
+					w.rec.EgressError(w.id)
+				}
+				w.log.Debug("re-bucketed bundle encode error", "err", encErr)
+			} else {
+				raw = encoded
 			}
-			w.log.Debug("bundle egress send error", "err", err)
-		} else if w.rec != nil {
-			w.rec.FrameForwarded(w.id, w.egr.Proto())
+		}
+		if raw != nil {
+			if err := bs.SendBundle(raw, b); err != nil {
+				if w.rec != nil {
+					w.rec.EgressError(w.id)
+				}
+				w.log.Debug("bundle egress send error", "err", err)
+			} else if w.rec != nil {
+				w.rec.FrameForwarded(w.id, w.egr.Proto())
+			}
 		}
 	}
 
