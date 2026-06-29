@@ -3,6 +3,7 @@ package fanout_test
 import (
 	"testing"
 
+	"github.com/lightwebinc/shard-common/bundle"
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
@@ -38,6 +39,124 @@ func subtreeID(b byte) [32]byte {
 	var id [32]byte
 	id[0] = b
 	return id
+}
+
+// bundleRecSink is a bundle-capable sink: it records whole bundles handed to it
+// (and the member frames it would get if decoalesced, via the embedded recSink).
+type bundleRecSink struct {
+	recSink
+	bundles int
+	members int
+}
+
+func (b *bundleRecSink) SendBundle(raw []byte, bun *bundle.Bundle) error {
+	b.bundles++
+	b.members += len(bun.Members)
+	return nil
+}
+
+// seqRecSink captures the per-member SeqNums delivered (non-capable path).
+type seqRecSink struct {
+	recSink
+	seqs []uint64
+}
+
+func (s *seqRecSink) Send(raw []byte, f *frame.Frame) error {
+	s.tx++
+	s.seqs = append(s.seqs, f.SeqNum)
+	return nil
+}
+
+func makeBundle(t *testing.T, group uint16, sub [32]byte, hashKey uint64, n int) ([]byte, *bundle.Bundle) {
+	t.Helper()
+	b := &bundle.Bundle{GroupIdx: group, ShardBits: 2, SubtreeID: sub, HashKey: hashKey, SeqNum: 7}
+	for i := 0; i < n; i++ {
+		b.Members = append(b.Members, bundle.Member{Tx: []byte{byte('a' + i)}})
+	}
+	raw, err := b.Encode()
+	if err != nil {
+		t.Fatalf("encode bundle: %v", err)
+	}
+	parsed, err := bundle.Decode(raw)
+	if err != nil {
+		t.Fatalf("decode bundle: %v", err)
+	}
+	return raw, parsed
+}
+
+// A bundle-capable consumer receives the whole bundle intact; a non-capable
+// consumer on the same shard receives the decoalesced members, re-stamped with
+// a fresh monotonic per-flow egress SeqNum.
+func TestSendBundle_CapableWholeVsDecoalesce(t *testing.T) {
+	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
+	s := fanout.New(eng)
+
+	capable := &bundleRecSink{}
+	plain := &seqRecSink{}
+	s.Apply([]*fanout.Consumer{
+		{ID: "capable", Shards: []uint32{0}, Sink: capable, BundleCapable: true},
+		{ID: "plain", Shards: []uint32{0}, Sink: plain},
+	})
+
+	raw, b := makeBundle(t, 0, subtreeID(0), 0xABCD, 3)
+	if err := s.SendBundle(raw, b); err != nil {
+		t.Fatalf("SendBundle: %v", err)
+	}
+
+	if capable.bundles != 1 || capable.members != 3 || capable.tx != 0 {
+		t.Errorf("capable consumer: bundles=%d members=%d tx=%d, want 1/3/0 (whole bundle, no decoalesce)", capable.bundles, capable.members, capable.tx)
+	}
+	if plain.tx != 3 || len(plain.seqs) != 3 {
+		t.Fatalf("plain consumer: tx=%d seqs=%v, want 3 decoalesced members", plain.tx, plain.seqs)
+	}
+	for i, sq := range plain.seqs {
+		if sq != uint64(i+1) {
+			t.Errorf("plain member %d SeqNum=%d, want %d (monotonic re-stamp)", i, sq, i+1)
+		}
+	}
+
+	// A second bundle of the same flow continues the egress sequence (4,5,6).
+	raw2, b2 := makeBundle(t, 0, subtreeID(0), 0xABCD, 3)
+	if err := s.SendBundle(raw2, b2); err != nil {
+		t.Fatalf("SendBundle 2: %v", err)
+	}
+	if got := plain.seqs[3:]; len(got) != 3 || got[0] != 4 || got[2] != 6 {
+		t.Errorf("second bundle seqs=%v, want contiguous 4,5,6", got)
+	}
+}
+
+// A bundle whose HashKey matches a consumer's own ingress identity is excluded
+// wholesale from that consumer (bundle-granularity own-traffic exclusion).
+func TestSendBundle_OwnTrafficExcluded(t *testing.T) {
+	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
+	s := fanout.New(eng)
+
+	var ownIP [16]byte
+	ownIP[15] = 9
+	sub := subtreeID(0)
+	ownHash := seqhash.Hash(ownIP, 0, sub)
+
+	c := &seqRecSink{}
+	s.Apply([]*fanout.Consumer{
+		{ID: "c", Shards: []uint32{0}, Sink: c, OwnIngressIP: ownIP},
+	})
+
+	raw, b := makeBundle(t, 0, sub, ownHash, 4)
+	if err := s.SendBundle(raw, b); err != nil {
+		t.Fatalf("SendBundle: %v", err)
+	}
+	if c.tx != 0 {
+		t.Errorf("own-traffic bundle delivered (tx=%d), want 0 (excluded)", c.tx)
+	}
+
+	// A bundle with a different HashKey is delivered normally.
+	raw2, b2 := makeBundle(t, 0, sub, ownHash+1, 4)
+	if err := s.SendBundle(raw2, b2); err != nil {
+		t.Fatalf("SendBundle 2: %v", err)
+	}
+	if c.tx != 4 {
+		t.Errorf("non-own bundle: tx=%d, want 4", c.tx)
+	}
 }
 
 func TestShardRouting(t *testing.T) {

@@ -699,46 +699,68 @@ func (w *Worker) processBundle(raw []byte) {
 		w.egressSeq = make(map[uint64]uint64)
 	}
 
-	for _, mf := range bundle.Decoalesce(b) {
-		// Re-stamp a fresh monotonic per-flow egress SeqNum (keyed by the bundle
-		// flow HashKey) so downstream consumers retain gap detection.
-		w.egressSeq[b.HashKey]++
-		mf.SeqNum = w.egressSeq[b.HashKey]
-
-		buf := make([]byte, frame.HeaderSize+len(mf.Payload))
-		n, encErr := frame.Encode(mf, buf)
-		if encErr != nil {
+	// A bundle-aware fan-out sink takes the whole bundle and decides delivery per
+	// consumer (intact to bundle-capable consumers, decoalesced for the rest);
+	// the per-flow egress re-stamp then lives in that sink. A plain sink is handed
+	// decoalesced individual BRC-124 frames, re-stamped here (the edge-decoalesce
+	// default). The multicast re-emit path (mcastEgr), when present, always
+	// receives decoalesced members on its own re-stamp stream.
+	bs, bundleAware := w.egr.(egress.BundleSink)
+	if bundleAware {
+		if err := bs.SendBundle(raw, b); err != nil {
 			if w.rec != nil {
 				w.rec.EgressError(w.id)
 			}
-			w.log.Debug("bundle member encode error", "err", encErr)
-			continue
-		}
-		out := buf[:n]
-
-		if err := w.egr.Send(out, mf); err != nil {
-			if w.rec != nil {
-				w.rec.EgressError(w.id)
-			}
-			w.log.Debug("egress send error", "err", err)
+			w.log.Debug("bundle egress send error", "err", err)
 		} else if w.rec != nil {
 			w.rec.FrameForwarded(w.id, w.egr.Proto())
 		}
+	}
 
-		if w.mcastEgr != nil {
-			if err := w.mcastEgr.Send(out, mf, groupIdx); err != nil {
+	if !bundleAware || w.mcastEgr != nil {
+		for _, mf := range bundle.Decoalesce(b) {
+			// Re-stamp a fresh monotonic per-flow egress SeqNum (keyed by the bundle
+			// flow HashKey) so downstream consumers retain gap detection.
+			w.egressSeq[b.HashKey]++
+			mf.SeqNum = w.egressSeq[b.HashKey]
+
+			buf := make([]byte, frame.HeaderSize+len(mf.Payload))
+			n, encErr := frame.Encode(mf, buf)
+			if encErr != nil {
 				if w.rec != nil {
-					w.rec.MCEgressError(w.id)
+					w.rec.EgressError(w.id)
 				}
-				w.log.Debug("mc egress send error", "err", err)
-			} else if w.rec != nil {
-				w.rec.FrameForwarded(w.id, w.mcastEgr.Proto())
+				w.log.Debug("bundle member encode error", "err", encErr)
+				continue
+			}
+			out := buf[:n]
+
+			if !bundleAware {
+				if err := w.egr.Send(out, mf); err != nil {
+					if w.rec != nil {
+						w.rec.EgressError(w.id)
+					}
+					w.log.Debug("egress send error", "err", err)
+				} else if w.rec != nil {
+					w.rec.FrameForwarded(w.id, w.egr.Proto())
+				}
+			}
+
+			if w.mcastEgr != nil {
+				if err := w.mcastEgr.Send(out, mf, groupIdx); err != nil {
+					if w.rec != nil {
+						w.rec.MCEgressError(w.id)
+					}
+					w.log.Debug("mc egress send error", "err", err)
+				} else if w.rec != nil {
+					w.rec.FrameForwarded(w.id, w.mcastEgr.Proto())
+				}
 			}
 		}
 	}
 
 	if w.debug {
-		w.log.Debug("bundle decoalesced", "group", groupIdx, "seq_num", b.SeqNum, "members", len(b.Members))
+		w.log.Debug("bundle decoalesced", "group", groupIdx, "seq_num", b.SeqNum, "members", len(b.Members), "bundle_aware", bundleAware)
 	}
 }
 

@@ -18,6 +18,7 @@ package fanout
 import (
 	"sync"
 
+	"github.com/lightwebinc/shard-common/bundle"
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
@@ -44,12 +45,19 @@ import (
 // the original behaviour: the consumer receives its own traffic. Control frames
 // are never excluded. This is addressing-agnostic: it keys on the originating
 // consumer's ingress identity, not on which edge or spine forwarded the frame.
+// BundleCapable marks a consumer that can decode BRC-142 bundle frames itself,
+// so [Sink.SendBundle] delivers the whole bundle to it intact (one datagram for
+// many transactions) instead of decoalescing into individual frames. The
+// default (false) preserves the edge-decoalesce contract: the consumer receives
+// individual BRC-124 frames. A capable consumer's Sink must implement
+// [egress.BundleSink]; if it does not, the bundle is decoalesced as a fallback.
 type Consumer struct {
-	ID           string
-	Shards       []uint32
-	Filt         *filter.Filter
-	Sink         egress.EgressSink
-	OwnIngressIP [16]byte
+	ID            string
+	Shards        []uint32
+	Filt          *filter.Filter
+	Sink          egress.EgressSink
+	OwnIngressIP  [16]byte
+	BundleCapable bool
 }
 
 // Sink is an egress.EgressSink that fans each frame out to the matching subset
@@ -68,10 +76,20 @@ type Sink struct {
 	consumers []*Consumer            // full table — broadcast set for control frames
 	byShard   map[uint32][]*Consumer // shard idx -> consumers subscribed to that shard
 	allShards []*Consumer            // consumers with no shard restriction
+
+	// egressSeq re-stamps a fresh monotonic per-bundle-flow SeqNum (keyed by the
+	// bundle HashKey) onto each member when decoalescing for a non-capable
+	// consumer — the bundle SeqNum is frame-bound and does not survive the split.
+	// Touched only on the single-threaded worker hot path (SendBundle), so it
+	// needs no lock beyond the worker's own serialisation.
+	egressSeq map[uint64]uint64
 }
 
-// compile-time assertion that Sink satisfies the listener's egress seam.
-var _ egress.EgressSink = (*Sink)(nil)
+// compile-time assertions that Sink satisfies the listener's egress seams.
+var (
+	_ egress.EgressSink = (*Sink)(nil)
+	_ egress.BundleSink = (*Sink)(nil)
+)
 
 // New constructs an empty fan-out sink. engine derives a frame's shard index
 // from its TxID (the same derivation the worker uses) so Send can route without
@@ -135,6 +153,111 @@ func (s *Sink) Send(raw []byte, f *frame.Frame) error {
 		deliver(c)
 	}
 	return firstErr
+}
+
+// SendBundle delivers a BRC-142 bundle to every consumer subscribed to the
+// bundle's shard whose subtree filter admits it. Per consumer:
+//   - bundle-capable (and its Sink is an [egress.BundleSink]) → the whole bundle
+//     intact (one datagram, many transactions), so the coalescing saving reaches
+//     that consumer's last hop;
+//   - otherwise → the bundle decoalesced into individual BRC-124 frames, each
+//     re-stamped with a fresh monotonic per-flow egress SeqNum, preserving the
+//     edge-decoalesce contract.
+//
+// The group is the bundle's own GroupIdx (a bundle carries many TxIDs and is
+// bound to one group); the subtree filter is applied at bundle granularity (a
+// bundle is one (group, subtree) flow). Decoalescing happens at most once per
+// bundle and is shared across all non-capable consumers. raw is the verbatim
+// bundle datagram; b is its parse (members alias raw).
+func (s *Sink) SendBundle(raw []byte, b *bundle.Bundle) error {
+	groupIdx := uint32(b.GroupIdx)
+
+	s.mu.RLock()
+	bucket := s.byShard[groupIdx]
+	allShards := s.allShards
+	s.mu.RUnlock()
+
+	// Bundle-granularity subtree predicate: a bundle shares one SubtreeID.
+	probe := &frame.Frame{Version: frame.FrameVerV2, SubtreeID: b.SubtreeID, HashKey: b.HashKey}
+
+	var members []encodedMember // lazily decoalesced+re-stamped, shared by non-capable consumers
+	var firstErr error
+	deliver := func(c *Consumer) {
+		if c.Filt != nil {
+			if ok, _ := c.Filt.Allow(groupIdx, probe); !ok {
+				return
+			}
+		}
+		if isOwnBundle(c, groupIdx, b) {
+			return
+		}
+		if c.BundleCapable {
+			if bs, ok := c.Sink.(egress.BundleSink); ok {
+				if err := bs.SendBundle(raw, b); err != nil && firstErr == nil {
+					firstErr = err
+				}
+				return
+			}
+			// Capable flag but the sink can't take bundles: fall back to members.
+		}
+		if members == nil {
+			members = s.decoalesce(b)
+		}
+		for i := range members {
+			if err := c.Sink.Send(members[i].raw, members[i].f); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	for _, c := range bucket {
+		deliver(c)
+	}
+	for _, c := range allShards {
+		deliver(c)
+	}
+	return firstErr
+}
+
+// encodedMember is one decoalesced bundle member: its re-encoded BRC-124 wire
+// bytes and the parsed frame (re-stamped SeqNum), reused across consumers.
+type encodedMember struct {
+	raw []byte
+	f   *frame.Frame
+}
+
+// decoalesce splits b into individual BRC-124 frames once, re-stamping each with
+// a fresh monotonic per-flow egress SeqNum (keyed by the bundle HashKey) so a
+// non-capable consumer retains gap detection. Members that fail to re-encode are
+// skipped (the egress sequence still advances so a single bad member does not
+// desync the rest).
+func (s *Sink) decoalesce(b *bundle.Bundle) []encodedMember {
+	if s.egressSeq == nil {
+		s.egressSeq = make(map[uint64]uint64)
+	}
+	mfs := bundle.Decoalesce(b)
+	out := make([]encodedMember, 0, len(mfs))
+	for _, mf := range mfs {
+		s.egressSeq[b.HashKey]++
+		mf.SeqNum = s.egressSeq[b.HashKey]
+		buf := make([]byte, frame.HeaderSize+len(mf.Payload))
+		n, err := frame.Encode(mf, buf)
+		if err != nil {
+			continue
+		}
+		out = append(out, encodedMember{raw: buf[:n], f: mf})
+	}
+	return out
+}
+
+// isOwnBundle reports whether bundle b is consumer c's own traffic returning
+// down its egress link — the bundle-granularity analogue of [isOwnTraffic]. A
+// bundle is one source flow (one HashKey), so the whole bundle is skipped when
+// its HashKey matches the one the proxy derives from c's ingress identity.
+func isOwnBundle(c *Consumer, groupIdx uint32, b *bundle.Bundle) bool {
+	if c.OwnIngressIP == ([16]byte{}) {
+		return false
+	}
+	return b.HashKey == seqhash.Hash(c.OwnIngressIP, groupIdx, b.SubtreeID)
 }
 
 // isOwnTraffic reports whether frame f is consumer c's own transaction returning
