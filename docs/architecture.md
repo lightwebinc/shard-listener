@@ -324,6 +324,61 @@ The virtual `0xFFF9` is not a real multicast address — it matches the proxy's 
 derivation for anchor frames to keep flow identity consistent end to end. See
 [bsv-multicast/docs/brc-134-anchor-transactions.md](../../../bsv-multicast/docs/brc-134-anchor-transactions.md).
 
+## BRC-142 Bundle Processing
+
+`FrameVerV8` (0x08) coalescing bundles pack several small transactions into one
+datagram to cut fabric pps. `frame.IsBundle(raw)` dispatches them to
+`Worker.processBundle` before the ordinary `frame.Decode` path (`Decode` rejects
+V8). A bundle is one `(group, subtree)` flow: it carries its own `GroupIdx`,
+`SubtreeID`, `HashKey`, and per-flow `SeqNum`, and the shard/subtree filter,
+gap-tracking (`nack.Tracker.Observe` with a zero TxID), cross-listener egress
+dedup, and local dedup all run at **bundle granularity** in `deliverBundle`.
+
+### Re-bucketing / ShardBits generation alignment
+
+A bundle's `GroupIdx` names a group at the **bundle's own ShardBits generation**
+(header `ShardBits` field). If that differs from this listener's live generation,
+delivering as-is would filter/route against the wrong groups and over-deliver a
+coarser parent bundle to a finer subscriber. So when `b.ShardBits != 0 &&
+uint(b.ShardBits) != w.engine.ShardBits()`, `processBundle` re-buckets first via
+`shard-common/bundle.Rebucketer` (`Rebucket(sender, b)`): the parent is split and
+each member re-coalesced into its correct **local-generation** group, producing
+child bundles that are then delivered through the normal `deliverBundle` path. The
+re-bucketer is built with `carryTxID=true` so member TxIDs (which may be EF, not
+recomputable as SHA256d) survive the split. Children are re-stamped on a fresh
+flow keyed by the parent `HashKey` for monotonic per-flow SeqNums.
+
+Own-traffic exclusion is skipped for re-bucketed (cross-generation) flows: it keys
+on `HashKey = hash(originalSenderIP, group, subtree)`, which cannot be recomputed
+at the local groups from the opaque parent `HashKey` — a documented re-shard
+boundary limitation, not a per-tx regression on the common (same-generation) path.
+Each re-bucket increments `bsl_bundles_rebucketed_total` (labelled by worker).
+
+### Edge-decoalesce vs consumer-decoalesce (`egress.BundleSink`)
+
+Whether a bundle stays intact end-to-end depends on the egress sink implementing
+the optional `egress.BundleSink` capability (`SendBundle(raw, b)`) on top of
+`egress.EgressSink`:
+
+- **Plain sink (edge-decoalesce, default):** the sink does **not** implement
+  `BundleSink`, so `deliverBundle` splits the bundle with `bundle.Decoalesce(b)`
+  and forwards individual BRC-124 frames, each re-stamped with a fresh monotonic
+  per-flow egress SeqNum (keyed by the bundle `HashKey`) so downstream consumers
+  retain gap detection. The default forwarding contract is unchanged.
+- **Bundle-aware sink (consumer-decoalesce):** the fan-out (`fanout.Sink`)
+  implements `BundleSink`, so the worker hands it the whole bundle. The fan-out
+  then decides **per consumer**: a `BundleCapable` consumer whose own sink is an
+  `egress.BundleSink` receives the whole bundle intact (one datagram, many
+  transactions — the coalescing saving reaches that consumer's last hop); every
+  other consumer gets the bundle decoalesced into re-stamped BRC-124 frames.
+  Decoalescing happens at most once per bundle and is shared across all
+  non-capable consumers. The multicast re-emit path (`mcastEgr`), when present,
+  always receives decoalesced members on its own re-stamp stream.
+
+`egress.DeliverBundle(sink, raw, b)` is the helper a pass-through wrapper uses to
+forward a bundle toward a bundle-aware inner sink while still decoalescing
+correctly if the inner chain turns out not to be bundle-aware.
+
 ## Fragment Reassembly Callbacks
 
 Three callback types are registered on the reassembly buffer (`reassembly.Buffer`):

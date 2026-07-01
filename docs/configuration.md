@@ -121,6 +121,16 @@ Empty means accept all subtrees.
 Comma-separated list of 32-byte hex SubtreeIDs to drop. Applied after include.
 Empty means exclude nothing.
 
+### BRC-142 bundle handling
+
+BRC-142 coalescing bundles (FrameVer `0x08`) are handled automatically — there is
+**no CLI flag**. Bundles are decoalesced/re-bucketed and delivered by the normal
+egress path (see [architecture — BRC-142 Bundle Processing](architecture.md#brc-142-bundle-processing)).
+When a bundle's ShardBits generation differs from this listener's, it is
+re-bucketed to the local generation; the re-bucketed datagram size cap is the
+hardcoded public-internet MTU baseline (`rebucketMaxBytes = 1500` in `listener.go`),
+not configurable.
+
 ---
 
 ## Egress (unicast downstream)
