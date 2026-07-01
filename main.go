@@ -692,8 +692,8 @@ func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, erro
 // excludeOwnSource drops the node's own source address from a roster before
 // it feeds (S,G) joins. Joining the node's own source on the PIM interface
 // installs an iif==oif mroute on a collapsed edge — every originated frame
-// re-enters the MFC until hop-limit death (~60x egress amplification; see
-// 1bsv-ops/environments/lab-spine-ssm-geo/LATENCY-GEO.md). Consequence: the
+// re-enters the MFC until hop-limit death (~60x egress amplification).
+// Consequence: the
 // listener does not receive own-node frames via multicast; a local mirror is
 // required where own-source completeness matters.
 func excludeOwnSource(srcs []netip.Addr, own netip.Addr) []netip.Addr {
