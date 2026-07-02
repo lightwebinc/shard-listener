@@ -51,6 +51,13 @@ import (
 // default (false) preserves the edge-decoalesce contract: the consumer receives
 // individual BRC-124 frames. A capable consumer's Sink must implement
 // [egress.BundleSink]; if it does not, the bundle is decoalesced as a fallback.
+//
+// IngressObs, when non-nil, taps the frames this consumer sent up its own tunnel
+// — the own-traffic the fan-out identifies (by the OwnIngressIP HashKey match)
+// and drops from egress. It is a pure measurement seam: it never changes which
+// frames are delivered. A downstream build supplies it to meter that
+// (non-billable) tunnel-bound ingress volume. It fires only when OwnIngressIP is
+// set (own-traffic exclusion is what surfaces the frames to observe).
 type Consumer struct {
 	ID            string
 	Shards        []uint32
@@ -58,6 +65,20 @@ type Consumer struct {
 	Sink          egress.EgressSink
 	OwnIngressIP  [16]byte
 	BundleCapable bool
+	IngressObs    IngressObserver
+}
+
+// IngressObserver measures a consumer's own tunnel-bound ingress — the frames
+// the fan-out matches as the consumer's own traffic (returning on the fabric)
+// and excludes from egress. A downstream build implements it to report that
+// upstream volume without billing it. ObserveIngress is called on the
+// single-threaded worker hot path, once per own-traffic datagram, so
+// implementations must be cheap and non-blocking.
+type IngressObserver interface {
+	// ObserveIngress records one own-traffic datagram the consumer sent up its
+	// tunnel: wire is the datagram byte length, members is the transaction count
+	// (1 for a BRC-124/128 frame, len(Members) for a BRC-142 bundle).
+	ObserveIngress(wire, members int)
 }
 
 // Sink is an egress.EgressSink that fans each frame out to the matching subset
@@ -140,6 +161,9 @@ func (s *Sink) Send(raw []byte, f *frame.Frame) error {
 			}
 		}
 		if isOwnTraffic(c, groupIdx, f) {
+			if c.IngressObs != nil {
+				c.IngressObs.ObserveIngress(len(raw), 1)
+			}
 			return
 		}
 		if err := c.Sink.Send(raw, f); err != nil && firstErr == nil {
@@ -189,6 +213,9 @@ func (s *Sink) SendBundle(raw []byte, b *bundle.Bundle) error {
 			}
 		}
 		if isOwnBundle(c, groupIdx, b) {
+			if c.IngressObs != nil {
+				c.IngressObs.ObserveIngress(len(raw), len(b.Members))
+			}
 			return
 		}
 		if c.BundleCapable {

@@ -275,6 +275,74 @@ func TestOwnTrafficExclusion(t *testing.T) {
 	}
 }
 
+// countObs records the tunnel-bound ingress the fan-out taps on the own-traffic
+// drop path.
+type countObs struct {
+	calls   int
+	wire    int
+	members int
+}
+
+func (o *countObs) ObserveIngress(wire, members int) {
+	o.calls++
+	o.wire += wire
+	o.members += members
+}
+
+func TestIngressObserverTapsOwnTraffic(t *testing.T) {
+	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
+	s := fanout.New(eng)
+
+	var ownA [16]byte
+	ownA[15] = 0xAA
+	obs := &countObs{}
+	a := &recSink{}
+	s.Apply([]*fanout.Consumer{
+		{ID: "a", Shards: []uint32{0}, Sink: a, OwnIngressIP: ownA, IngressObs: obs},
+	})
+
+	// A frame A sent up its own tunnel: excluded from egress, observed as ingress.
+	sub := subtreeID(0x07)
+	f := txInShard(0, sub)
+	groupIdx := eng.GroupIndex(&f.TxID)
+	f.HashKey = seqhash.Hash(ownA, groupIdx, sub)
+	raw := make([]byte, 200)
+	if err := s.Send(raw, f); err != nil {
+		t.Fatal(err)
+	}
+	if a.tx != 0 {
+		t.Fatalf("own frame must stay excluded from egress, got a.tx=%d", a.tx)
+	}
+	if obs.calls != 1 || obs.wire != 200 || obs.members != 1 {
+		t.Fatalf("tx ingress: calls=%d wire=%d members=%d, want 1/200/1", obs.calls, obs.wire, obs.members)
+	}
+
+	// A bundle A sent up its tunnel: excluded, observed with the member count.
+	braw, b := makeBundle(t, 0, sub, seqhash.Hash(ownA, 0, sub), 5)
+	if err := s.SendBundle(braw, b); err != nil {
+		t.Fatal(err)
+	}
+	if a.tx != 0 {
+		t.Fatalf("own bundle must stay excluded, got a.tx=%d", a.tx)
+	}
+	if obs.calls != 2 || obs.members != 6 { // 1 tx + 5 bundle members
+		t.Fatalf("bundle ingress: calls=%d members=%d, want 2/6", obs.calls, obs.members)
+	}
+
+	// A frame that is not A's own traffic is delivered and NOT observed.
+	f2 := txInShard(0, sub)
+	f2.HashKey = 0xDEADBEEF
+	if err := s.Send(make([]byte, 50), f2); err != nil {
+		t.Fatal(err)
+	}
+	if a.tx != 1 {
+		t.Fatalf("non-own frame must deliver, got a.tx=%d", a.tx)
+	}
+	if obs.calls != 2 {
+		t.Fatalf("non-own frame must not be observed as ingress, calls=%d", obs.calls)
+	}
+}
+
 func TestControlFramesBroadcast(t *testing.T) {
 	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
 	s := fanout.New(eng)
