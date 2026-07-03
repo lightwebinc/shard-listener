@@ -67,6 +67,7 @@ func run() error {
 	logging.InstallSIGHUPToggle(levelVar, logLevel)
 
 	slog.Info("shard-listener starting",
+		"mode", cfg.Mode,
 		"shard_bits", cfg.ShardBits,
 		"num_groups", cfg.NumGroups,
 		"scope", cfg.MCScope,
@@ -133,12 +134,22 @@ func run() error {
 	// Build the shard engine.
 	engine := shard.New(cfg.MCPrefix, cfg.MCGroupID, cfg.ShardBits)
 
-	// Derive the multicast group addresses to join.
-	groups, err := buildGroups(cfg, engine)
-	if err != nil {
-		return fmt.Errorf("build groups: %w", err)
+	// Delivery mode (P3b) is the consumer-facing half: it does NOT join fabric
+	// (S,G) and runs no gap/NACK — a receiver already did that and forwards raw
+	// frames unicast. The receiver-side machinery below (multicast groups, SSM
+	// bootstrap, NACK tracker, beacon/manifest discovery, cross-listener dedup,
+	// block-PoW gate, reassembly) is skipped; only the egress fan-out sink runs.
+	delivery := cfg.Mode == "delivery"
+
+	// Derive the multicast group addresses to join (receiver/collapsed only).
+	var groups []*net.UDPAddr
+	if !delivery {
+		groups, err = buildGroups(cfg, engine)
+		if err != nil {
+			return fmt.Errorf("build groups: %w", err)
+		}
+		slog.Info("multicast groups", "count", len(groups))
 	}
-	slog.Info("multicast groups", "count", len(groups))
 
 	// Build subtree group registry if -subtree-groups is configured.
 	var groupReg *subtreegroup.Registry
@@ -161,22 +172,25 @@ func run() error {
 	// Build the endpoint registry (beacon-discovered + static seeds).
 	reg := discovery.NewRegistry()
 
-	// Build NACK tracker.
-	tracker := nack.New(
-		nack.TrackerConfig{
-			JitterMax:      cfg.NACKJitterMax,
-			BackoffBase:    cfg.NACKBackoffBase,
-			BackoffMax:     cfg.NACKBackoffMax,
-			MaxRetries:     cfg.NACKMaxRetries,
-			GapTTL:         cfg.NACKGapTTL,
-			MaxFlows:       cfg.NACKMaxFlows,
-			MaxForwardJump: uint64(cfg.NACKMaxForwardJump),
-		},
-		cfg.RetryEndpoints,
-		cfg.Iface,
-		rec,
-		reg,
-	)
+	// Build NACK tracker (receiver-side gap recovery; delivery skips it).
+	var tracker *nack.Tracker
+	if !delivery {
+		tracker = nack.New(
+			nack.TrackerConfig{
+				JitterMax:      cfg.NACKJitterMax,
+				BackoffBase:    cfg.NACKBackoffBase,
+				BackoffMax:     cfg.NACKBackoffMax,
+				MaxRetries:     cfg.NACKMaxRetries,
+				GapTTL:         cfg.NACKGapTTL,
+				MaxFlows:       cfg.NACKMaxFlows,
+				MaxForwardJump: uint64(cfg.NACKMaxForwardJump),
+			},
+			cfg.RetryEndpoints,
+			cfg.Iface,
+			rec,
+			reg,
+		)
+	}
 
 	done := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -191,7 +205,7 @@ func run() error {
 	// the configured bootstrap lists.
 	var gs listener.GroupSources
 	var beaconSrcs, manifestSrcs, subAnnSrcs []netip.Addr
-	if cfg.SourceMode == "ssm" {
+	if !delivery && cfg.SourceMode == "ssm" {
 		var err error
 		gs, beaconSrcs, manifestSrcs, subAnnSrcs, err = buildSSMSources(ctx, cfg)
 		if err != nil {
@@ -202,7 +216,9 @@ func run() error {
 		_ = manifestSrcs
 	}
 
-	tracker.Start(ctx)
+	if tracker != nil {
+		tracker.Start(ctx)
+	}
 
 	// Start metrics server.
 	var wg sync.WaitGroup
@@ -212,8 +228,8 @@ func run() error {
 		rec.Serve(cfg.MetricsAddr, done)
 	}()
 
-	// Start subtree announcement listener (BRC-127).
-	if groupReg != nil {
+	// Start subtree announcement listener (BRC-127) — receiver-side discovery.
+	if !delivery && groupReg != nil {
 		var announceGroups []*net.UDPAddr
 		for _, scopeName := range cfg.AnnounceScopes {
 			scopePrefix := config.Scopes[scopeName]
@@ -254,8 +270,8 @@ func run() error {
 	// AddGroup/RemoveGroup against each worker fd.
 	var workers []*listener.Worker
 
-	// Start beacon listener for dynamic endpoint discovery.
-	if cfg.BeaconEnabled {
+	// Start beacon listener for dynamic endpoint discovery (receiver-side).
+	if !delivery && cfg.BeaconEnabled {
 		beaconScopePrefix, ok := config.Scopes[cfg.BeaconScope]
 		if !ok {
 			beaconScopePrefix = 0xFF05
@@ -289,8 +305,8 @@ func run() error {
 		slog.Info("beacon listener started", "group", beaconIP, "port", cfg.BeaconPort)
 	}
 
-	// Start the manifest evaluator/applier when auto-config is enabled.
-	if cfg.AutoConfigEnabled {
+	// Start the manifest evaluator/applier when auto-config is enabled (receiver-side).
+	if !delivery && cfg.AutoConfigEnabled {
 		ev := commanifest.NewEvaluator(commanifest.EvaluatorConfig{
 			Quorum:     cfg.AutoConfigPilotQuorum,
 			Hysteresis: cfg.AutoConfigHysteresis,
@@ -374,7 +390,7 @@ func run() error {
 	//
 	// LocalCap=0 on the egress side disables the feature entirely.
 	var txDedupStore *txdedup.Store
-	if cfg.EgressDedupLocalCap > 0 {
+	if !delivery && cfg.EgressDedupLocalCap > 0 {
 		egBackend, ebErr := cache.Open(context.Background(), cache.Config{
 			Backend:       cfg.EgressDedupBackend,
 			RedisAddr:     cfg.EgressDedupRedisAddr,
@@ -447,10 +463,10 @@ func run() error {
 	// workers, since a block announce and its coinbase can land on different
 	// worker sockets under SO_REUSEPORT.
 	var coinbaseCorr *listener.CoinbaseCorrelator
-	if cfg.RequireBlockPoW && cfg.CoinbaseCorrCap > 0 {
+	if !delivery && cfg.RequireBlockPoW && cfg.CoinbaseCorrCap > 0 {
 		coinbaseCorr = listener.NewCoinbaseCorrelator(cfg.CoinbaseCorrCap, cfg.CoinbaseCorrTTL)
 	}
-	if cfg.RequireBlockPoW {
+	if !delivery && cfg.RequireBlockPoW {
 		slog.Info("block-control gate enabled",
 			"min_pow_bits", fmt.Sprintf("0x%08x", cfg.MinPoWBits),
 			"coinbase_correlation", coinbaseCorr != nil)
@@ -467,7 +483,7 @@ func run() error {
 		defer func() { _ = egr.Close() }()
 
 		var mcastEgr *egress.MCastSender
-		if cfg.MCEgressEnabled {
+		if !delivery && cfg.MCEgressEnabled {
 			mcastEgr, err = egress.NewMCast(
 				cfg.MCEgressPrefix,
 				cfg.MCEgressGroupID,
@@ -485,7 +501,7 @@ func run() error {
 
 		// Unicast header egress.
 		var headerEgr *egress.Sender
-		if cfg.HeaderEgressEnabled {
+		if !delivery && cfg.HeaderEgressEnabled {
 			headerEgr, err = egress.New(cfg.HeaderEgressAddr, cfg.HeaderEgressProto, false)
 			if err != nil {
 				return fmt.Errorf("header egress worker %d: %w", i, err)
@@ -495,7 +511,7 @@ func run() error {
 
 		// Multicast header egress.
 		var headerMCastEgr *egress.MCastSender
-		if cfg.HeaderMCEgressEnabled {
+		if !delivery && cfg.HeaderMCEgressEnabled {
 			headerMCastEgr, err = egress.NewMCast(
 				cfg.HeaderMCEgressPrefix,
 				cfg.HeaderMCEgressGroupID,
@@ -532,59 +548,70 @@ func run() error {
 			}
 		}
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
-		if cfg.RequireBlockPoW {
+		if !delivery && cfg.RequireBlockPoW {
 			w.SetBlockPoW(true, cfg.MinPoWBits, coinbaseCorr)
 		}
-		if senderACL != nil {
+		// Sender ACL is a receiver-side ingress filter on the ORIGINAL source; on
+		// a delivery worker the datagram source is the receiver, so it must not run.
+		if !delivery && senderACL != nil {
 			w.SetSenderACL(senderACL)
 		}
-		if cfg.EgressDedupCap > 0 {
+		if !delivery && cfg.EgressDedupCap > 0 {
 			w.SetEgressDedup(dedup.New(cfg.EgressDedupCap, cfg.EgressDedupTTL))
 		}
 		if txDedupStore != nil {
 			w.SetTxDedup(txDedupStore)
 		}
-		// Wire BRC-130 reassembly buffer. The buffer captures w via closure so
-		// each worker owns its own reassembly state (SO_REUSEPORT routes all
-		// fragments from the same proxy source to the same worker).
-		wLocal := w
-		buf := reassembly.New(
-			reassembly.DefaultMaxSlots,
-			reassembly.DefaultTTL,
-			cfg.VerifyPayloadHash,
-			wLocal.DeliverReassembled,
-		)
-		buf.SetStartedHook(rec.ReassemblyStarted)
-		buf.SetAbandonedHook(rec.ReassemblyAbandoned)
-		buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)
-		buf.SetBlockCallback(wLocal.DeliverReassembledBlock)
-		buf.SetSubtreeDataCallback(wLocal.DeliverReassembledSubtreeData)
-		if cfg.SubtreeDataVerifyMerkle {
-			buf.SetVerifyMerkle(true)
+		// Wire BRC-130 reassembly buffer (receiver-side: a delivery worker only
+		// sees whole, already-reassembled frames the receiver forwards). The
+		// buffer captures w via closure so each worker owns its own reassembly
+		// state (SO_REUSEPORT routes all fragments from the same proxy source to
+		// the same worker).
+		if !delivery {
+			wLocal := w
+			buf := reassembly.New(
+				reassembly.DefaultMaxSlots,
+				reassembly.DefaultTTL,
+				cfg.VerifyPayloadHash,
+				wLocal.DeliverReassembled,
+			)
+			buf.SetStartedHook(rec.ReassemblyStarted)
+			buf.SetAbandonedHook(rec.ReassemblyAbandoned)
+			buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)
+			buf.SetBlockCallback(wLocal.DeliverReassembledBlock)
+			buf.SetSubtreeDataCallback(wLocal.DeliverReassembledSubtreeData)
+			if cfg.SubtreeDataVerifyMerkle {
+				buf.SetVerifyMerkle(true)
+			}
+			w.SetReassemblyBuffer(buf)
+			wg.Add(1)
+			go func(b *reassembly.Buffer) {
+				defer wg.Done()
+				t := time.NewTicker(time.Second)
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+						b.Tick()
+					}
+				}
+			}(buf)
 		}
-		w.SetReassemblyBuffer(buf)
 		workers = append(workers, w)
 		wg.Add(1)
 		go func(worker *listener.Worker) {
 			defer wg.Done()
-			if err := worker.Run(ctx); err != nil {
+			// Delivery: unicast-ingest (no join, no gap/NACK). Else: join fabric (S,G).
+			run := worker.Run
+			if delivery {
+				run = worker.RunUnicastIngest
+			}
+			if err := run(ctx); err != nil {
 				slog.Error("worker exited with error", "err", err)
 			}
 		}(w)
-		wg.Add(1)
-		go func(b *reassembly.Buffer) {
-			defer wg.Done()
-			t := time.NewTicker(time.Second)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					b.Tick()
-				}
-			}
-		}(buf)
 	}
 
 	// Wait for signal.

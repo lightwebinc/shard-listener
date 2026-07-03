@@ -106,6 +106,18 @@ var Scopes = map[string]uint16{
 
 // Config holds all runtime parameters. Fields are read-only after [Load] returns.
 type Config struct {
+	// Mode selects the listener's role in the receiver/delivery split (P3b,
+	// mirrors the proxy -mode). "collapsed" (default) = today's monolith: join
+	// fabric (S,G), demux/gap/NACK, and fan out to consumers in one process.
+	// "receiver" = the multicast-facing half (join + gap/NACK) that forwards raw
+	// frames unicast to delivery hosts; behaviourally identical to collapsed in
+	// this base build (the split is realised by the downstream fan-out sink that
+	// replaces the single-destination egress). "delivery" = the consumer-facing
+	// half: NO multicast join and NO gap/NACK (the receiver owns those); a
+	// unicast-ingest front reads raw frames off the wire and runs only the egress
+	// (fan-out) sink. Delivery is edge-only + tunnel-out.
+	Mode string
+
 	// Network
 	Iface          *net.Interface // Interface for multicast joins and NACK send
 	ListenPort     int
@@ -287,6 +299,8 @@ func Load() (*Config, error) {
 		"IANA group-id (bytes 12–13 of the IPv6 multicast address); default 0x000B (IANA Bitcoin)")
 	flag.StringVar(&c.SourceMode, "source-mode", envStr("SOURCE_MODE", "asm"),
 		"multicast addressing model: asm | ssm")
+	flag.StringVar(&c.Mode, "mode", envStr("LISTENER_MODE", "collapsed"),
+		"role split (P3b): collapsed (default; join+demux+gap/NACK+fan-out) | receiver (mcast half) | delivery (consumer half: unicast-ingest + fan-out, no mcast join, no gap/NACK)")
 	ssmBootstrapBeacon := flag.String("ssm-bootstrap-beacon", envStr("SSM_BOOTSTRAP_BEACON", ""),
 		"CSV of retry-endpoint sources for SSM join of the beacon group")
 	ssmBootstrapManifest := flag.String("ssm-bootstrap-manifest", envStr("SSM_BOOTSTRAP_MANIFEST", ""),
@@ -498,6 +512,18 @@ func Load() (*Config, error) {
 	}
 	c.ShardBits = *bits
 	c.NumGroups = 1 << c.ShardBits
+
+	// Validate the receiver/delivery role split (P3b).
+	switch strings.ToLower(c.Mode) {
+	case "", "collapsed":
+		c.Mode = "collapsed"
+	case "receiver":
+		c.Mode = "receiver"
+	case "delivery":
+		c.Mode = "delivery"
+	default:
+		return nil, fmt.Errorf("invalid -mode %q (collapsed|receiver|delivery)", c.Mode)
+	}
 
 	// Resolve multicast scope + source-mode → upper-16-bit prefix.
 	switch strings.ToLower(c.SourceMode) {

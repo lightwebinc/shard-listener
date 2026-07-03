@@ -145,6 +145,60 @@ func newWorker(t *testing.T, addr string, filt *filter.Filter) *Worker {
 	return New(0, iface, 9999, nil, eng, filt, egr, nil, nil, nil, false)
 }
 
+// TestRunUnicastIngest_DeliveryForwardsToSink exercises delivery mode (P3b): a
+// worker with NO multicast join and none of the receiver-side stages (tracker,
+// dedup, reassembly all nil) reads a raw frame off a UNICAST socket and forwards
+// it through the egress sink — the receiver→delivery handoff, envelope preserved.
+func TestRunUnicastIngest_DeliveryForwardsToSink(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+
+	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
+	egr, err := egress.New(addr, "udp", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egr.Close() })
+	iface := loopbackIface(t)
+	const ingestPort = 39017
+	// Delivery worker: nil tracker/mcastEgr, no dedup/reassembly wired.
+	w := New(0, iface, ingestPort, nil, eng, filter.New(nil, nil, nil, nil), egr, nil, nil, nil, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.RunUnicastIngest(ctx) }()
+
+	raw := buildBRC124Frame(t, [32]byte{9, 9, 9}, []byte("delivered"))
+	// Unconnected socket + WriteTo: a connected socket would surface the ICMP
+	// port-unreachable from the pre-bind window as ECONNREFUSED on the next write.
+	pc, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = pc.Close() }()
+	dst := &net.UDPAddr{IP: net.IPv6loopback, Port: ingestPort}
+
+	// The ingest socket bind races the goroutine start, so resend until the
+	// frame lands (or fail on the outer deadline).
+	deadline := time.After(3 * time.Second)
+	for {
+		_, _ = pc.WriteTo(raw, dst) // ignore transient pre-bind errors; we retry
+		select {
+		case got := <-ch:
+			if len(got) != len(raw) {
+				t.Fatalf("got %d bytes want %d", len(got), len(raw))
+			}
+			cancel()
+			<-errCh
+			return
+		case <-time.After(100 * time.Millisecond):
+		case <-deadline:
+			t.Fatal("timeout waiting for delivered frame")
+		}
+	}
+}
+
 func TestProcessFrame_ForwardsBRC124(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
 	defer cleanup()

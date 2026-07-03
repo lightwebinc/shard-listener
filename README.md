@@ -45,6 +45,7 @@ FF05::<shard>:9001  ──multicast──►  shard-listener  ──UDP/TCP─�
 - **Prometheus + OTLP metrics**, `/healthz`, `/readyz`
 - **Graceful shutdown** with configurable drain window
 - **SSM (RFC 4607) opt-in** — `-source-mode=ssm` branches every join site (data plane, beacon, subtree-announce) between `IPV6_JOIN_GROUP` and `MCAST_JOIN_SOURCE_GROUP` via `shard-common/netjoin`; per-control-group bootstrap source lists resolve DNS names or IPv6 literals through `shard-common/bootstrap.Resolver` (fail-closed startup, last-good retention on refresh failures); ASM is the default. See [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm).
+- **Receiver/delivery role split** — `-mode collapsed|receiver|delivery` (default `collapsed`). `collapsed`/`receiver` join fabric `(S,G)` and run gap/NACK; `delivery` does neither — it reads raw frames off a **unicast** socket (forwarded by a receiver) and runs only the egress fan-out, so decode/demux/gap recovery happen once at the receiver and never per consumer. The wire format between the two is the stamped frame itself (envelope-preserving), so the split needs no new protocol; a downstream build supplies the multi-consumer fan-out sink for delivery.
 
 ## Quick start
 

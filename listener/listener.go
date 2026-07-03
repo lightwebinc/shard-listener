@@ -364,12 +364,36 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.joinMu.Unlock()
 	}
 
+	return w.serve(ctx, fd, "listener worker ready")
+}
+
+// RunUnicastIngest is the delivery-mode receive loop (P3b): it binds the same
+// SO_REUSEPORT UDP socket but does NOT join any multicast group — a delivery
+// worker receives raw frames UNICAST from a receiver that already joined fabric
+// (S,G) and ran gap/NACK/dedup. Each datagram is fed through the normal frame
+// dispatch (processFrame) so the egress fan-out sink, per-consumer filtering,
+// own-traffic exclusion and metering all run unchanged; the receiver-side stages
+// (gap tracker, cross-listener dedup, reassembly) are simply absent (nil) on a
+// delivery worker, so processFrame skips them.
+func (w *Worker) RunUnicastIngest(ctx context.Context) error {
+	fd, err := openRawSocket(w.port)
+	if err != nil {
+		return fmt.Errorf("delivery worker %d: open socket: %w", w.id, err)
+	}
+	return w.serve(ctx, fd, "delivery unicast ingest ready")
+}
+
+// serve runs the receive loop on an already-bound socket (Run also pre-joins the
+// multicast groups first): mark the worker ready, arm SO_RCVTIMEO + the ctx-close
+// fast path, then read each datagram into processFrame. Shared by Run (multicast)
+// and RunUnicastIngest (delivery unicast ingest).
+func (w *Worker) serve(ctx context.Context, fd int, readyMsg string) error {
 	if w.rec != nil {
 		w.rec.WorkerReady()
 		defer w.rec.WorkerDone()
 	}
 
-	w.log.Info("listener worker ready", "iface", w.iface.Name, "port", w.port, "groups", len(w.groups))
+	w.log.Info(readyMsg, "iface", w.iface.Name, "port", w.port, "groups", len(w.groups))
 
 	// SO_RCVTIMEO makes Recvfrom wake up periodically so we can check ctx.
 	// This is the reliable shutdown mechanism: closing the fd from another
