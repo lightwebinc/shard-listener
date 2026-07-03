@@ -84,6 +84,10 @@ type flowState struct {
 	source     net.IP               // multicast source address (for per-source loss attribution)
 	pending    map[uint64]*gapEntry // keyed by missing seqNum
 	lastSeen   time.Time
+	// ewmaIPG is a smoothed inter-arrival estimate (per OBSERVED frame) used to judge
+	// whether a seq jump is plausible for the elapsed silence — the emitter-change
+	// discriminator that works at any traffic rate. 0 until two frames seen.
+	ewmaIPG time.Duration
 }
 
 // gapEntry holds retry state for a single missing frame.
@@ -248,6 +252,7 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 		}
 		t.flows[hashKey] = fs
 	}
+	elapsed := now.Sub(fs.lastSeen)
 	fs.lastSeen = now
 	// Sources are stable per flow. Keep the latest non-empty source so a recovered
 	// frame re-injected by the tracker (which carries no live source) does not
@@ -297,22 +302,43 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 	}
 
 	if seqNum == fs.lastSeqNum+1 {
-		// Step 5: contiguous.
+		// Step 5: contiguous — update the inter-arrival estimate (the emitter-change
+		// discriminator's rate input). EWMA α=1/8, integer-friendly.
+		if elapsed > 0 {
+			if fs.ewmaIPG == 0 {
+				fs.ewmaIPG = elapsed
+			} else {
+				fs.ewmaIPG += (elapsed - fs.ewmaIPG) / 8
+			}
+		}
 		fs.lastSeqNum = seqNum
 		return
 	}
 
-	// Emitter change: a forward jump beyond any plausible burst means a DIFFERENT
-	// proxy now stamps this flow (anycast failover) — the intermediate range was
-	// never emitted here. Re-baseline: drop pending phantoms silently (they are
-	// artifacts of the old emitter's numbering, not losses) and track from here.
+	// Emitter change: a forward jump IMPLAUSIBLE for the elapsed silence means a
+	// DIFFERENT proxy now stamps this flow (anycast failover between long-lived
+	// emitters with divergent in-memory counters) — the intermediate range was never
+	// emitted toward this listener. Re-baseline: drop pending phantoms silently
+	// (artifacts of the old emitter's numbering, not losses) and track from here.
+	// Plausibility is RATE-AWARE (a fixed jump cap cannot separate a real loss
+	// burst from emitter divergence across traffic rates): a real outage of
+	// `elapsed` at the flow's observed rate misses ≈ elapsed/ewmaIPG frames; allow
+	// 4× headroom + a floor for bursty/low-rate flows. MaxForwardJump stays as the
+	// absolute upper bound (and the whole guard when no rate estimate exists yet).
+	missing := seqNum - fs.lastSeqNum - 1
 	maxJump := t.cfg.MaxForwardJump
 	if maxJump == 0 {
 		maxJump = 4096
 	}
-	if seqNum > fs.lastSeqNum+maxJump {
+	implausible := missing > maxJump
+	if !implausible && fs.ewmaIPG > 0 && missing > 64 {
+		expected := uint64(elapsed / fs.ewmaIPG)
+		implausible = missing > 4*(expected+1)
+	}
+	if implausible {
 		fs.pending = make(map[uint64]*gapEntry)
 		fs.lastSeqNum = seqNum
+		fs.ewmaIPG = 0 // new emitter, new cadence — re-learn
 		if t.rec != nil {
 			t.rec.SeqRebaselined(fs.flowType, srcStr(fs.source))
 		}

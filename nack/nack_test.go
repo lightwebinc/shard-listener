@@ -651,3 +651,36 @@ func TestObserveWithinMaxJump_StillGaps(t *testing.T) {
 		t.Fatalf("PendingGaps = %d, want 498", g)
 	}
 }
+
+// TestObserveRateAwareRebaseline: with a learned arrival rate, a jump far beyond
+// rate×silence re-baselines (emitter divergence UNDER the absolute cap — the case a
+// fixed threshold cannot catch), while an outage-sized jump still registers as gaps.
+func TestObserveRateAwareRebaseline(t *testing.T) {
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second, MaxForwardJump: 100000}, nil, nil, nil, nil)
+	// Learn a ~1ms cadence (contiguous frames).
+	for i := uint64(1); i <= 20; i++ {
+		tr.Observe(0, [32]byte{}, flowA, i, [32]byte{}, nil)
+		time.Sleep(time.Millisecond)
+	}
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("setup: PendingGaps = %d, want 0", g)
+	}
+	// ~50ms silence at ~1ms cadence ⇒ a real outage misses ~50 frames; a jump of
+	// 2000 is ~40× the plausible burst ⇒ emitter change, re-baseline.
+	time.Sleep(50 * time.Millisecond)
+	tr.Observe(0, [32]byte{}, flowA, 2020, [32]byte{}, nil)
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("implausible jump must re-baseline: PendingGaps = %d, want 0", g)
+	}
+	// Continue contiguously from the new baseline, then a plausible outage-sized
+	// gap (~50 missing after ~50ms) still registers for recovery.
+	for i := uint64(2021); i <= 2040; i++ {
+		tr.Observe(0, [32]byte{}, flowA, i, [32]byte{}, nil)
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	tr.Observe(0, [32]byte{}, flowA, 2141, [32]byte{}, nil) // 100 missing ≤ 4×(~50+1)
+	if g := tr.PendingGaps(); g != 100 {
+		t.Fatalf("plausible outage gap must register: PendingGaps = %d, want 100", g)
+	}
+}
