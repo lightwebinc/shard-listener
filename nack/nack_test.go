@@ -611,3 +611,43 @@ func TestSendNACK_UnicastACK_NoData_NotCancelled(t *testing.T) {
 		t.Errorf("ACK-without-data falsely cleared the gap: PendingGaps = %d, want 1 (still retrying)", got)
 	}
 }
+
+// TestObserveEmitterChange_Rebaselines: a forward jump beyond MaxForwardJump is an
+// EMITTER CHANGE (anycast failover between long-lived proxies with divergent flow
+// counters), not loss — the flow re-baselines: no phantom gap range is registered
+// (which would NACK-storm and pollute unrecovered counters), pending phantoms drop.
+func TestObserveEmitterChange_Rebaselines(t *testing.T) {
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second, MaxForwardJump: 1000}, nil, nil, nil, nil)
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 5, [32]byte{}, nil) // real gap: 3,4
+	if g := tr.PendingGaps(); g != 2 {
+		t.Fatalf("setup: PendingGaps = %d, want 2", g)
+	}
+	// New emitter takes the flow at seq 50000 — beyond any plausible burst.
+	tr.Observe(0, [32]byte{}, flowA, 50000, [32]byte{}, nil)
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("emitter change must drop phantom pendings: PendingGaps = %d, want 0", g)
+	}
+	// Tracking continues from the new baseline: next contiguous frame = no gap,
+	// a small real gap after it is still detected.
+	tr.Observe(0, [32]byte{}, flowA, 50001, [32]byte{}, nil)
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("contiguous after re-baseline: PendingGaps = %d, want 0", g)
+	}
+	tr.Observe(0, [32]byte{}, flowA, 50003, [32]byte{}, nil)
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("real gap after re-baseline: PendingGaps = %d, want 1", g)
+	}
+}
+
+// TestObserveWithinMaxJump_StillGaps: jumps INSIDE the plausible-burst bound remain
+// ordinary gaps (recovery still works for genuine loss bursts).
+func TestObserveWithinMaxJump_StillGaps(t *testing.T) {
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second, MaxForwardJump: 1000}, nil, nil, nil, nil)
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 500, [32]byte{}, nil) // 498 missing, within bound
+	if g := tr.PendingGaps(); g != 498 {
+		t.Fatalf("PendingGaps = %d, want 498", g)
+	}
+}

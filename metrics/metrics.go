@@ -91,6 +91,7 @@ type Recorder struct {
 	gapsDetected     metric.Int64Counter
 	gapsSuppressed   metric.Int64Counter // cancelled by retransmit fill or ACK response
 	flowsRefused     metric.Int64Counter // new flows skipped at the MaxFlows flood-guard cap
+	seqRebaselines   metric.Int64Counter // flows re-baselined on an implausible SeqNum jump (emitter change)
 	nacksDispatched  metric.Int64Counter
 	nacksThrottled   metric.Int64Counter // held after a THROTTLED congestion signal
 	nacksUnrecovered metric.Int64Counter // retries exhausted or TTL exceeded
@@ -319,6 +320,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.flowsRefused, err = meter.Int64Counter("bsl_nack_flows_refused_total",
 		metric.WithDescription("New per-source flows skipped at the MaxFlows flood-guard cap")); err != nil {
+		return nil, err
+	}
+	if r.seqRebaselines, err = meter.Int64Counter("bsl_seq_rebaselines_total",
+		metric.WithDescription("Flows re-baselined on an implausible SeqNum jump (emitter change, e.g. anycast failover)")); err != nil {
 		return nil, err
 	}
 	if r.nacksDispatched, err = meter.Int64Counter("bsl_nacks_dispatched_total",
@@ -570,6 +575,15 @@ func (r *Recorder) HeaderEgressError(workerID int) {
 // delivery health); "" when unknown. Source cardinality is the spine/source count.
 func (r *Recorder) GapDetected(flow, source string) {
 	r.gapsDetected.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
+}
+
+// SeqRebaselined counts a flow re-baselined on an implausible forward SeqNum jump —
+// an emitter change (e.g. anycast spine failover between long-lived proxies whose
+// in-memory flow counters diverged), NOT data loss: the intermediate range was never
+// emitted toward this listener, so it must not be registered (or NACKed) as gaps.
+func (r *Recorder) SeqRebaselined(flow, source string) {
+	r.seqRebaselines.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 

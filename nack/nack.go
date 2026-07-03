@@ -27,6 +27,12 @@ type TrackerConfig struct {
 	// At the cap, a NEW source is not gap-tracked (its frames still forward — only NACK
 	// recovery is skipped for it) until a slot frees via age-out. 0 = unbounded (legacy).
 	MaxFlows int
+	// MaxForwardJump bounds a plausible in-flow burst: a forward SeqNum jump LARGER
+	// than this on an established flow is an EMITTER CHANGE (e.g. anycast spine
+	// failover between long-lived proxies with divergent in-memory counters), not
+	// loss — the flow re-baselines instead of registering (and NACK-storming) a
+	// phantom gap range. 0 = default 4096.
+	MaxForwardJump uint64
 }
 
 // groupBlockBroadcast is the reserved group index for BRC-131 block control frames.
@@ -293,6 +299,23 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 	if seqNum == fs.lastSeqNum+1 {
 		// Step 5: contiguous.
 		fs.lastSeqNum = seqNum
+		return
+	}
+
+	// Emitter change: a forward jump beyond any plausible burst means a DIFFERENT
+	// proxy now stamps this flow (anycast failover) — the intermediate range was
+	// never emitted here. Re-baseline: drop pending phantoms silently (they are
+	// artifacts of the old emitter's numbering, not losses) and track from here.
+	maxJump := t.cfg.MaxForwardJump
+	if maxJump == 0 {
+		maxJump = 4096
+	}
+	if seqNum > fs.lastSeqNum+maxJump {
+		fs.pending = make(map[uint64]*gapEntry)
+		fs.lastSeqNum = seqNum
+		if t.rec != nil {
+			t.rec.SeqRebaselined(fs.flowType, srcStr(fs.source))
+		}
 		return
 	}
 

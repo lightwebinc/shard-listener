@@ -148,12 +148,13 @@ type Config struct {
 	SSMBootstrapRefresh    time.Duration
 
 	// NACK
-	NACKJitterMax   time.Duration
-	NACKBackoffBase time.Duration
-	NACKBackoffMax  time.Duration
-	NACKMaxRetries  int
-	NACKGapTTL      time.Duration
-	NACKMaxFlows    int
+	NACKJitterMax      time.Duration
+	NACKBackoffBase    time.Duration
+	NACKBackoffMax     time.Duration
+	NACKMaxRetries     int
+	NACKGapTTL         time.Duration
+	NACKMaxFlows       int
+	NACKMaxForwardJump int
 
 	// Multicast egress (domain bridging)
 	MCEgressEnabled  bool
@@ -355,6 +356,8 @@ func Load() (*Config, error) {
 		"max time to hold a gap entry before evicting (~Bitcoin block interval)")
 	flag.IntVar(&c.NACKMaxFlows, "nack-max-flows", envInt("NACK_MAX_FLOWS", 100000),
 		"cap on tracked per-source flows (flood guard; new sources past the cap still forward but skip NACK recovery until idle flows age out); 0 = unbounded")
+	flag.IntVar(&c.NACKMaxForwardJump, "nack-max-forward-jump", envInt("NACK_MAX_FORWARD_JUMP", 4096),
+		"forward SeqNum jump beyond which a flow re-baselines (emitter change, e.g. anycast failover) instead of registering a phantom gap range; 0 = default 4096")
 	flag.BoolVar(&c.BeaconEnabled, "beacon-enabled", envBool("BEACON_ENABLED", true),
 		"enable ADVERT beacon listener for dynamic endpoint discovery")
 	flag.IntVar(&c.BeaconPort, "beacon-port", envInt("BEACON_PORT", 9300),
