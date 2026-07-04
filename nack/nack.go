@@ -88,7 +88,17 @@ type flowState struct {
 	// whether a seq jump is plausible for the elapsed silence — the emitter-change
 	// discriminator that works at any traffic rate. 0 until two frames seen.
 	ewmaIPG time.Duration
+	// contiguous counts consecutive in-order frames — how settled ewmaIPG is. A
+	// re-baseline only NACK-recovers its transition tail once the rate estimate is
+	// trustworthy (contiguous >= minContiguousForRecover); reset on any gap/re-baseline.
+	contiguous uint64
 }
+
+// minContiguousForRecover is how many consecutive in-order frames must have settled the
+// inter-arrival estimate before a re-baseline trusts it enough to NACK-recover the
+// transition tail. Below it, the estimate is too noisy to tell a real loss from emitter
+// divergence, so the re-baseline drops silently (the pre-existing behavior).
+const minContiguousForRecover = 16
 
 // gapEntry holds retry state for a single missing frame.
 //
@@ -312,6 +322,7 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 			}
 		}
 		fs.lastSeqNum = seqNum
+		fs.contiguous++
 		return
 	}
 
@@ -337,8 +348,40 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 	}
 	if implausible {
 		fs.pending = make(map[uint64]*gapEntry)
+		// Anycast-failover recovery: the jump itself is the two emitters' divergent
+		// counters, but a REAL transition outage of `elapsed` still lost ≈ elapsed/ewmaIPG
+		// frames — and the NEW emitter stamped those just before `seqNum` (they were
+		// RPF-dropped in the ~sub-second reconvergence) and holds them in ITS retry cache.
+		// NACK that rate-plausible TAIL (bounded, so no storm) so the existing retry path
+		// recovers the transition instead of it vanishing silently inside the phantom
+		// range. Re-baseline the divergent remainder as before.
+		if fs.ewmaIPG > 0 && fs.contiguous >= minContiguousForRecover {
+			tail := uint64(elapsed / fs.ewmaIPG)
+			if tail > missing {
+				tail = missing
+			}
+			if tail > maxJump {
+				tail = maxJump // safety cap; the rate estimate already bounds it
+			}
+			for m := seqNum - tail; m < seqNum; m++ {
+				jitter := time.Duration(rand.Int64N(int64(t.cfg.JitterMax) + 1))
+				fs.pending[m] = &gapEntry{
+					hashKey:     hashKey,
+					seqNum:      m,
+					groupIdx:    groupIdx,
+					subtreeID:   subtreeID,
+					source:      source,
+					nextAttempt: now.Add(jitter),
+					deadline:    now.Add(t.cfg.GapTTL),
+				}
+				if t.rec != nil {
+					t.rec.GapDetected(fs.flowType, srcStr(source))
+				}
+			}
+		}
 		fs.lastSeqNum = seqNum
-		fs.ewmaIPG = 0 // new emitter, new cadence — re-learn
+		fs.ewmaIPG = 0    // new emitter, new cadence — re-learn
+		fs.contiguous = 0 // rate estimate is stale across the emitter change
 		if t.rec != nil {
 			t.rec.SeqRebaselined(fs.flowType, srcStr(fs.source))
 		}
@@ -365,6 +408,7 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 		}
 	}
 	fs.lastSeqNum = seqNum
+	fs.contiguous = 0 // a real gap breaks the contiguous run
 }
 
 // Fill cancels a pending gap when a retransmitted frame arrives out-of-band

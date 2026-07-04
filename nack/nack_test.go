@@ -666,21 +666,60 @@ func TestObserveRateAwareRebaseline(t *testing.T) {
 		t.Fatalf("setup: PendingGaps = %d, want 0", g)
 	}
 	// ~50ms silence at ~1ms cadence ⇒ a real outage misses ~50 frames; a jump of
-	// 2000 is ~40× the plausible burst ⇒ emitter change, re-baseline.
+	// 2000 is ~40× the plausible burst ⇒ emitter change. Re-baseline the DIVERGENT
+	// remainder, but NACK the rate-plausible tail (~50 real losses the new emitter
+	// dropped in the transition, recoverable from its retry) — not silent, not the
+	// whole 2000-wide phantom range.
 	time.Sleep(50 * time.Millisecond)
 	tr.Observe(0, [32]byte{}, flowA, 2020, [32]byte{}, nil)
-	if g := tr.PendingGaps(); g != 0 {
-		t.Fatalf("implausible jump must re-baseline: PendingGaps = %d, want 0", g)
+	tail := tr.PendingGaps()
+	if tail == 0 || tail >= 2000 {
+		t.Fatalf("re-baseline must NACK the bounded rate-plausible tail (non-zero, not the phantom range): PendingGaps = %d", tail)
 	}
-	// Continue contiguously from the new baseline, then a plausible outage-sized
-	// gap (~50 missing after ~50ms) still registers for recovery.
+	// Continue contiguously from the new baseline, then a plausible outage-sized gap
+	// (100 missing) registers ON TOP of the recovered tail.
 	for i := uint64(2021); i <= 2040; i++ {
 		tr.Observe(0, [32]byte{}, flowA, i, [32]byte{}, nil)
 		time.Sleep(time.Millisecond)
 	}
 	time.Sleep(50 * time.Millisecond)
 	tr.Observe(0, [32]byte{}, flowA, 2141, [32]byte{}, nil) // 100 missing ≤ 4×(~50+1)
-	if g := tr.PendingGaps(); g != 100 {
-		t.Fatalf("plausible outage gap must register: PendingGaps = %d, want 100", g)
+	if g := tr.PendingGaps(); g != tail+100 {
+		t.Fatalf("plausible outage gap must add 100: PendingGaps = %d, want %d", g, tail+100)
+	}
+}
+
+// TestRebaselineRecoversTransition: on an anycast failover (implausible forward jump)
+// the flow re-baselines to the new emitter's counter, but the rate-plausible TAIL — the
+// frames the new emitter lost in the ~sub-second transition — is NACKed for recovery
+// (not silently dropped inside the phantom range). Bounded, so no NACK storm.
+func TestRebaselineRecoversTransition(t *testing.T) {
+	tr := newTestTracker()
+	// Establish a ~2ms inter-arrival rate estimate over contiguous frames.
+	var seq uint64
+	for i := 0; i < 60; i++ {
+		seq++
+		tr.Observe(0, [32]byte{}, flowA, seq, [32]byte{}, nil)
+		time.Sleep(2 * time.Millisecond)
+	}
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("contiguous stream should have no gaps, got %d", g)
+	}
+	// A ~40ms "transition outage", then a huge forward jump (the new emitter's divergent
+	// counter) — implausible ⇒ re-baseline path.
+	time.Sleep(40 * time.Millisecond)
+	tr.Observe(0, [32]byte{}, flowA, seq+100000, [32]byte{}, nil)
+
+	g := tr.PendingGaps()
+	if g == 0 {
+		t.Fatal("re-baseline silently dropped the transition — want the rate-plausible tail NACKed")
+	}
+	if g >= 100000 {
+		t.Fatalf("re-baseline NACKed the whole phantom range (%d) — want only the bounded rate-plausible tail", g)
+	}
+	// The tail should be ~ outage/IPG (≈20 at 40ms/2ms); assert generously to avoid
+	// scheduler-timing flakiness while still proving it is small + bounded.
+	if g > 1000 {
+		t.Fatalf("recovery tail = %d, want a small bounded count (~outage/IPG)", g)
 	}
 }
