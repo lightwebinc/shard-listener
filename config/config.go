@@ -110,18 +110,22 @@ type Config struct {
 	// mirrors the proxy -mode). "collapsed" (default) = today's monolith: join
 	// fabric (S,G), demux/gap/NACK, and fan out to consumers in one process.
 	// "receiver" = the multicast-facing half (join + gap/NACK) that forwards raw
-	// frames unicast to delivery hosts; behaviourally identical to collapsed in
-	// this base build (the split is realised by the downstream fan-out sink that
-	// replaces the single-destination egress). "delivery" = the consumer-facing
+	// frames (envelope-preserving) to the delivery tier: with -delivery-addrs it
+	// fans every demuxed frame out to that host:port set (egress.MultiSender);
+	// with none it degenerates to collapsed's single -egress-addr. "delivery" = the consumer-facing
 	// half: NO multicast join and NO gap/NACK (the receiver owns those); a
 	// unicast-ingest front reads raw frames off the wire and runs only the egress
 	// (fan-out) sink. Delivery is edge-only + tunnel-out.
 	Mode string
 
 	// Network
-	Iface          *net.Interface // Interface for multicast joins and NACK send
-	ListenPort     int
-	EgressAddr     string
+	Iface      *net.Interface // Interface for multicast joins and NACK send
+	ListenPort int
+	EgressAddr string
+	// DeliveryAddrs is the receiver→delivery fan-out target set (`-mode receiver`):
+	// each demuxed frame is forwarded (envelope-preserving) to every host:port here.
+	// Empty in receiver mode falls back to the single EgressAddr (== collapsed egress).
+	DeliveryAddrs  []string
 	EgressProto    string // "udp" or "tcp"
 	StripHeader    bool
 	RetryEndpoints []string // host:port list for NACK dispatch
@@ -321,6 +325,8 @@ func Load() (*Config, error) {
 		"comma-separated hex subtree IDs to drop (BRC-124/BRC-128 only; empty = none)")
 	flag.StringVar(&c.EgressAddr, "egress-addr", envStr("EGRESS_ADDR", "127.0.0.1:9100"),
 		"downstream unicast host:port")
+	deliveryAddrsFlag := flag.String("delivery-addrs", envStr("DELIVERY_ADDRS", ""),
+		"receiver mode (-mode receiver): comma-separated delivery host:port set to fan every demuxed frame out to (envelope-preserving); empty falls back to -egress-addr")
 	flag.StringVar(&c.EgressProto, "egress-proto", envStr("EGRESS_PROTO", "udp"),
 		"egress protocol: udp | tcp")
 	flag.BoolVar(&c.StripHeader, "strip-header", envBool("STRIP_HEADER", true),
@@ -553,6 +559,7 @@ func Load() (*Config, error) {
 	c.SSMBootstrapManifest = splitCSV(*ssmBootstrapManifest)
 	c.SSMBootstrapSubtreeAnn = splitCSV(*ssmBootstrapSubtreeAnn)
 	c.SSMPublishersStatic = splitCSV(*ssmPublishersStatic)
+	c.DeliveryAddrs = splitCSV(*deliveryAddrsFlag)
 	if c.SSMBootstrapRefresh <= 0 {
 		return nil, fmt.Errorf("ssm-bootstrap-refresh must be > 0")
 	}

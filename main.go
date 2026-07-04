@@ -140,6 +140,10 @@ func run() error {
 	// bootstrap, NACK tracker, beacon/manifest discovery, cross-listener dedup,
 	// block-PoW gate, reassembly) is skipped; only the egress fan-out sink runs.
 	delivery := cfg.Mode == "delivery"
+	if cfg.Mode == "receiver" && len(cfg.DeliveryAddrs) > 0 {
+		slog.Info("receiver mode: multi-destination fan-out to delivery tier",
+			"delivery_addrs", cfg.DeliveryAddrs, "proto", cfg.EgressProto)
+	}
 
 	// Derive the multicast group addresses to join (receiver/collapsed only).
 	var groups []*net.UDPAddr
@@ -476,7 +480,16 @@ func run() error {
 	// runtime AddGroup/RemoveGroup against every worker fd.
 	workers = make([]*listener.Worker, 0, cfg.NumWorkers)
 	for i := range cfg.NumWorkers {
-		egr, err := egress.New(cfg.EgressAddr, cfg.EgressProto, cfg.StripHeader)
+		// Receiver mode with a delivery set fans every demuxed frame out to each
+		// delivery host (envelope-preserving); otherwise a single downstream egress
+		// (collapsed's behaviour, and receiver's degenerate single-destination case).
+		var egr egress.EgressSink
+		var err error
+		if cfg.Mode == "receiver" && len(cfg.DeliveryAddrs) > 0 {
+			egr, err = egress.NewMulti(cfg.DeliveryAddrs, cfg.EgressProto)
+		} else {
+			egr, err = egress.New(cfg.EgressAddr, cfg.EgressProto, cfg.StripHeader)
+		}
 		if err != nil {
 			return fmt.Errorf("egress worker %d: %w", i, err)
 		}
