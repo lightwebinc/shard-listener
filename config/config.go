@@ -15,6 +15,7 @@
 //	-subtree-include      SUBTREE_INCLUDE                       Hex subtree IDs to allow (empty=all)
 //	-subtree-exclude      SUBTREE_EXCLUDE                       Hex subtree IDs to drop (empty=none)
 //	-egress-addr          EGRESS_ADDR          127.0.0.1:9100   Downstream unicast host:port
+//	-delivery-addrs       DELIVERY_ADDRS                        receiver mode: comma-separated delivery host:port fan-out set (empty=use -egress-addr)
 //	-egress-proto         EGRESS_PROTO         udp              udp | tcp
 //	-strip-header         STRIP_HEADER         true             Send payload-only (drop frame header)
 //	-mc-egress-enabled    MC_EGRESS_ENABLED    false            Enable multicast egress
