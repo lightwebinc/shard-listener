@@ -11,8 +11,8 @@
 //
 // This package is the generic, addressing-agnostic capability: it carries no
 // customer identity, pricing, or placement logic. A downstream build supplies
-// the consumer table (typically from a broker push) and the per-consumer
-// egress sinks; the differentiated subscription model lives there.
+// the consumer table (typically pushed from an external control plane) and the
+// per-consumer egress sinks; the differentiated subscription model lives there.
 package fanout
 
 import (
@@ -70,8 +70,8 @@ type Consumer struct {
 
 // IngressObserver measures a consumer's own tunnel-bound ingress — the frames
 // the fan-out matches as the consumer's own traffic (returning on the fabric)
-// and excludes from egress. A downstream build implements it to report that
-// upstream volume without billing it. ObserveIngress is called on the
+// and excludes from egress. A downstream build implements it to feed that
+// upstream volume into its own metering. ObserveIngress is called on the
 // single-threaded worker hot path, once per own-traffic datagram, so
 // implementations must be cheap and non-blocking.
 type IngressObserver interface {
@@ -120,7 +120,7 @@ func New(engine *shard.Engine) *Sink {
 }
 
 // Apply atomically replaces the consumer table and rebuilds the reverse index.
-// It is the open end of the broker push-contract: a downstream build calls it
+// It is the open end of the external control-plane push contract: a downstream build calls it
 // whenever consumers arrive or leave. Safe to call concurrently with Send.
 func (s *Sink) Apply(consumers []*Consumer) {
 	byShard := make(map[uint32][]*Consumer)

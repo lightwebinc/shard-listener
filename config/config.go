@@ -8,9 +8,11 @@
 //	Flag                  Env var              Default          Description
 //	-iface                MULTICAST_IF         eth0             NIC for multicast joins and NACK send
 //	-listen-port          LISTEN_PORT          9001             UDP port for incoming multicast frames
+//	-mode                 LISTENER_MODE        collapsed        Role split (P3b): collapsed | receiver | delivery
 //	-shard-bits           SHARD_BITS           2                Must match proxy (1–15)
 //	-scope                MC_SCOPE             site             Multicast scope
 //	-mc-group-id          MC_GROUP_ID          0x000B           IANA group-id (default Bitcoin = 0x000B)
+//	-local-source         LOCAL_SOURCE                          Co-located proxy BIND_SOURCE excluded from (S,G) joins
 //	-shard-include        SHARD_INCLUDE                         Comma-separated shard indices/ranges (empty=all)
 //	-subtree-include      SUBTREE_INCLUDE                       Hex subtree IDs to allow (empty=all)
 //	-subtree-exclude      SUBTREE_EXCLUDE                       Hex subtree IDs to drop (empty=none)
@@ -39,6 +41,8 @@
 //	-nack-backoff-max     NACK_BACKOFF_MAX      5s               Cap on exponential backoff per gap
 //	-nack-max-retries     NACK_MAX_RETRIES      5                Max failed recovery rounds per gap
 //	-nack-gap-ttl         NACK_GAP_TTL         10m              Max gap state lifetime
+//	-nack-max-flows       NACK_MAX_FLOWS       100000           Cap on tracked per-source flows (0 = unbounded)
+//	-nack-max-forward-jump NACK_MAX_FORWARD_JUMP 4096           Forward SeqNum jump beyond which a flow re-baselines
 //	-beacon-enabled       BEACON_ENABLED       true             Enable ADVERT beacon listener
 //	-beacon-port          BEACON_PORT          9300             UDP port for beacon reception
 //	-beacon-scope         BEACON_SCOPE         site             Multicast scope for beacon groups
@@ -346,7 +350,7 @@ func Load() (*Config, error) {
 	flag.IntVar(&c.MCEgressHopLimit, "mc-egress-hoplimit", envInt("MC_EGRESS_HOPLIMIT", 1),
 		"IPv6 multicast hop limit for egress datagrams (IPV6_MULTICAST_HOPS)")
 	flag.BoolVar(&c.HeaderEgressEnabled, "header-egress-enabled", envBool("HEADER_EGRESS_ENABLED", false),
-		"enable unicast block header retransmission (stripped BRC-131, 172 bytes per block)")
+		"enable unicast block header retransmission (BRC-135, 172 bytes per block)")
 	flag.StringVar(&c.HeaderEgressAddr, "header-egress-addr", envStr("HEADER_EGRESS_ADDR", "127.0.0.1:9101"),
 		"downstream unicast host:port for block header stream")
 	flag.StringVar(&c.HeaderEgressProto, "header-egress-proto", envStr("HEADER_EGRESS_PROTO", "udp"),

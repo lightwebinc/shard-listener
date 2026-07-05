@@ -9,7 +9,9 @@
 //	     0     4  Magic (0xE3E1F3E8) — BSV mainnet magic
 //	     4     2  ProtoVer (0x02BF)
 //	     6     1  MsgType = 0x10 (NACK)
-//	     7     1  Flags (reserved, must be 0x00)
+//	     7     1  Flags — bit 0 (0x01) = Proxied (set by a proxying retry
+//	               endpoint when forwarding upstream); bits 1–7 reserved (0).
+//	               The listener always sends 0x00.
 //	     8     8  HashKey (uint64 BE) — stable per-flow identifier (XXH64 of sender+group+subtree)
 //	    16     8  StartSeq (uint64 BE) — first missing sequence number (inclusive)
 //	    24     8  EndSeq (uint64 BE) — last missing sequence number (inclusive; == StartSeq for single-frame)
@@ -92,7 +94,7 @@ func Encode(n *NACK, buf []byte) {
 	binary.BigEndian.PutUint32(buf[0:4], nackMagic)
 	binary.BigEndian.PutUint16(buf[4:6], nackProtoVer)
 	buf[6] = n.MsgType
-	buf[7] = 0x00 // Flags (reserved)
+	buf[7] = 0x00 // Flags (bit0=Proxied is set only by proxying retry endpoints)
 	binary.BigEndian.PutUint64(buf[8:16], n.HashKey)
 	binary.BigEndian.PutUint64(buf[16:24], n.StartSeq)
 	binary.BigEndian.PutUint64(buf[24:32], n.EndSeq)

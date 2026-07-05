@@ -10,7 +10,7 @@ matching frames to a configurable unicast downstream over UDP or TCP and/or re-e
 via multicast egress (domain bridging), and performs NORM-inspired NACK-based gap recovery.
 
 BRC-specific wire formats live
-in [bsv-multicast/docs/](../../../bsv-multicast/docs/).
+in [bsv-multicast/docs/](https://github.com/lightwebinc/bsv-multicast/tree/main/docs).
 
 ```
 BSV senders
@@ -96,23 +96,13 @@ allowing multiple worker sockets to be tested in isolation.
 
 ## BRC-124/BRC-128 frame format (92 bytes)
 
-All multi-byte integers are big-endian. Layout is defined in
-`shard-common/frame/frame.go`.
-
-```text
-Offset  Size  Align  Field          Value / notes
-------  ----  -----  -----          -------------
-     0     4   —     Network magic  0xE3E1F3E8
-     4     2   —     Protocol ver   0x02BF
-     6     1   —     Frame version  0x02 (BRC-124/BRC-128)
-     7     1   —     Reserved       0x00
-     8    32   8B    TxID           raw 256-bit txid (internal byte order)
-    40     8   8B    HashKey        stable per-flow XXH64 identifier; 0 = unset
-    48     8   8B    SeqNum         monotonic per-flow counter; 0 = unset
-    56    32   8B    SubtreeID      32-byte batch identifier; zeros = unset
-    88     4   —     PayloadLen     uint32 BE
-    92     *   —     Payload        raw serialised BSV transaction (BRC-12 or BRC-30 EF for BRC-128)
-```
+The canonical 92-byte header layout is specified in
+[BRC-124](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-124-frame-format.md)
+(and [BRC-128](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-128-ef-frame-format.md)
+for Extended Format payloads) and implemented in `shard-common/frame/frame.go`.
+The listener consumes four header fields: `TxID` (shard derivation +
+optional payload-hash verification), `HashKey` and `SeqNum` (gap tracking),
+and `SubtreeID` (subtree filtering).
 
 `HashKey` is a stable per-flow identifier computed by the proxy as
 `XXH64(senderIPv6 ∥ groupIdx ∥ subtreeID)`. It is constant for all frames
@@ -140,6 +130,23 @@ a gap in one flow does not affect another flow's tail.
 - Out-of-order or retransmitted frames (`seqNum <= lastSeqNum`) are silently
   accepted; they never create new gap entries and never regress `lastSeqNum`.
 - `lastSeqNum` only advances forward.
+
+**Re-baseline on emitter change** (v1.7.0/v1.7.1): a forward jump that is
+implausible for the elapsed silence means a *different* emitter now stamps the
+flow (e.g. anycast failover between long-lived proxies whose in-memory counters
+diverged) — the intermediate range was never emitted toward this listener.
+Implausibility is judged two ways: the jump exceeds `-nack-max-forward-jump`
+(default 4096, the absolute bound), or it exceeds 4× the frames expected for
+the elapsed time at the flow's observed rate (a smoothed inter-arrival EWMA,
+`ewmaIPG`, α=1/8; only applied to jumps > 64 frames). On re-baseline the
+pending phantom gaps are dropped silently (never NACKed),
+`bsl_seq_rebaselines_total` is incremented, and tracking restarts at the new
+`SeqNum`. Since v1.7.1, if the rate estimate is settled (≥ 16 contiguous
+in-order frames), the rate-plausible *transition tail* (≈ elapsed/`ewmaIPG`
+frames just before the new `SeqNum`, bounded) is still NACK-recovered — the new
+emitter stamped those frames during reconvergence and holds them in its retry
+cache, so a real sub-second outage is repaired instead of vanishing inside the
+phantom range.
 
 **Gap fill** (`nack.Tracker.Fill(hashKey, seqNum)`):
 - Called when a retransmit arrives via a NACK ACK response. Deletes the
@@ -239,18 +246,15 @@ for BRC-12 frames because `SeqNum` is zero.
 
 ## Control Group Address Table
 
-| Constant | Index | Canonical Address (group-id `0x000B`) | Purpose |
-|---|---|---|---|
-| `GroupBlockHeader` | 0xFFFA | egress-scope `FF0X::<egress-gid>:FFFA` | Block header egress channel (BRC-135) |
-| `GroupSubtreeDataAnnounce` | 0xFFFB | FF05::B:FFFB (data-plane scope) | BRC-132 subtree data frames |
-| `GroupSubtreeGroupAnnounce` | 0xFFFC | FF05::B:FFFC (data-plane scope) | BRC-127 subtree group announcements |
-| `GroupBeacon` | 0xFFFD | FF05::B:FFFD (site) / FF0E::B:FFFD (global) | ADVERT beacon (BRC-126 discovery) |
-| `GroupBlockBroadcast` | 0xFFFE | **FF0E::B:FFFE (always global)** | BRC-131 block control + BRC-134 anchor frames |
-| _(virtual)_ | 0xFFF9 | — | BRC-134 anchor flow identity for gap tracking |
+Control-group indices, canonical addresses, and the virtual flow indices
+(0xFFF8/0xFFF9) are specified in
+[BRC-129](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-129-multicast-addressing.md).
 
-The listener always joins `GroupBlockBroadcast` and `GroupBeacon`. It joins
-`GroupSubtreeDataAnnounce` only when `-subtree-data-enabled=true`, and
-`GroupSubtreeGroupAnnounce` when `-subtree-groups` is configured.
+The listener always joins `GroupBlockBroadcast` (0xFFFE, always global scope)
+and `GroupBeacon` (0xFFFD). It joins `GroupSubtreeDataAnnounce` (0xFFFB) only
+when `-subtree-data-enabled=true`, and `GroupSubtreeGroupAnnounce` (0xFFFC)
+when `-subtree-groups` is configured. `GroupBlockHeader` (0xFFFA) is
+egress-only (see block header egress below).
 
 ## BRC-131 Block Control Frame Processing
 
@@ -322,7 +326,7 @@ before forwarding.
 
 The virtual `0xFFF9` is not a real multicast address — it matches the proxy's HashKey
 derivation for anchor frames to keep flow identity consistent end to end. See
-[bsv-multicast/docs/brc-134-anchor-transactions.md](../../../bsv-multicast/docs/brc-134-anchor-transactions.md).
+[bsv-multicast/docs/brc-134-anchor-transactions.md](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-134-anchor-transactions.md).
 
 ## BRC-142 Bundle Processing
 
@@ -402,7 +406,7 @@ checks the set:
   `nack.Tracker.Observe` still runs so gap-fill bookkeeping stays accurate.
 
 The set is a ring-buffer + hash-map with O(1) insert and lookup. Entries expire
-after `-egress-dedup-ttl` (default 5 s). When the capacity is reached the
+after `-egress-dedup-ttl` (default 2 s). When the capacity is reached the
 oldest entry is evicted regardless of TTL. BRC-12 frames and unstamped
 BRC-124/BRC-128 frames (`SeqNum == 0`) bypass dedup entirely.
 
@@ -475,6 +479,13 @@ of a **consumer table**:
 - **Subtree dimension** — the residual predicate reuses `filter.Filter.Allow`.
 - **Control frames** (BRC-131/132, BRC-135 headers) broadcast to all consumers,
   matching the worker's bypass-filter semantics for those classes.
+- **Own-traffic exclusion (opt-in)** — a consumer entry with a non-zero
+  `OwnIngressIP` does not receive its own transactions back: a frame (or
+  bundle) whose proxy-stamped `HashKey` matches
+  `XXH64(OwnIngressIP ∥ groupIdx ∥ SubtreeID)` is skipped for that consumer
+  (and surfaced to the optional `IngressObserver` so a downstream build can
+  meter the upstream volume). Zero `OwnIngressIP` (the default) keeps full
+  delivery.
 
 `fanout.Sink.Apply(consumers)` atomically swaps the table and rebuilds the index;
 this is the open end of an external control-plane contract (join-set union +

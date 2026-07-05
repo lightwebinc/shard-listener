@@ -138,7 +138,7 @@ A Kubernetes Helm chart is published from a dedicated chart repository:
   helm repo add bsl https://lightwebinc.github.io/shard-listener-helm
   helm install listener bsl/shard-listener
   ```
-- OCI: `helm install listener oci://ghcr.io/lightwebinc/charts/shard-listener --version 0.1.0`
+- OCI: `helm install listener oci://ghcr.io/lightwebinc/charts/shard-listener` (add `--version` to pin a released chart)
 
 Supports `workloadType=Deployment` (default) and `workloadType=DaemonSet`. Every flag accepted by this binary is exposed under `.config` in the chart's `values.yaml`. The chart hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication. See the chart README for the full reference.
 

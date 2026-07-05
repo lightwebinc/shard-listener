@@ -34,6 +34,27 @@ The default `0x000B` corresponds to the IANA-assigned Bitcoin allocation
 
 ---
 
+## Mode (receiver / delivery split)
+
+### `-mode` / `LISTENER_MODE` (default: `collapsed`)
+
+Role in the receiver/delivery split (mirrors the proxy's `-mode`):
+
+| Value | Behaviour |
+|-------------|--------------------------------------------------------------|
+| `collapsed` | Default monolith: join fabric `(S,G)`, demux/gap/NACK, and fan out to consumers in one process. |
+| `receiver` | Multicast-facing half: joins + gap/NACK, forwards raw frames (envelope-preserving) to the delivery tier. |
+| `delivery` | Consumer-facing half: **no** multicast join, **no** gap/NACK (the receiver owns those); a unicast-ingest front reads raw frames off the wire and runs only the egress (fan-out) sink. |
+
+### `-delivery-addrs` / `DELIVERY_ADDRS` (default: empty)
+
+Receiver mode only: comma-separated delivery `host:port` set. Every demuxed
+frame is fanned out (envelope-preserving — `HashKey`/`SeqNum` intact) to each
+entry. Empty falls back to the single `-egress-addr` (equivalent to collapsed
+egress).
+
+---
+
 ## SSM (RFC 4607)
 
 See the [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm)
@@ -82,6 +103,15 @@ bootstrap is configured.
 DNS re-resolve interval for the bootstrap lists. The `bootstrap.Resolver`
 retains the last good AAAA set on transient refresh failures so a brief
 DNS outage doesn't drop active joins.
+
+### `-local-source` / `LOCAL_SOURCE` (default: `""`)
+
+The co-located proxy's `BIND_SOURCE` on a collapsed node. This source is
+excluded from every roster-driven `(S,G)` join — joining the node's own source
+on the PIM interface would install an `iif==oif` mroute and loop originated
+frames until hop-limit death. When set, this listener does not receive
+own-node frames via multicast; mirror locally where own-source completeness
+matters.
 
 ### Fail-closed validation
 
@@ -224,23 +254,24 @@ multicast delivery (requires PIM or similar on intermediate routers).
 
 ---
 
-## Block Header Egress (BRC-131)
+## Block Header Egress (BRC-135)
 
 When BRC-131 block control frames are received, the listener can extract the 80-byte block
-header from `BlockAnnounce` frames and re-emit it as a stripped 172-byte BRC-131 frame
-(92-byte header + 80-byte payload). This provides a lightweight SPV consumer path without
-requiring consumers to process full block announcement payloads. Header egress runs
-independently of the normal unicast egress (`-egress-addr`); both can be active simultaneously.
+header from `BlockAnnounce` frames and re-emit it as a 172-byte BRC-135 frame
+(FrameVer `0x07`; 92-byte header + 80-byte payload). This provides a lightweight SPV
+consumer path without requiring consumers to process full block announcement payloads.
+Header egress runs independently of the normal unicast egress (`-egress-addr`); both can
+be active simultaneously.
 
 ### `-header-egress-enabled` / `HEADER_EGRESS_ENABLED` (default: `false`)
 
-Enable unicast block header retransmission. When `true`, `BlockAnnounce` frames trigger
-extraction and re-encoding of the 80-byte block header as a stripped BRC-131 frame.
+Enable unicast block header retransmission. When `true`, BRC-131 `BlockAnnounce` frames
+trigger extraction and re-encoding of the 80-byte block header as a BRC-135 frame.
 
 ### `-header-egress-addr` / `HEADER_EGRESS_ADDR` (default: `127.0.0.1:9101`)
 
-Downstream unicast `host:port` for stripped block headers. Headers are sent as 172-byte
-BRC-131 frames (92-byte header + 80-byte block header payload).
+Downstream unicast `host:port` for block headers. Headers are sent as 172-byte
+BRC-135 frames (92-byte header + 80-byte block header payload).
 
 ### `-header-egress-proto` / `HEADER_EGRESS_PROTO` (default: `udp`)
 
@@ -248,7 +279,7 @@ Transport for unicast header egress: `udp` or `tcp`. TCP reconnects automaticall
 
 ### `-header-mc-egress-enabled` / `HEADER_MC_EGRESS_ENABLED` (default: `false`)
 
-Enable multicast block header retransmission. When `true`, stripped block header frames
+Enable multicast block header retransmission. When `true`, the BRC-135 header frames
 are re-emitted to `GroupBlockHeader` (`FF0X::B:FFFA`). SPV consumers join this group
 rather than `GroupBlockBroadcast` (`FF0X::B:FFFE`) to receive headers only.
 
@@ -295,12 +326,17 @@ the sorted registry.
 
 Comma-separated `host:port` list of multicast retry caching nodes to send NACK
 datagrams to. Empty disables NACK dispatch (gaps are still detected and
-counted). Example: `10.0.0.1:9002,10.0.0.2:9002`.
+counted). Example: `[2001:db8::1]:9300,[2001:db8::2]:9300`.
 
 ### `-nack-jitter-max` / `NACK_JITTER_MAX` (default: `200ms`)
 
 Maximum random hold-off before the first NACK is dispatched (NORM suppression
 window). Prevents NACK implosion when many listeners detect the same gap.
+
+### `-nack-backoff-base` / `NACK_BACKOFF_BASE` (default: `500ms`)
+
+Base delay for the retry backoff; doubles per failed recovery round.
+Tier-escalation hops (MISS → next endpoint) do not consume backoff rounds.
 
 ### `-nack-backoff-max` / `NACK_BACKOFF_MAX` (default: `5s`)
 
@@ -322,6 +358,21 @@ Maximum lifetime of a gap entry before it is evicted regardless of retry
 count. Set to approximately one Bitcoin block interval to avoid accumulating
 stale state across block boundaries.
 
+### `-nack-max-flows` / `NACK_MAX_FLOWS` (default: `100000`)
+
+Cap on tracked per-source flows (flood guard). New sources past the cap still
+forward normally but skip NACK recovery until idle flows age out. `0` =
+unbounded.
+
+### `-nack-max-forward-jump` / `NACK_MAX_FORWARD_JUMP` (default: `4096`)
+
+Forward `SeqNum` jump beyond which a flow re-baselines (emitter change, e.g.
+anycast failover between proxies with divergent counters) instead of
+registering — and NACK-storming — a phantom gap range. `0` selects the
+default 4096. See
+[architecture — Gap tracking](architecture.md#gap-tracking-nack--norm-inspired)
+for the rate-aware plausibility check and the v1.7.1 transition-tail recovery.
+
 ---
 
 ## Egress Deduplication
@@ -336,12 +387,15 @@ Capacity of the egress dedup set (number of `(groupIdx, subtreeID, seqNum)`
 entries). `0` disables dedup entirely. A value of `65536` is sufficient for
 ~10 minutes of sustained traffic at 100 TPS with 10% gap rate.
 
-### `-egress-dedup-ttl` / `EGRESS_DEDUP_TTL` (default: `5s`)
+### `-egress-dedup-ttl` / `EGRESS_DEDUP_TTL` (default: `2s`)
 
 TTL for entries in the egress dedup set. Frames with the same `SeqNum` seen
-within this window are suppressed. Set to at least the maximum expected
-retransmit delay (typically `nack-backoff-max` + one sweep interval = 5.1 s).
-Entries also evict on capacity overflow regardless of TTL.
+within this window are suppressed. Size to cover the maximum expected
+retransmit delay: a late retransmit can arrive up to `nack-backoff-max` + one
+sweep interval (5.1 s with defaults) after the inline frame, so raise the TTL
+above the 2 s default when full retransmit-window suppression matters
+(live-resharding additionally requires ≥ 4 s). Entries also evict on capacity
+overflow regardless of TTL.
 
 > **Interaction with gap tracker:** even when a duplicate is suppressed by
 > egress dedup, `nack.Tracker.Observe` is still called so gap-fill bookkeeping
