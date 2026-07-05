@@ -9,7 +9,7 @@
 //	-iface                MULTICAST_IF         eth0             NIC for multicast joins and NACK send
 //	-listen-port          LISTEN_PORT          9001             UDP port for incoming multicast frames
 //	-mode                 LISTENER_MODE        collapsed        Role split (P3b): collapsed | receiver | delivery
-//	-shard-bits           SHARD_BITS           2                Must match proxy (1–15)
+//	-shard-bits           SHARD_BITS           2                Must match proxy (1–12)
 //	-scope                MC_SCOPE             site             Multicast scope
 //	-mc-group-id          MC_GROUP_ID          0x000B           IANA group-id (default Bitcoin = 0x000B)
 //	-local-source         LOCAL_SOURCE                          Co-located proxy BIND_SOURCE excluded from (S,G) joins
@@ -498,7 +498,7 @@ func Load() (*Config, error) {
 		"OTLP metric export interval (ignored when OTLP_ENDPOINT is empty)")
 
 	bits := flag.Uint("shard-bits", uint(envInt("SHARD_BITS", 2)),
-		"txid prefix bit width used as the shard key (1–15); must match proxy")
+		"txid prefix bit width used as the shard key (1–12); must match proxy")
 
 	flag.Parse()
 
@@ -516,10 +516,10 @@ func Load() (*Config, error) {
 		c.MinPoWBits = uint32(v)
 	}
 
-	// Validate shard bit width. Top of the 16-bit shard space is reserved for
-	// control-plane groups (0xFFFC–0xFFFE), so practical bits is bounded at 15.
-	if *bits < 1 || *bits > 15 {
-		return nil, fmt.Errorf("shard-bits must be in [1, 15], got %d", *bits)
+	// Validate shard bit width. BRC-129 zones the 16-bit shard space: shard
+	// group indices are 0x0000–0x0FFF, so bits is bounded at 12.
+	if *bits < 1 || *bits > 12 {
+		return nil, fmt.Errorf("shard-bits must be in [1, 12], got %d", *bits)
 	}
 	c.ShardBits = *bits
 	c.NumGroups = 1 << c.ShardBits

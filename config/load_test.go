@@ -73,13 +73,13 @@ func TestLoad_Minimal(t *testing.T) {
 }
 
 func TestLoad_ShardBitsBounds(t *testing.T) {
-	for _, bits := range []string{"0", "16"} {
+	for _, bits := range []string{"0", "13"} {
 		if _, err := loadWithArgs(t, withIface(t, "-shard-bits="+bits)...); err == nil {
 			t.Errorf("shard-bits=%s should error", bits)
 		}
 	}
-	if _, err := loadWithArgs(t, withIface(t, "-shard-bits=15")...); err != nil {
-		t.Errorf("shard-bits=15 should be valid: %v", err)
+	if _, err := loadWithArgs(t, withIface(t, "-shard-bits=12")...); err != nil {
+		t.Errorf("shard-bits=12 should be valid: %v", err)
 	}
 }
 
