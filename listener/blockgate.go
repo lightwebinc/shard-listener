@@ -93,12 +93,17 @@ func (c *CoinbaseCorrelator) sweep(now int64) {
 
 // blockGateAllows reports whether a BRC-131 block control frame may be
 // forwarded under the optional block-control gate. When the gate is off it
-// always allows. When on: a BlockAnnounce must carry valid proof of work (its
-// in-frame header hashes under the claimed target, which must meet the floor),
-// and its coinbase TxID is recorded for correlation; a Coinbase frame is
-// allowed only if its TxID was recorded by such a validated block. payload is
-// the BRC-131 payload (bf.Payload on the direct path, the reassembled payload
-// on the fragmentation path). Drops are counted via the metrics reason label.
+// always allows. When on: a block frame must carry valid proof of work (its
+// in-frame 80-byte header hashes under the claimed target, which must meet the
+// floor). payload is the fabric block payload (bf.Payload on the direct path,
+// the reassembled payload on the fragmentation path); its first 80 bytes are
+// the block header. Drops are counted via the metrics reason label.
+//
+// Coinbase correlation is retired: since the push model carries the coinbase
+// INLINE inside the block body (BRC-144), there is no separate BRC-133 coinbase
+// frame to validate against a block-recorded coinbase TxID. A stray
+// BlockMsgCoinbase frame (legacy) is dropped as uncorrelated when the
+// correlator is configured.
 func (w *Worker) blockGateAllows(bf *frame.BlockFrame, payload []byte) bool {
 	if !w.requireBlockPoW {
 		return true
@@ -110,13 +115,6 @@ func (w *Worker) blockGateAllows(bf *frame.BlockFrame, payload []byte) bool {
 				w.rec.FrameDropped(w.id, "block_pow")
 			}
 			return false
-		}
-		// Record the validated block's coinbase TxID (payload[80:112]) so the
-		// matching BRC-133 coinbase frame can be correlated and forwarded.
-		if w.coinbaseCorr != nil && len(payload) >= frame.BlockHeaderSize+32 {
-			var cb [32]byte
-			copy(cb[:], payload[frame.BlockHeaderSize:frame.BlockHeaderSize+32])
-			w.coinbaseCorr.Add(cb)
 		}
 	case frame.BlockMsgCoinbase:
 		if w.coinbaseCorr != nil && !w.coinbaseCorr.Has(bf.ContentID) {

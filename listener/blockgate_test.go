@@ -56,7 +56,11 @@ func forwarded(ch <-chan []byte) bool {
 	}
 }
 
-func TestBlockGate_PoWAndCoinbaseCorrelation(t *testing.T) {
+// TestBlockGate_PoWAndInlineCoinbase covers the block-control gate under the
+// push model: a block carries its coinbase INLINE (BRC-144 body), so the gate
+// is PoW-only on the announce and the retired separate-coinbase correlation
+// drops any stray BlockMsgCoinbase frame.
+func TestBlockGate_PoWAndInlineCoinbase(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
 	defer cleanup()
 	w := newWorker(t, addr, filter.New(nil, nil, nil, nil))
@@ -81,29 +85,18 @@ func TestBlockGate_PoWAndCoinbaseCorrelation(t *testing.T) {
 		t.Fatal("invalid-PoW block announce must be dropped")
 	}
 
-	// A coinbase with no validated block yet is dropped (uncorrelated).
-	w.processBlockFrame(coinbaseFrame(t, cb))
-	if forwarded(ch) {
-		t.Fatal("uncorrelated coinbase must be dropped")
-	}
-
-	// Valid-PoW announce forwards and records its coinbase TxID.
+	// Valid-PoW announce forwards on its header alone (coinbase is inline in
+	// the body; the gate no longer extracts or records a coinbase TxID).
 	w.processBlockFrame(minedAnnounce(t, cb))
 	if !forwarded(ch) {
 		t.Fatal("valid-PoW block announce must forward")
 	}
-	if !corr.Has(cb) {
-		t.Fatal("validated block's coinbase TxID must be recorded")
-	}
 
-	// Now the correlated coinbase forwards; an unrelated one still drops.
+	// Separate BRC-133 coinbase frames are retired: none can correlate (nothing
+	// records coinbase TxIDs anymore), so any such frame is dropped.
 	w.processBlockFrame(coinbaseFrame(t, cb))
-	if !forwarded(ch) {
-		t.Fatal("correlated coinbase must forward")
-	}
-	w.processBlockFrame(coinbaseFrame(t, [32]byte{0xDE, 0xAD}))
 	if forwarded(ch) {
-		t.Fatal("coinbase with no matching block must be dropped")
+		t.Fatal("separate coinbase frame must be dropped (coinbase is inline now)")
 	}
 }
 
