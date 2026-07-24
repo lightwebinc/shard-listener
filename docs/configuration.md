@@ -858,3 +858,26 @@ shard-listener \
 Every flag documented in this file is exposed under `.config` in the corresponding Helm chart's `values.yaml`. See the chart repository for installation snippets and the `values.schema.json` for validation rules.
 
 Chart: [`lightwebinc/shard-listener-helm`](https://github.com/lightwebinc/shard-listener-helm) — supports `workloadType=Deployment | DaemonSet`; hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication.
+
+## BRC-148 BEEF object plane
+
+The listener joins the BEEF plane band (`0x1000+`) when topics and/or
+explicit groups are configured; a delivery-mode worker forwards V9 frames
+without joins. Filter composition per the spec: group membership → topic
+filter → version filter → delivery. Canonical spec:
+`bsv-multicast/docs/brc-148-shard-domain-beef-plane.md`.
+
+| Flag / Env | Default | Description |
+|------------|---------|-------------|
+| `-beef-topics` / `BEEF_TOPICS` | — | Comma-separated elected topics (names, or 64-hex TopicIDs verbatim); derives band joins + the worker topic filter |
+| `-beef-groups` / `BEEF_GROUPS` | — | Plane-relative group indices to join (aggregator mode: no topic restriction) |
+| `-beef-shard-bits` / `BEEF_SHARD_BITS` | `4` | Plane width; must match the proxy |
+| `-beef-versions` / `BEEF_VERSIONS` | all | Accepted encodings: comma of `beef`\|`beefv2`\|`atomic` (capability gate on payload word) |
+| `-beef-verify-content` / `BEEF_VERIFY_CONTENT` | `false` | Debug: verify ContentID == SHA-256d(object) before fan-out (BEEF analogue of `-verify-payload-hash`) |
+
+Join/emit sites: `buildGroups` (band joins; SSM inherits the global source
+roster per the spec), `processBeefFrame` (filters → `bsl:egr` claim on the
+**(ContentID, TopicID) pair** → `EgressSink.SendBeef` → gap tracking with a
+ZERO NACK SubtreeID), reassembly `OrigFrameVer 0x09` completion (ContentID is
+the SHA-256d verification hash), fanout per-consumer `TopicSet`/`BEEFVersions`
+election with zero-ingredient own-traffic exclusion.

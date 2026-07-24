@@ -56,6 +56,9 @@ func (w *Worker) DeliverReassembledBeef(_ []byte, bf *frame.BEEFFrame) {
 		}
 		return
 	}
+	if w.rec != nil {
+		w.rec.ReassemblyCompleted()
+	}
 	w.deliverBeef(buf[:n], bf)
 }
 
