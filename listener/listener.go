@@ -89,13 +89,17 @@ type Worker struct {
 	rec               *metrics.Recorder
 	debug             bool
 	verifyPayloadHash bool
-	senderACL         *filter.SenderACL   // nil = accept every source
-	dedupSet          *dedup.Set          // nil = dedup disabled
-	txDedup           *txdedup.Store      // nil = cross-listener TxID dedup disabled
-	reassemBuf        *reassembly.Buffer  // nil = BRC-130 disabled
-	requireBlockPoW   bool                // gate BRC-131 announces on header PoW before fan-out
-	powFloor          *big.Int            // PoW difficulty floor; nil = self-consistency only
-	coinbaseCorr      *CoinbaseCorrelator // shared; nil = no coinbase correlation
+	senderACL         *filter.SenderACL     // nil = accept every source
+	dedupSet          *dedup.Set            // nil = dedup disabled
+	txDedup           *txdedup.Store        // nil = cross-listener TxID dedup disabled
+	reassemBuf        *reassembly.Buffer    // nil = BRC-130 disabled
+	beefEngine        *shard.PlaneEngine    // nil = BRC-148 BEEF plane disabled (V9 frames dropped)
+	beefTopics        map[[32]byte]struct{} // worker-level topic election; empty = admit all topics
+	beefVersions      map[uint32]struct{}   // accepted BEEF version words; empty = admit all
+	beefVerifyContent bool                  // debug: verify ContentID == SHA-256d(payload)
+	requireBlockPoW   bool                  // gate BRC-131 announces on header PoW before fan-out
+	powFloor          *big.Int              // PoW difficulty floor; nil = self-consistency only
+	coinbaseCorr      *CoinbaseCorrelator   // shared; nil = no coinbase correlation
 	log               *slog.Logger
 
 	// curSource is the source address of the frame currently being processed,
@@ -240,6 +244,18 @@ func (w *Worker) SetSenderACL(a *filter.SenderACL) {
 // bsl_frames_invalid_payload_total is incremented. Defaults to false.
 func (w *Worker) SetVerifyPayloadHash(v bool) {
 	w.verifyPayloadHash = v
+}
+
+// SetBEEF wires the BRC-148 BEEF object plane: the plane-aware derivation
+// engine, the worker-level topic election (TopicIDs; empty = admit all —
+// aggregator mode), the accepted encoding version words (empty = admit all),
+// and the optional ContentID verification (debug/test support, the BEEF
+// analogue of SetVerifyPayloadHash). Call before Run.
+func (w *Worker) SetBEEF(pe *shard.PlaneEngine, topics map[[32]byte]struct{}, versions map[uint32]struct{}, verifyContent bool) {
+	w.beefEngine = pe
+	w.beefTopics = topics
+	w.beefVersions = versions
+	w.beefVerifyContent = verifyContent
 }
 
 // SetBlockPoW enables the block-control gate before fan-out. Inter-domain block
@@ -513,6 +529,12 @@ func (w *Worker) processFrame(raw []byte) {
 	// BRC-142 bundle frame (FrameVer 0x08): edge-decoalesce and forward members.
 	if frame.IsBundle(raw) {
 		w.processBundle(raw)
+		return
+	}
+
+	// BRC-148 BEEF object frame (FrameVer 0x09): route to the BEEF handler.
+	if frame.IsBEEFFrame(raw) {
+		w.processBeefFrame(raw)
 		return
 	}
 

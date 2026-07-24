@@ -59,6 +59,9 @@ func flowLabel(groupIdx uint32) string {
 	case groupAnchorFlow:
 		return "brc134"
 	default:
+		if groupIdx >= 0x1000 && groupIdx <= 0x1FFF {
+			return "brc148" // BEEF object plane band (BRC-148 domain 0x1)
+		}
 		return "brc124"
 	}
 }

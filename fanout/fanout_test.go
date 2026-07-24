@@ -17,8 +17,11 @@ type recSink struct {
 	tx     int
 	blocks int
 	raw    int
+	beef   int
 	closed bool
 }
+
+func (r *recSink) SendBeef(_ []byte, _ *frame.BEEFFrame) error { r.beef++; return nil }
 
 func (r *recSink) Send(raw []byte, f *frame.Frame) error                        { r.tx++; return nil }
 func (r *recSink) SendBlock(raw []byte, bf *frame.BlockFrame) error             { r.blocks++; return nil }

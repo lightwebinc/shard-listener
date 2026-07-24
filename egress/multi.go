@@ -71,6 +71,12 @@ func (m *MultiSender) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) er
 	return m.fanout(func(s *Sender) error { return s.SendSubtreeData(raw, sf) })
 }
 
+// SendBeef forwards a BRC-148 BEEF object frame to every destination
+// (whole-frame, envelope-preserving — strip is forced off in this sink).
+func (m *MultiSender) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
+	return m.fanout(func(s *Sender) error { return s.SendBeef(raw, bf) })
+}
+
 // SendRaw forwards an arbitrary buffer verbatim to every destination.
 func (m *MultiSender) SendRaw(buf []byte) error {
 	return m.fanout(func(s *Sender) error { return s.SendRaw(buf) })

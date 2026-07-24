@@ -62,6 +62,13 @@ type BlockCallback func(payload []byte, bf *frame.BlockFrame)
 // double-hash of the payload.
 type SubtreeDataCallback func(payload []byte, sf *frame.SubtreeDataFrame)
 
+// BEEFCallback is invoked when BRC-148 (OrigFrameVer V9) reassembly
+// completes. payload is the reassembled BEEF object; bf carries the frame
+// metadata — ContentID from the fragment TxID slot (which is SHA-256d of
+// the object by construction, so the verifyHash check applies exactly) and
+// TopicID from the fragment SubtreeID slot.
+type BEEFCallback func(payload []byte, bf *frame.BEEFFrame)
+
 // Buffer holds in-progress BRC-130 reassembly slots.
 type Buffer struct {
 	mu                sync.Mutex
@@ -74,6 +81,7 @@ type Buffer struct {
 	onComplete        Callback            // V2 (FrameVerV2) completion
 	onCompleteBlock   BlockCallback       // V4 (FrameVerV4) completion
 	onCompleteSubtree SubtreeDataCallback // V5 (FrameVerV5) completion
+	onCompleteBEEF    BEEFCallback        // V9 (FrameVerV9) completion
 	onAbandoned       func()              // metrics hook: one call per evicted slot
 	onStarted         func()              // metrics hook
 	onHashMismatch    func()              // metrics hook (SHA256d mismatch, V2)
@@ -134,6 +142,10 @@ func (b *Buffer) SetMerkleMismatchHook(fn func()) { b.onMerkleMismatch = fn }
 // SetBlockCallback registers the callback invoked on successful V4 (BRC-131)
 // reassembly. If nil, completed V4 slots are silently discarded.
 func (b *Buffer) SetBlockCallback(cb BlockCallback) { b.onCompleteBlock = cb }
+
+// SetBEEFCallback registers the callback invoked on successful V9 (BRC-148)
+// completion. Without it, reassembled BEEF objects are dropped.
+func (b *Buffer) SetBEEFCallback(cb BEEFCallback) { b.onCompleteBEEF = cb }
 
 // SetSubtreeDataCallback registers the callback invoked on successful V5
 // (BRC-132) reassembly. SHA256d verification is never applied for V5 slots.
@@ -260,6 +272,35 @@ func (b *Buffer) complete(s *slot) {
 		b.removeSlot(s.txID)
 		if b.onCompleteSubtree != nil {
 			b.onCompleteSubtree(payload, sf)
+		}
+
+	case frame.FrameVerV9:
+		// BRC-148 BEEF object: the TxID slot is the ContentID —
+		// SHA-256d(object) by definition — so the verifyHash check is the
+		// spec's reassembly verification exactly. Deliver with FrameVer and
+		// TopicID preserved so the object routes down the BEEF path, not
+		// the tx path.
+		if b.verifyHash {
+			first := sha256.Sum256(payload)
+			second := sha256.Sum256(first[:])
+			if second != s.txID {
+				if b.onHashMismatch != nil {
+					b.onHashMismatch()
+				}
+				b.removeSlot(s.txID)
+				return
+			}
+		}
+		bf := &frame.BEEFFrame{
+			HashKey: s.hashKey,
+			SeqNum:  s.seqNum,
+			Payload: payload,
+		}
+		copy(bf.ContentID[:], s.txID[:])
+		copy(bf.TopicID[:], s.subtreeID[:])
+		b.removeSlot(s.txID)
+		if b.onCompleteBEEF != nil {
+			b.onCompleteBEEF(payload, bf)
 		}
 
 	default:

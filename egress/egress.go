@@ -177,6 +177,27 @@ func (s *Sender) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) error {
 	}
 }
 
+// SendBeef forwards a BRC-148 BEEF object frame (FrameVer 0x09) to the
+// downstream. When stripHeader is true only the bare BEEF object is sent
+// (one object per datagram; the TopicID is dropped on strip — consumers
+// needing it take whole frames or the delivery record).
+func (s *Sender) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
+	var buf []byte
+	if s.stripHeader {
+		buf = bf.Payload
+	} else {
+		buf = raw
+	}
+	switch s.proto {
+	case "udp":
+		return s.sendUDP(buf)
+	case "tcp":
+		return s.sendTCP(buf)
+	default:
+		return fmt.Errorf("egress: unknown protocol %q", s.proto)
+	}
+}
+
 // Proto returns the configured egress protocol ("udp" or "tcp").
 func (s *Sender) Proto() string { return s.proto }
 

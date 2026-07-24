@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"github.com/lightwebinc/shard-common/hostinfo"
 	"github.com/lightwebinc/shard-common/logging"
 	commanifest "github.com/lightwebinc/shard-common/manifest"
+	"github.com/lightwebinc/shard-common/objfmt"
 	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
 	"github.com/lightwebinc/shard-common/tracing"
@@ -134,6 +137,14 @@ func run() error {
 	// Build the shard engine.
 	engine := shard.New(cfg.MCPrefix, cfg.MCGroupID, cfg.ShardBits)
 
+	// BRC-148 BEEF plane: engine (always wired — a delivery worker must be
+	// able to route forwarded V9 frames), elected topic/version sets, and the
+	// band join indices derived from the election.
+	beefEngine, beefTopicSet, beefVersionSet, beefJoinIdx, err := setupBEEF(cfg)
+	if err != nil {
+		return err
+	}
+
 	// Delivery mode (P3b) is the consumer-facing half: it does NOT join fabric
 	// (S,G) and runs no gap/NACK — a receiver already did that and forwards raw
 	// frames unicast. The receiver-side machinery below (multicast groups, SSM
@@ -148,7 +159,7 @@ func run() error {
 	// Derive the multicast group addresses to join (receiver/collapsed only).
 	var groups []*net.UDPAddr
 	if !delivery {
-		groups, err = buildGroups(cfg, engine)
+		groups, err = buildGroups(cfg, engine, beefJoinIdx)
 		if err != nil {
 			return fmt.Errorf("build groups: %w", err)
 		}
@@ -211,7 +222,7 @@ func run() error {
 	var beaconSrcs, manifestSrcs, subAnnSrcs []netip.Addr
 	if !delivery && cfg.SourceMode == "ssm" {
 		var err error
-		gs, beaconSrcs, manifestSrcs, subAnnSrcs, err = buildSSMSources(ctx, cfg)
+		gs, beaconSrcs, manifestSrcs, subAnnSrcs, err = buildSSMSources(ctx, cfg, beefJoinIdx)
 		if err != nil {
 			return fmt.Errorf("ssm bootstrap: %w", err)
 		}
@@ -561,6 +572,7 @@ func run() error {
 			}
 		}
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
+		w.SetBEEF(beefEngine, beefTopicSet, beefVersionSet, cfg.BEEFVerifyContent)
 		if !delivery && cfg.RequireBlockPoW {
 			w.SetBlockPoW(true, cfg.MinPoWBits, coinbaseCorr)
 		}
@@ -593,6 +605,7 @@ func run() error {
 			buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)
 			buf.SetBlockCallback(wLocal.DeliverReassembledBlock)
 			buf.SetSubtreeDataCallback(wLocal.DeliverReassembledSubtreeData)
+			buf.SetBEEFCallback(wLocal.DeliverReassembledBeef)
 			if cfg.SubtreeDataVerifyMerkle {
 				buf.SetVerifyMerkle(true)
 			}
@@ -693,7 +706,7 @@ func primaryIPv6(iface *net.Interface) (out [16]byte, ok bool) {
 // If ShardInclude is set, only those groups are joined; otherwise all groups.
 // The block control group (FF0E::B:FFFE) is always appended so block
 // announcements are received regardless of shard filtering.
-func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, error) {
+func buildGroups(cfg *config.Config, engine *shard.Engine, beefJoinIdx []uint32) ([]*net.UDPAddr, error) {
 	var indices []uint32
 	if len(cfg.ShardInclude) > 0 {
 		indices = cfg.ShardInclude
@@ -719,7 +732,65 @@ func buildGroups(cfg *config.Config, engine *shard.Engine) ([]*net.UDPAddr, erro
 		groups = append(groups, &net.UDPAddr{IP: subtreeDataIP, Port: cfg.ListenPort})
 	}
 
+	// Join the BRC-148 BEEF plane band groups derived from the election
+	// (topic-derived ∪ explicit aggregator indices, already domain-tagged).
+	for _, idx := range beefJoinIdx {
+		groups = append(groups, engine.Addr(idx, cfg.ListenPort))
+	}
+
 	return groups, nil
+}
+
+// setupBEEF derives the BRC-148 plane wiring from config: the plane engine,
+// the worker-level topic election (names hashed to TopicIDs; a 64-hex entry
+// is taken as a TopicID verbatim), the accepted version-word set, and the
+// sorted domain-tagged join indices (one group per elected topic, plus the
+// explicit aggregator indices).
+func setupBEEF(cfg *config.Config) (*shard.PlaneEngine, map[[32]byte]struct{}, map[uint32]struct{}, []uint32, error) {
+	pe, err := shard.NewPlane(cfg.MCPrefix, cfg.MCGroupID, cfg.BEEFShardBits, shard.DomainBEEF)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("beef plane: %w", err)
+	}
+
+	joinSet := map[uint32]struct{}{}
+	var topics map[[32]byte]struct{}
+	if len(cfg.BEEFTopics) > 0 {
+		topics = make(map[[32]byte]struct{}, len(cfg.BEEFTopics))
+		for _, t := range cfg.BEEFTopics {
+			var tid [32]byte
+			if b, herr := hex.DecodeString(t); herr == nil && len(b) == 32 {
+				copy(tid[:], b)
+			} else {
+				tid = objfmt.TopicID(t)
+			}
+			topics[tid] = struct{}{}
+			joinSet[pe.GroupIndex(&tid)] = struct{}{}
+		}
+	}
+	for _, g := range cfg.BEEFGroups {
+		joinSet[uint32(pe.Base())+g] = struct{}{}
+	}
+	joins := make([]uint32, 0, len(joinSet))
+	for idx := range joinSet {
+		joins = append(joins, idx)
+	}
+	sort.Slice(joins, func(i, j int) bool { return joins[i] < joins[j] })
+
+	var versions map[uint32]struct{}
+	if len(cfg.BEEFVersions) > 0 {
+		versions = make(map[uint32]struct{}, len(cfg.BEEFVersions))
+		for _, tok := range cfg.BEEFVersions {
+			switch tok {
+			case "beef":
+				versions[objfmt.BEEFMarkerV1] = struct{}{}
+			case "beefv2":
+				versions[objfmt.BEEFMarkerV2] = struct{}{}
+			case "atomic":
+				versions[objfmt.AtomicBEEFMarker] = struct{}{}
+			}
+		}
+	}
+	return pe, topics, versions, joins, nil
 }
 
 // buildSSMSources resolves the per-control-group bootstrap source lists
@@ -750,7 +821,7 @@ func excludeOwnSource(srcs []netip.Addr, own netip.Addr) []netip.Addr {
 	return out
 }
 
-func buildSSMSources(ctx context.Context, cfg *config.Config) (listener.GroupSources, []netip.Addr, []netip.Addr, []netip.Addr, error) {
+func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint32) (listener.GroupSources, []netip.Addr, []netip.Addr, []netip.Addr, error) {
 	gs := make(listener.GroupSources)
 
 	var own netip.Addr
@@ -809,6 +880,13 @@ func buildSSMSources(ctx context.Context, cfg *config.Config) (listener.GroupSou
 	// Data-plane shard groups (lab/CI static path).
 	if len(staticSrcs) > 0 {
 		for idx := uint32(0); idx < cfg.NumGroups; idx++ {
+			ip := shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupIdx(idx))
+			put(ip, staticSrcs)
+		}
+		// BRC-148 plane band joins inherit the announced global source
+		// roster (the spec's Source Discovery rule: object planes are
+		// published from the same sources as the transaction plane).
+		for _, idx := range beefJoinIdx {
 			ip := shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupIdx(idx))
 			put(ip, staticSrcs)
 		}

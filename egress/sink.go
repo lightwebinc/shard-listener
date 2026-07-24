@@ -20,6 +20,8 @@ type EgressSink interface {
 	SendBlock(raw []byte, bf *frame.BlockFrame) error
 	// SendSubtreeData forwards a BRC-132 subtree data frame.
 	SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) error
+	// SendBeef forwards a BRC-148 BEEF object frame (FrameVer 0x09).
+	SendBeef(raw []byte, bf *frame.BEEFFrame) error
 	// SendRaw forwards an arbitrary buffer verbatim (BRC-135 header egress).
 	SendRaw(buf []byte) error
 	// Proto returns the egress protocol label used in metrics ("udp"/"tcp").

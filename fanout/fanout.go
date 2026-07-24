@@ -20,6 +20,7 @@ import (
 
 	"github.com/lightwebinc/shard-common/bundle"
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/objfmt"
 	"github.com/lightwebinc/shard-common/seqhash"
 	"github.com/lightwebinc/shard-common/shard"
 
@@ -66,6 +67,15 @@ type Consumer struct {
 	OwnIngressIP  [16]byte
 	BundleCapable bool
 	IngressObs    IngressObserver
+
+	// TopicSet is the consumer's elected BRC-148 overlay topics (TopicID =
+	// SHA-256 of the topic name). Empty/nil admits every topic on the
+	// consumer's elected groups (aggregator mode, per the spec).
+	TopicSet map[[32]byte]struct{}
+
+	// BEEFVersions is the consumer's accepted BEEF encoding capability set
+	// (payload version words, uint32 LE). Empty/nil admits all encodings.
+	BEEFVersions map[uint32]struct{}
 }
 
 // IngressObserver measures a consumer's own tunnel-bound ingress — the frames
@@ -92,6 +102,11 @@ type IngressObserver interface {
 // Apply against the reading hot path.
 type Sink struct {
 	engine *shard.Engine
+
+	// beefEngine derives BRC-148 domain-tagged group indices from TopicIDs
+	// for SendBeef's reverse-index routing. Nil ⇒ every consumer is
+	// evaluated via its topic/version election instead (correct, slower).
+	beefEngine *shard.PlaneEngine
 
 	mu        sync.RWMutex
 	consumers []*Consumer            // full table — broadcast set for control frames
@@ -145,6 +160,76 @@ func (s *Sink) Apply(consumers []*Consumer) {
 // subscribed to the frame's shard whose subtree filter admits it. Delivery
 // continues to all matching consumers even if one errors; the first error is
 // returned so the worker still records an egress error.
+// SetBEEFEngine wires the BRC-148 plane engine used to route SendBeef via
+// the shard reverse index. Call before the worker starts.
+func (s *Sink) SetBEEFEngine(pe *shard.PlaneEngine) { s.beefEngine = pe }
+
+// SendBeef fans a BRC-148 BEEF object frame to the consumers whose group
+// election covers its domain-tagged group, then applies each consumer's
+// topic filter and BEEF-version (encoding capability) filter — group
+// membership → topic filter → version filter → delivery, per the spec.
+// Own-traffic exclusion uses the BEEF flow identity: XXH64(consumer ingress
+// IP ∥ banded groupIdx ∥ zeros) — the 32-byte ingredient is ZERO (TopicID is
+// excluded from BEEF flow keys).
+func (s *Sink) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
+	s.mu.RLock()
+	var bucket, allShards []*Consumer
+	var groupIdx uint32
+	if s.beefEngine != nil {
+		groupIdx = s.beefEngine.GroupIndex(&bf.TopicID)
+		bucket = s.byShard[groupIdx]
+		allShards = s.allShards
+	} else {
+		bucket = s.consumers
+	}
+	s.mu.RUnlock()
+
+	var firstErr error
+	deliver := func(c *Consumer) {
+		if len(c.TopicSet) > 0 {
+			if _, ok := c.TopicSet[bf.TopicID]; !ok {
+				return
+			}
+		}
+		if len(c.BEEFVersions) > 0 {
+			w, ok := objfmt.BEEFVersionWord(bf.Payload)
+			if !ok {
+				return
+			}
+			if _, accepted := c.BEEFVersions[w]; !accepted {
+				return
+			}
+		}
+		if isOwnBeef(c, groupIdx, bf) {
+			if c.IngressObs != nil {
+				c.IngressObs.ObserveIngress(len(raw), 1)
+			}
+			return
+		}
+		if err := c.Sink.SendBeef(raw, bf); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, c := range bucket {
+		deliver(c)
+	}
+	for _, c := range allShards {
+		deliver(c)
+	}
+	return firstErr
+}
+
+// isOwnBeef reports whether bf is the consumer's own submission returning on
+// the fabric: the frame HashKey equals the BEEF flow identity of the
+// consumer's ingress IP on this group (zero 32-byte ingredient per BRC-148).
+func isOwnBeef(c *Consumer, groupIdx uint32, bf *frame.BEEFFrame) bool {
+	if c.OwnIngressIP == ([16]byte{}) || bf.HashKey == 0 {
+		return false
+	}
+	var zero [32]byte
+	return bf.HashKey == seqhash.Hash(c.OwnIngressIP, groupIdx, zero)
+}
+
 func (s *Sink) Send(raw []byte, f *frame.Frame) error {
 	groupIdx := s.engine.GroupIndex(&f.TxID)
 

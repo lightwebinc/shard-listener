@@ -215,6 +215,15 @@ type Config struct {
 	AutoConfigLiveResharding bool          // opt-in bridging mode (default: restart on adopt)
 	AutoConfigBridgingWindow time.Duration // 0 ⇒ honour pilot TransitionEpoch verbatim
 
+	// BRC-148 BEEF object plane (listener side). The plane is joined when
+	// topics and/or explicit groups are configured; otherwise the listener
+	// ignores the band entirely.
+	BEEFTopics        []string // elected topic names and/or 64-hex TopicIDs; derives joins + topic filter
+	BEEFGroups        []uint32 // explicit plane-relative group indices (aggregator: joined with no topic restriction)
+	BEEFShardBits     uint     // plane shard-bit width (1-12); must match the proxy
+	BEEFVersions      []string // accepted encodings: beef|beefv2|atomic (empty = all)
+	BEEFVerifyContent bool     // debug: verify ContentID == SHA-256d(object) before fan-out
+
 	// Subtree group announcements (BRC-127)
 	SubtreeGroups          [][16]byte // parsed GroupIDs to subscribe
 	SubtreeGroupDefaultTTL time.Duration
@@ -500,6 +509,17 @@ func Load() (*Config, error) {
 	bits := flag.Uint("shard-bits", uint(envInt("SHARD_BITS", 2)),
 		"txid prefix bit width used as the shard key (1–12); must match proxy")
 
+	beefTopicsFlag := flag.String("beef-topics", envStr("BEEF_TOPICS", ""),
+		"comma-separated BRC-148 overlay topics to elect (names or 64-hex TopicIDs); derives plane joins + the topic filter")
+	beefGroupsFlag := flag.String("beef-groups", envStr("BEEF_GROUPS", ""),
+		"comma-separated plane-relative BRC-148 group indices to join (aggregator mode — no topic restriction)")
+	beefBits := flag.Uint("beef-shard-bits", uint(envInt("BEEF_SHARD_BITS", 4)),
+		"BRC-148 BEEF plane shard-bit width (1–12); must match proxy")
+	beefVersionsFlag := flag.String("beef-versions", envStr("BEEF_VERSIONS", ""),
+		"accepted BEEF encodings, comma of beef|beefv2|atomic (empty = all)")
+	flag.BoolVar(&c.BEEFVerifyContent, "beef-verify-content", envBool("BEEF_VERIFY_CONTENT", false),
+		"verify ContentID == SHA-256d(object) before fan-out (debug/test support)")
+
 	flag.Parse()
 
 	// Parse the PoW difficulty floor (Bitcoin compact nBits): hex (0x…/bare) or decimal.
@@ -523,6 +543,43 @@ func Load() (*Config, error) {
 	}
 	c.ShardBits = *bits
 	c.NumGroups = 1 << c.ShardBits
+
+	// BRC-148 BEEF plane parsing/validation (v1 caps the width at 12).
+	if *beefBits < 1 || *beefBits > 12 {
+		return nil, fmt.Errorf("beef-shard-bits must be in [1, 12], got %d", *beefBits)
+	}
+	c.BEEFShardBits = *beefBits
+	for _, t := range strings.Split(*beefTopicsFlag, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			c.BEEFTopics = append(c.BEEFTopics, t)
+		}
+	}
+	for _, g := range strings.Split(*beefGroupsFlag, ",") {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			continue
+		}
+		v, perr := strconv.ParseUint(g, 0, 32)
+		if perr != nil {
+			return nil, fmt.Errorf("invalid -beef-groups entry %q: %w", g, perr)
+		}
+		if v >= 1<<c.BEEFShardBits {
+			return nil, fmt.Errorf("beef group index %d outside plane width 2^%d", v, c.BEEFShardBits)
+		}
+		c.BEEFGroups = append(c.BEEFGroups, uint32(v))
+	}
+	for _, tok := range strings.Split(*beefVersionsFlag, ",") {
+		tok = strings.ToLower(strings.TrimSpace(tok))
+		if tok == "" {
+			continue
+		}
+		switch tok {
+		case "beef", "beefv2", "atomic":
+			c.BEEFVersions = append(c.BEEFVersions, tok)
+		default:
+			return nil, fmt.Errorf("invalid -beef-versions token %q (beef|beefv2|atomic)", tok)
+		}
+	}
 
 	// Validate the receiver/delivery role split (P3b).
 	switch strings.ToLower(c.Mode) {
