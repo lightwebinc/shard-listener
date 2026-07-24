@@ -526,7 +526,6 @@ func run() error {
 				cfg.MCEgressPort,
 				cfg.MCEgressIface,
 				cfg.MCEgressHopLimit,
-				cfg.StripHeader,
 			)
 			if err != nil {
 				return fmt.Errorf("mc egress worker %d: %w", i, err)
@@ -554,7 +553,6 @@ func run() error {
 				cfg.HeaderMCEgressPort,
 				cfg.HeaderMCEgressIface,
 				cfg.HeaderMCEgressHopLimit,
-				false,
 			)
 			if err != nil {
 				return fmt.Errorf("header mc egress worker %d: %w", i, err)

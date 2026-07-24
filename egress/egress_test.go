@@ -292,7 +292,6 @@ func TestMCastSender_AddressDerivation(t *testing.T) {
 	s.addrTemplate[0], s.addrTemplate[1] = 0xFF, 0x05
 	copy(s.addrTemplate[2:13], []byte{0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0})
 	s.egressPort = 9001
-	s.stripHeader = false
 
 	// Simulate the per-frame address derivation that Send does.
 	groupIdx := uint32(0x010203)

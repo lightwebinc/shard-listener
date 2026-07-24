@@ -523,6 +523,18 @@ func (w *Worker) processFrame(raw []byte) {
 			return
 		}
 		w.reassemBuf.Observe(ff)
+		// Fragment-level gap tracking: feed each fragment's (HashKey,
+		// SeqNum) to the NACK tracker so interior fragment loss within an
+		// object's flow is detected and recovered — the retry endpoint
+		// caches fragments under the same (HashKey, SeqNum) key. This is
+		// essential for pushed objects (subtree/block/BEEF), where each
+		// object is its own single-object flow with no successor whole
+		// frame to reveal a gap between reassembled objects. Tail-only loss
+		// (the highest fragment index, with no later fragment to expose the
+		// gap) still relies on reassembly timeout.
+		if w.tracker != nil && ff.SeqNum != 0 {
+			w.tracker.Observe(w.fragGroupIdx(ff), ff.SubtreeID, ff.HashKey, ff.SeqNum, ff.TxID, w.curSource)
+		}
 		return
 	}
 
@@ -674,6 +686,26 @@ func (w *Worker) processFrame(raw []byte) {
 			"group", groupIdx,
 			"seq_num", f.SeqNum,
 		)
+	}
+}
+
+// fragGroupIdx returns the flow's group index for a fragment, used only for
+// the NACK tracker's metric label (the flow identity is the fragment
+// HashKey). It mirrors the per-OrigFrameVer routing the retry endpoint
+// applies to the same cached fragment.
+func (w *Worker) fragGroupIdx(ff *frame.FragFrame) uint32 {
+	switch ff.OrigFrameVer {
+	case frame.FrameVerV4, frame.FrameVerV6:
+		return uint32(shard.GroupBlockBroadcast)
+	case frame.FrameVerV5:
+		return uint32(shard.GroupSubtreeDataAnnounce)
+	case frame.FrameVerV9:
+		if w.beefEngine != nil {
+			return w.beefEngine.GroupIndex(&ff.SubtreeID) // SubtreeID slot carries the TopicID
+		}
+		return 0x1000
+	default:
+		return w.engine.GroupIndex(&ff.TxID)
 	}
 }
 

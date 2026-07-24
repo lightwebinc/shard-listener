@@ -35,10 +35,16 @@ const mcSendBuf = 16 * 1024 * 1024 // 16 MiB; kernel silently caps at wmem_max
 
 // MCastSender forwards filtered frames to an IPv6 multicast address space
 // derived from the frame's shard index.
+//
+// Unlike the unicast egress sink, MCastSender always forwards the COMPLETE
+// BRC-124 frame (header + payload). Multicast egress bridges into another
+// multicast domain whose members are themselves listeners/retry endpoints:
+// they must decode the header to demux, gap-track (SeqNum/HashKey), and NACK.
+// The -strip-header flag governs only the final unicast hop to a consumer that
+// wants raw transaction bytes; it must never apply to a bridged frame.
 type MCastSender struct {
 	addrTemplate [16]byte // bytes 0-13 fixed; 14-15 written per-frame
 	egressPort   int
-	stripHeader  bool
 	fd           int
 	log          *slog.Logger
 }
@@ -51,7 +57,6 @@ type MCastSender struct {
 //   - port is the UDP destination port for egress datagrams.
 //   - iface is the network interface used for multicast send (IPV6_MULTICAST_IF).
 //   - hopLimit is set via IPV6_MULTICAST_HOPS (1 = link-local, higher for routed domains).
-//   - stripHeader mirrors the listener-wide -strip-header flag.
 func NewMCast(
 	mcPrefix uint16,
 	groupID uint16,
@@ -59,7 +64,6 @@ func NewMCast(
 	port int,
 	iface *net.Interface,
 	hopLimit int,
-	stripHeader bool,
 ) (*MCastSender, error) {
 	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
@@ -84,10 +88,9 @@ func NewMCast(
 	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, mcSendBuf)
 
 	s := &MCastSender{
-		egressPort:  port,
-		stripHeader: stripHeader,
-		fd:          fd,
-		log:         slog.Default().With("component", "mc-egress"),
+		egressPort: port,
+		fd:         fd,
+		log:        slog.Default().With("component", "mc-egress"),
 	}
 	// Pre-fill fixed address bytes: scope prefix (bytes 0-1), IANA 96-bit
 	// boundary zero-fill (bytes 2-11), and IANA group-id (bytes 12-13).
@@ -99,20 +102,15 @@ func NewMCast(
 	return s, nil
 }
 
-// Send forwards raw (or f.Payload when stripHeader is set) to the multicast
-// group address for groupIdx.
+// Send forwards the complete BRC-124 frame (raw) to the multicast group
+// address for groupIdx. The header is always preserved: the receiving domain's
+// listeners decode it to demux, gap-track, and NACK. The unused *frame.Frame
+// keeps the signature parallel to the unicast Sender's Send.
 //
 // groupIdx must be the value already computed by shard.Engine.GroupIndex in
 // the calling worker; it is not re-derived here. The SockaddrInet6 is built
 // on the stack — no heap allocations occur.
-func (s *MCastSender) Send(raw []byte, f *frame.Frame, groupIdx uint32) error {
-	var buf []byte
-	if s.stripHeader {
-		buf = f.Payload
-	} else {
-		buf = raw
-	}
-
+func (s *MCastSender) Send(raw []byte, _ *frame.Frame, groupIdx uint32) error {
 	// Write the 16-bit group index into bytes 14-15 of the address template.
 	s.addrTemplate[14] = byte(groupIdx >> 8)
 	s.addrTemplate[15] = byte(groupIdx)
@@ -120,7 +118,7 @@ func (s *MCastSender) Send(raw []byte, f *frame.Frame, groupIdx uint32) error {
 	sa := unix.SockaddrInet6{Port: s.egressPort}
 	copy(sa.Addr[:], s.addrTemplate[:])
 
-	return unix.Sendto(s.fd, buf, 0, &sa)
+	return unix.Sendto(s.fd, raw, 0, &sa)
 }
 
 // SendToGroup forwards buf to the multicast group at the given control
