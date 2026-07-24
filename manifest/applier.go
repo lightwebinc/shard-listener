@@ -45,6 +45,12 @@ type Hooks struct {
 	// or disappears. After is nil when the Successor is no longer
 	// adopted (cutover or quorum loss).
 	OnSuccessorChange func(before, after *commanifest.SuccessorView)
+
+	// OnDomainShardBitsChange fires when a BRC-148 object plane's adopted
+	// ShardBits transitions, keyed by DomainID (domain 0x0 is governed by
+	// OnShardBitsChange, never here). Restart-vs-bridge is the caller's
+	// policy; with a per-domain pin the plane never adopts from quorum.
+	OnDomainShardBitsChange func(domain, prev, next uint8)
 }
 
 // Applier is the periodic evaluator+notifier. Field zero values are
@@ -153,6 +159,33 @@ func (a *Applier) fireHooks(prev, next commanifest.Adopted, log *slog.Logger) {
 		log.Info("Successor change", "prev", prev.Successor, "next", next.Successor)
 		a.Hooks.OnSuccessorChange(prev.Successor, next.Successor)
 	}
+	if a.Hooks.OnDomainShardBitsChange != nil {
+		for _, d := range domainShardBitsChanges(prev.Domains, next.Domains) {
+			log.Info("domain ShardBits change", "domain", d.domain, "prev", d.prev, "next", d.next)
+			a.Rec.ManifestAdoption("domain_shard_bits", reasonForChange(d.prev != 0))
+			a.Hooks.OnDomainShardBitsChange(d.domain, d.prev, d.next)
+		}
+	}
+}
+
+// domainChange is one per-domain ShardBits transition.
+type domainChange struct {
+	domain     uint8
+	prev, next uint8
+}
+
+// domainShardBitsChanges returns the per-domain ShardBits transitions between
+// two adopted views, in ascending DomainID order.
+func domainShardBitsChanges(prev, next map[uint8]commanifest.DomainAdoption) []domainChange {
+	var out []domainChange
+	for id := uint8(0); id <= 0x0E; id++ {
+		pv := prev[id].ShardBits
+		nv := next[id].ShardBits
+		if pv != nv {
+			out = append(out, domainChange{domain: id, prev: pv, next: nv})
+		}
+	}
+	return out
 }
 
 // reasonForChange picks an adoption-reason label for telemetry. A change

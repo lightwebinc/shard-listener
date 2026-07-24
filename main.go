@@ -328,6 +328,9 @@ func run() error {
 			Pin: commanifest.Pin{
 				ShardBits:       uint8(cfg.ShardBits),
 				HasShardBitsPin: true,
+				// BEEF plane width is CLI-pinned (manual wins), so
+				// per-domain adoption is divergence-observability.
+				DomainShardBits: map[uint8]uint8{shard.DomainBEEF: uint8(cfg.BEEFShardBits)},
 			},
 		})
 		applier := &listenermanifest.Applier{
@@ -342,6 +345,14 @@ func run() error {
 					// Restart-mode is the default. Live-resharding
 					// hooks land in a follow-up pass that observes
 					// cfg.AutoConfigLiveResharding here.
+				},
+				OnDomainShardBitsChange: func(domain, prev, next uint8) {
+					// BEEF plane width changed (re-shards the band's group
+					// derivation): restart-on-adopt, like the tx plane. With
+					// the CLI pin this fires only on pin reconfiguration.
+					slog.Warn("auto-config adopted new object-plane ShardBits (restart mode)",
+						"domain", domain, "prev", prev, "next", next,
+						"action", "orchestrator will roll the pod with -beef-shard-bits updated")
 				},
 				OnPilotGroupsChange: func(added, removed []uint16) {
 					if !cfg.AutoJoinFromManifest {
