@@ -59,6 +59,7 @@ type Recorder struct {
 	promFramesReceived       *promclient.CounterVec // worker, iface, version
 	promFramesDropped        *promclient.CounterVec // worker, reason
 	promBundlesRebucketed    *promclient.CounterVec // worker
+	promRebucketUnguarded    *promclient.CounterVec // worker
 	promFramesForwarded      *promclient.CounterVec // worker, proto
 	promFramesInvalidPayload *promclient.CounterVec // worker
 	promFramesDeduped        *promclient.CounterVec // worker
@@ -215,6 +216,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		Name: "bsl_bundles_rebucketed_total",
 		Help: "BRC-142 bundles re-bucketed to the local ShardBits generation before delivery (cross-generation/re-shard)",
 	}, []string{"worker"})
+	r.promRebucketUnguarded = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_rebucket_unguarded_total",
+		Help: "Bundles re-bucketed on a listener NOT configured as a re-bucket relay (-rebucket-relay) — a generation-mismatch alarm: parent-stream recovery is active, but re-multicast children are unrecoverable without a child-generation retry. Alert on rate > 0.",
+	}, []string{"worker"})
 	r.promFramesForwarded = promclient.NewCounterVec(promclient.CounterOpts{
 		Name: "bsl_frames_forwarded_total",
 		Help: "Frames forwarded to downstream unicast",
@@ -243,6 +248,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		r.promFramesReceived, r.promFramesDropped, r.promFramesForwarded,
 		r.promFramesInvalidPayload, r.promFramesDeduped, r.promFramesTxDeduped,
 		r.promEgressErrors, r.promMCEgressErrors, r.promBundlesRebucketed,
+		r.promRebucketUnguarded,
 	} {
 		if regErr := reg.Register(c); regErr != nil {
 			return nil, fmt.Errorf("metrics: register hot-path counter: %w", regErr)
@@ -466,6 +472,12 @@ func (r *Recorder) FrameForwarded(workerID int, proto string) {
 // delivery — the cross-generation / re-shard relay operation.
 func (r *Recorder) BundleRebucketed(workerID int) {
 	r.promBundlesRebucketed.WithLabelValues(strconv.Itoa(workerID)).Inc()
+}
+
+// RebucketUnguarded records a re-bucket on a listener not configured as a
+// relay (-rebucket-relay) — the generation-mismatch alarm signal.
+func (r *Recorder) RebucketUnguarded(workerID int) {
+	r.promRebucketUnguarded.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
 
 // FrameInvalidPayload records a BRC-124/BRC-128 frame dropped because

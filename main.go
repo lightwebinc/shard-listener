@@ -582,6 +582,7 @@ func run() error {
 		}
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
 		w.SetBEEF(beefEngine, beefTopicSet, beefVersionSet, cfg.BEEFVerifyContent)
+		w.SetRebucketRelay(cfg.RebucketRelay)
 		if !delivery && cfg.RequireBlockPoW {
 			w.SetBlockPoW(true, cfg.MinPoWBits, coinbaseCorr)
 		}

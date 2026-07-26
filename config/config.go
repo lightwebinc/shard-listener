@@ -224,6 +224,12 @@ type Config struct {
 	BEEFVersions      []string // accepted encodings: beef|beefv2|atomic (empty = all)
 	BEEFVerifyContent bool     // debug: verify ContentID == SHA-256d(object) before fan-out
 
+	// RebucketRelay marks this listener as an intentional re-bucket relay (it runs
+	// a different ShardBits than the bundles it receives and re-buckets them). When
+	// false (a bare edge listener), any re-bucketing raises the bsl_rebucket_unguarded
+	// alarm + a one-shot WARN: a generation mismatch is almost always a misconfig.
+	RebucketRelay bool
+
 	// Subtree group announcements (BRC-127)
 	SubtreeGroups          [][16]byte // parsed GroupIDs to subscribe
 	SubtreeGroupDefaultTTL time.Duration
@@ -519,6 +525,8 @@ func Load() (*Config, error) {
 		"accepted BEEF encodings, comma of beef|beefv2|atomic (empty = all)")
 	flag.BoolVar(&c.BEEFVerifyContent, "beef-verify-content", envBool("BEEF_VERIFY_CONTENT", false),
 		"verify ContentID == SHA-256d(object) before fan-out (debug/test support)")
+	flag.BoolVar(&c.RebucketRelay, "rebucket-relay", envBool("REBUCKET_RELAY", false),
+		"mark this listener an intentional re-bucket relay (runs a different ShardBits than the bundles it receives); when false, re-bucketing raises the bsl_rebucket_unguarded alarm")
 
 	flag.Parse()
 

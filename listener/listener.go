@@ -142,6 +142,13 @@ type Worker struct {
 	// (under procMu). nil until first needed (the same-generation common case
 	// never touches it).
 	rebucketer *bundle.Rebucketer
+
+	// relay marks this listener an intentional re-bucket relay (-rebucket-relay).
+	// When false (a bare edge listener), re-bucketing raises the
+	// bsl_rebucket_unguarded alarm; warnedRebucket gates a one-shot WARN so the
+	// generation-mismatch misconfig is logged loudly once, not per bundle.
+	relay          bool
+	warnedRebucket bool
 }
 
 // SetGroupSources configures per-group SSM source lists for the data-plane
@@ -217,6 +224,11 @@ func (w *Worker) SetHeaderEgress(s *egress.Sender) { w.headerEgr = s }
 // header retransmission to the GroupBlockHeader (0xFFFA) multicast
 // group. nil disables.
 func (w *Worker) SetHeaderMCastEgress(s *egress.MCastSender) { w.headerMCastEgr = s }
+
+// SetRebucketRelay marks this listener an intentional BRC-142 re-bucket relay.
+// A relay re-buckets without raising the unguarded-rebucket alarm; a bare
+// listener (default) raises it, since a generation mismatch is a misconfig.
+func (w *Worker) SetRebucketRelay(relay bool) { w.relay = relay }
 
 // SetHeaderEmitterIdentity sets the BRC-135 emitter HashKey for block
 // header egress. HashKey is the stable per-emitter flow identifier
@@ -745,8 +757,12 @@ func (w *Worker) processBundle(raw []byte) {
 	// (unset) and the same-generation common case skip this entirely.
 	//
 	// The re-bucketed children are re-stamped on a fresh flow keyed by the parent
-	// HashKey (a deterministic re-emit identity), so their SeqNum streams are
-	// monotonic for gap detection. Caveat: own-traffic exclusion keys on
+	// HashKey, so their SeqNum streams are LOCALLY monotonic — which is NOT usable
+	// for upstream-loss gap detection: the child counter advances only for parents
+	// that arrive, so a dropped parent bundle leaves no hole in any child stream.
+	// Upstream loss is detected on the PARENT stream instead (the identity the
+	// origin's retry cached), by Observe-ing the parent (HashKey, SeqNum) below,
+	// survivorship-gated. Caveat: own-traffic exclusion keys on
 	// HashKey = hash(originalSenderIP, group, subtree), which cannot be recomputed
 	// at the local groups from the opaque parent HashKey, so own-traffic exclusion
 	// does not apply to re-bucketed (cross-generation) flows — a documented
@@ -763,25 +779,60 @@ func (w *Worker) processBundle(raw []byte) {
 		if w.rec != nil {
 			w.rec.BundleRebucketed(w.id)
 		}
+		// Guard: re-bucketing is a relay-only operation. On a bare listener a
+		// ShardBits mismatch is almost always a misconfiguration, so raise an alarm
+		// metric on every re-bucket and WARN once. Delivery still proceeds (the
+		// parent-stream tracking below makes ingress loss recoverable); refusing
+		// would only discard deliverable members.
+		if !w.relay {
+			if w.rec != nil {
+				w.rec.RebucketUnguarded(w.id)
+			}
+			if !w.warnedRebucket {
+				w.warnedRebucket = true
+				w.log.Warn("re-bucketing on a non-relay listener (generation mismatch): match the proxy ShardBits, or set -rebucket-relay with a co-located child-generation retry — re-multicast children are otherwise unrecoverable",
+					"bundle_shardbits", b.ShardBits, "listener_shardbits", w.engine.ShardBits())
+			}
+		}
 		if w.debug {
 			w.log.Debug("bundle re-bucketed", "from_shardbits", b.ShardBits,
 				"to_shardbits", w.engine.ShardBits(), "members", len(b.Members), "children", len(children))
 		}
+		// Deliver children WITHOUT gap-tracking their local (phantom) streams
+		// (track=false): a re-bucketed child's SeqNum comes from a local counter,
+		// not a recoverable identity.
 		for _, child := range children {
-			w.deliverBundle(child, nil) // nil raw: encoded on demand if delivered whole
+			w.deliverBundle(child, nil, false) // nil raw: encoded on demand if delivered whole
+		}
+		// Gap-track the PARENT bundle stream on the identity the origin's retry
+		// cached (parent HashKey, SeqNum) so upstream loss is detected and
+		// NACK-recovered; the recovered parent's re-entry auto-fills the gap. This
+		// MUST witness EVERY received parent, not a filter-surviving subset: nack
+		// detects gaps by sequential arithmetic, so observing the stream sparsely
+		// would misread filtered-out parents as losses and NACK-storm them. A
+		// listener that joins a coarse group receives every parent in it (it filters
+		// MEMBERS, not parents), so dense observation is correct; recovering a whole
+		// coarse parent to extract a wanted subset is the inherent, bounded byte cost
+		// of re-bucketing (one NACK per lost parent, proportional to loss), not a
+		// per-parent-avoidable one.
+		if w.tracker != nil && b.SeqNum != 0 {
+			var zero [32]byte // a bundle has no single TxID
+			w.tracker.Observe(uint32(b.GroupIdx), b.SubtreeID, b.HashKey, b.SeqNum, zero, w.curSource)
 		}
 		return
 	}
 
-	w.deliverBundle(b, raw)
+	w.deliverBundle(b, raw, true)
 }
 
-// deliverBundle filters, gap-tracks, dedups, and delivers one generation-aligned
-// bundle (the local-ShardBits common case, or a child produced by re-bucketing).
-// raw is the verbatim datagram for the whole-bundle (consumer-decoalesce) path;
-// it is nil for a re-bucketed child, which is encoded on demand only if a
-// bundle-capable consumer takes it whole. Runs under procMu.
-func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte) {
+// deliverBundle filters, optionally gap-tracks, dedups, and delivers one
+// generation-aligned bundle (the local-ShardBits common case, or a child
+// produced by re-bucketing). raw is the verbatim datagram for the whole-bundle
+// (consumer-decoalesce) path; it is nil for a re-bucketed child, encoded on
+// demand only if a bundle-capable consumer takes it whole. track gap-tracks this
+// bundle's identity (true on the common path; false for a re-bucketed child,
+// whose parent the caller tracks separately). Runs under procMu.
+func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 	groupIdx := uint32(b.GroupIdx)
 
 	// Filter at bundle granularity — a bundle is one (group, subtree).
@@ -793,8 +844,11 @@ func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte) {
 		return
 	}
 
+	// track gates gap-tracking of THIS bundle's identity: true for a
+	// generation-aligned bundle (the common path), false for a re-bucketed child
+	// whose local SeqNum is a phantom (the caller tracks the parent instead).
 	observe := func() {
-		if w.tracker != nil && b.SeqNum != 0 {
+		if track && w.tracker != nil && b.SeqNum != 0 {
 			var zero [32]byte // a bundle has no single TxID
 			w.tracker.Observe(groupIdx, b.SubtreeID, b.HashKey, b.SeqNum, zero, w.curSource)
 		}
