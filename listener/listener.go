@@ -545,7 +545,16 @@ func (w *Worker) processFrame(raw []byte) {
 		// (the highest fragment index, with no later fragment to expose the
 		// gap) still relies on reassembly timeout.
 		if w.tracker != nil && ff.SeqNum != 0 {
-			w.tracker.Observe(w.fragGroupIdx(ff), ff.SubtreeID, ff.HashKey, ff.SeqNum, ff.TxID, w.curSource)
+			// BRC-148 §Frame carriage: object-plane NACKs carry a ZERO
+			// SubtreeID. A BEEF fragment's SubtreeID slot holds the TopicID,
+			// so it must be zeroed here — fragments and whole frames share a
+			// HashKey (one flow), and emitting two different SubtreeID values
+			// on one flow's NACKs is a wire inconsistency.
+			sub := ff.SubtreeID
+			if ff.OrigFrameVer == frame.FrameVerV9 {
+				sub = [32]byte{}
+			}
+			w.tracker.Observe(w.fragGroupIdx(ff), sub, ff.HashKey, ff.SeqNum, ff.TxID, w.curSource)
 		}
 		return
 	}

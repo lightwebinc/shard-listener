@@ -90,6 +90,7 @@ type Buffer struct {
 
 // slot holds the fragments received so far for one TxID.
 type slot struct {
+	key            [32]byte // map key: txID, or SHA-256(ContentID ∥ TopicID) for V9
 	txID           [32]byte
 	subtreeID      [32]byte
 	hashKey        uint64 // from the first fragment received
@@ -169,8 +170,8 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 	now := time.Now()
 	b.evictExpired(now)
 
-	txID := ff.TxID
-	s, exists := b.slots[txID]
+	key := slotKey(ff)
+	s, exists := b.slots[key]
 
 	if !exists {
 		// Reject pathological fragment metadata before opening a slot.
@@ -188,7 +189,8 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 		}
 
 		s = &slot{
-			txID:           txID,
+			key:            key,
+			txID:           ff.TxID,
 			subtreeID:      ff.SubtreeID,
 			hashKey:        ff.HashKey,
 			seqNum:         ff.SeqNum,
@@ -199,8 +201,8 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 			origFrameVer:   ff.OrigFrameVer,
 			msgType:        ff.MsgType,
 		}
-		b.slots[txID] = s
-		b.insertOrder = append(b.insertOrder, txID)
+		b.slots[key] = s
+		b.insertOrder = append(b.insertOrder, key)
 		if b.onStarted != nil {
 			b.onStarted()
 		}
@@ -253,7 +255,7 @@ func (b *Buffer) complete(s *slot) {
 			Payload: payload,
 		}
 		copy(bf.ContentID[:], s.txID[:])
-		b.removeSlot(s.txID)
+		b.removeSlot(s.key)
 		if b.onCompleteBlock != nil {
 			b.onCompleteBlock(payload, bf)
 		}
@@ -269,7 +271,7 @@ func (b *Buffer) complete(s *slot) {
 			Payload: payload,
 		}
 		copy(sf.SubtreeID[:], s.txID[:])
-		b.removeSlot(s.txID)
+		b.removeSlot(s.key)
 		if b.onCompleteSubtree != nil {
 			b.onCompleteSubtree(payload, sf)
 		}
@@ -287,7 +289,7 @@ func (b *Buffer) complete(s *slot) {
 				if b.onHashMismatch != nil {
 					b.onHashMismatch()
 				}
-				b.removeSlot(s.txID)
+				b.removeSlot(s.key)
 				return
 			}
 		}
@@ -298,7 +300,7 @@ func (b *Buffer) complete(s *slot) {
 		}
 		copy(bf.ContentID[:], s.txID[:])
 		copy(bf.TopicID[:], s.subtreeID[:])
-		b.removeSlot(s.txID)
+		b.removeSlot(s.key)
 		if b.onCompleteBEEF != nil {
 			b.onCompleteBEEF(payload, bf)
 		}
@@ -313,7 +315,7 @@ func (b *Buffer) complete(s *slot) {
 				if b.onHashMismatch != nil {
 					b.onHashMismatch()
 				}
-				b.removeSlot(s.txID)
+				b.removeSlot(s.key)
 				return
 			}
 		}
@@ -328,11 +330,27 @@ func (b *Buffer) complete(s *slot) {
 			SubtreeID: s.subtreeID,
 			Payload:   payload,
 		}
-		b.removeSlot(s.txID)
+		b.removeSlot(s.key)
 		if b.onComplete != nil {
 			b.onComplete(payload, f)
 		}
 	}
+}
+
+// slotKey returns the reassembly map key for a fragment. BRC-124/131/132
+// fragments key on the offset-8 field alone. BRC-148 BEEF fragments MUST key
+// on the (ContentID, TopicID) PAIR: sibling emissions of one object to
+// different topics share a ContentID by construction, so a bare-ContentID key
+// collapses them into one slot and silently delivers only the first topic.
+// Mirrors the pair key the proxy claims at ingress.
+func slotKey(ff *frame.FragFrame) [32]byte {
+	if ff.OrigFrameVer != frame.FrameVerV9 {
+		return ff.TxID
+	}
+	var buf [64]byte
+	copy(buf[:32], ff.TxID[:])      // ContentID
+	copy(buf[32:], ff.SubtreeID[:]) // TopicID
+	return sha256.Sum256(buf[:])
 }
 
 // evictExpired removes all slots whose deadline has passed.

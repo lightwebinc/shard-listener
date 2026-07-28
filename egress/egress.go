@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/objfmt"
 )
 
 const tcpWriteDeadline = 5 * time.Second
@@ -178,13 +179,19 @@ func (s *Sender) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) error {
 }
 
 // SendBeef forwards a BRC-148 BEEF object frame (FrameVer 0x09) to the
-// downstream. When stripHeader is true only the bare BEEF object is sent
-// (one object per datagram; the TopicID is dropped on strip — consumers
-// needing it take whole frames or the delivery record).
+// downstream. When stripHeader is true the BRC-149 DELIVERY RECORD is sent
+// (TopicID ∥ u32 objectLen ∥ object) — never the bare object, which is not
+// self-delimiting and so cannot be framed on a stream. Otherwise the full
+// raw wire buffer is forwarded.
 func (s *Sender) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 	var buf []byte
 	if s.stripHeader {
-		buf = bf.Payload
+		// BRC-149 delivery record — NOT the bare object. A BEEF object is not
+		// self-delimiting without a full structural parse, so a bare object on
+		// a persistent TCP stream cannot be split by the receiver; the record's
+		// explicit length restores framing. It also preserves the TopicID,
+		// which tells the subscriber which of its elected topics matched.
+		buf = objfmt.EncodeBEEFDelivery(bf.TopicID, bf.Payload)
 	} else {
 		buf = raw
 	}

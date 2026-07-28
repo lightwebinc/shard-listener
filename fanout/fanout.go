@@ -16,6 +16,7 @@
 package fanout
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/lightwebinc/shard-common/bundle"
@@ -104,8 +105,9 @@ type Sink struct {
 	engine *shard.Engine
 
 	// beefEngine derives BRC-148 domain-tagged group indices from TopicIDs
-	// for SendBeef's reverse-index routing. Nil ⇒ every consumer is
-	// evaluated via its topic/version election instead (correct, slower).
+	// for SendBeef's reverse-index routing AND for the own-traffic HashKey
+	// comparison. REQUIRED for BEEF delivery: SendBeef returns
+	// ErrBEEFEngineUnset when it is nil rather than mis-routing.
 	beefEngine *shard.PlaneEngine
 
 	mu        sync.RWMutex
@@ -160,6 +162,12 @@ func (s *Sink) Apply(consumers []*Consumer) {
 // subscribed to the frame's shard whose subtree filter admits it. Delivery
 // continues to all matching consumers even if one errors; the first error is
 // returned so the worker still records an egress error.
+// ErrBEEFEngineUnset is returned by SendBeef when no BRC-148 plane engine has
+// been wired. It is a configuration error, never a per-frame condition: the
+// engine is required to derive the domain-tagged group index that both
+// reverse-index routing and own-traffic exclusion depend on.
+var ErrBEEFEngineUnset = errors.New("fanout: BEEF plane engine not set")
+
 // SetBEEFEngine wires the BRC-148 plane engine used to route SendBeef via
 // the shard reverse index. Call before the worker starts.
 func (s *Sink) SetBEEFEngine(pe *shard.PlaneEngine) { s.beefEngine = pe }
@@ -172,16 +180,20 @@ func (s *Sink) SetBEEFEngine(pe *shard.PlaneEngine) { s.beefEngine = pe }
 // IP ∥ banded groupIdx ∥ zeros) — the 32-byte ingredient is ZERO (TopicID is
 // excluded from BEEF flow keys).
 func (s *Sink) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
-	s.mu.RLock()
-	var bucket, allShards []*Consumer
-	var groupIdx uint32
-	if s.beefEngine != nil {
-		groupIdx = s.beefEngine.GroupIndex(&bf.TopicID)
-		bucket = s.byShard[groupIdx]
-		allShards = s.allShards
-	} else {
-		bucket = s.consumers
+	// Without a plane engine there is no group index, so neither the
+	// reverse-index route nor the own-traffic HashKey comparison
+	// (XXH64(ip ∥ bandedGroupIdx ∥ zero32)) can be computed. Falling back to
+	// the full consumer table would bypass group election AND silently
+	// disable own-traffic exclusion + ingress metering — a wrong delivery
+	// that looks like success. Drop instead; SetBEEFEngine is required
+	// wiring for any build that elects BEEF.
+	if s.beefEngine == nil {
+		return ErrBEEFEngineUnset
 	}
+	s.mu.RLock()
+	groupIdx := s.beefEngine.GroupIndex(&bf.TopicID)
+	bucket := s.byShard[groupIdx]
+	allShards := s.allShards
 	s.mu.RUnlock()
 
 	var firstErr error
