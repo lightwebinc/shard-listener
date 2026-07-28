@@ -220,7 +220,7 @@ type Config struct {
 	// ignores the band entirely.
 	BEEFTopics        []string // elected topic names and/or 64-hex TopicIDs; derives joins + topic filter
 	BEEFGroups        []uint32 // explicit plane-relative group indices (aggregator: joined with no topic restriction)
-	BEEFShardBits     uint     // plane shard-bit width (1-12); must match the proxy
+	BEEFShardBits     uint     // plane shard-bit width (0-12, 0 = single group); must match the proxy
 	BEEFVersions      []string // accepted encodings: beef|beefv2|atomic (empty = all)
 	BEEFVerifyContent bool     // debug: verify ContentID == SHA-256d(object) before fan-out
 
@@ -554,7 +554,7 @@ func Load() (*Config, error) {
 
 	// BRC-148 BEEF plane parsing/validation (v1 caps the width at 12).
 	if *beefBits < 1 || *beefBits > 12 {
-		return nil, fmt.Errorf("beef-shard-bits must be in [1, 12], got %d", *beefBits)
+		return nil, fmt.Errorf("beef-shard-bits must be in [0, 12], got %d", *beefBits)
 	}
 	c.BEEFShardBits = *beefBits
 	for _, t := range strings.Split(*beefTopicsFlag, ",") {
