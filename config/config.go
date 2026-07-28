@@ -553,7 +553,7 @@ func Load() (*Config, error) {
 	c.NumGroups = 1 << c.ShardBits
 
 	// BRC-148 BEEF plane parsing/validation (v1 caps the width at 12).
-	if *beefBits < 1 || *beefBits > 12 {
+	if *beefBits > 12 {
 		return nil, fmt.Errorf("beef-shard-bits must be in [0, 12], got %d", *beefBits)
 	}
 	c.BEEFShardBits = *beefBits
