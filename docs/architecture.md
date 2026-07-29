@@ -163,7 +163,12 @@ phantom range.
   sorted registry.
 
 **NACK escalation** on endpoint response:
-- **ACK**: gap is cancelled (`Fill`); `bsl_gaps_suppressed_total` incremented.
+- **ACK**: the Flags byte decides. A **unicast-flagged** ACK (`0x02`) is only a
+  PROMISE — the gap stays pending, the socket keeps draining for the data frame,
+  and a timeout escalates to the next cache. A **bare / multicast-flagged** ACK
+  cancels the gap on TRUST (`Fill`; `bsl_gaps_suppressed_total` incremented), so a
+  repair lost on the same degraded link is never retried. That trust path is why
+  `bsl_gaps_suppressed_total` is not proof of repair — see *Gap counters*.
 - **MISS**: endpoint index is advanced immediately (no backoff). The next sweep
   dispatch targets the next endpoint in the sorted registry snapshot.
 - **THROTTLED** (`MsgType 0x13`): honest-congestion backoff hint from the
@@ -221,8 +226,20 @@ The NACK tracker holds a snapshot of the registry at dispatch time, so evictions
 take effect at the next gap sweep without locking.
 
 Beacon discovery is enabled by default (`-beacon-enabled`). Static seeds
-(`-retry-endpoints`) provide a fallback when no beacons have been received yet
-or after eviction.
+(`-retry-endpoints`) are ALWAYS carried in the registry alongside beacon entries,
+deduped by address (v1.14.0). They sit at `Tier=0xFF` and therefore sort behind
+every beacon entry, so they cost nothing until the discovered caches are
+exhausted. Dropping them whenever any beacon existed (the pre-v1.14.0 behaviour)
+removed only the deepest fallbacks — which are exactly the ones that survive a
+loss UPSTREAM of beacon scope, where every discovered cache is missing the same
+frames.
+
+Because Tier defaults to `0` on every endpoint and the registry sort uses
+`sort.Slice` (not stable), an unconfigured fleet ties on `(0, 128)` and the
+escalation ORDER is arbitrary and not repeatable between runs. Note also that an
+ADVERT says nothing about WHAT an endpoint caches — no group range, shard-bit
+width, plane/band or FrameVer coverage — so a retry that never joined the BEEF
+`0x1000` band is indistinguishable from a healthy one until it answers MISS.
 
 ## Filter
 

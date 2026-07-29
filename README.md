@@ -36,7 +36,7 @@ FF05::<shard>:9001  ──multicast──►  shard-listener  ──UDP/TCP─�
 - **Gap tracking** — per-flow HashKey/SeqNum monotonic counter gap detection (BRC-124/BRC-128)
 - **NACK dispatch** — 64-byte NACK datagrams (HashKey + StartSeq/EndSeq + SubtreeID) with 16-byte ACK/MISS response handling
 - **Beacon discovery** — dynamic retry endpoint registry via BRC-126 ADVERT beacons
-- **Tier escalation** — MISS → immediate advance to next endpoint; ACK → gap cancelled
+- **Tier escalation** — MISS → immediate advance to next endpoint; bare ACK → gap cancelled on trust; unicast-flagged ACK → wait for the data frame, escalate on timeout
 - **Semaphore-bounded dispatch** — concurrent NACK goroutines with configurable limit
 - **Egress UDP or TCP** — strip-header (payload-only) by default, since a downstream node reads a raw BSV tx, not a multicast frame; disable for frame-aware downstreams (domain bridging)
 - **Multicast egress** — optional domain bridging; re-emits filtered frames onto a separate multicast address space with configurable scope, interface, port, and hop limit
