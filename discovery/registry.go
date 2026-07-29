@@ -110,14 +110,30 @@ func (r *Registry) Snapshot() []*EndpointEntry {
 
 	if r.dirty || r.snapshot == nil {
 		// Rebuild: merge beacon entries + seeds.
-		// Seeds are fallback-only: suppress them when any live beacon entry exists
-		// so they don't expand the round-robin pool and dilute tier-based ordering.
+		//
+		// Seeds sit at Tier 0xFF, so they always sort BEHIND every beacon entry
+		// and are only ever reached after the discovered caches have missed.
+		// They are therefore kept even when beacons exist, deduped by address so
+		// a cache that both beacons and is seeded appears once at its real tier.
+		//
+		// Dropping them whenever any beacon existed silently truncated recovery
+		// to beacon scope: with a site-scoped beacon a listener discovers only
+		// its own site's caches, and if the loss is UPSTREAM of that site every
+		// discovered cache is missing exactly the frames being asked for. The
+		// NACK then MISSes its way through the local tier and the gap is evicted
+		// while a remote cache holding the frame sits in the seed list, unasked.
+		// Tier escalation is free (see gapEntry), so carrying the remote seeds
+		// costs nothing until the local tier is exhausted.
 		merged := make([]*EndpointEntry, 0, len(r.entries)+len(r.seeds))
+		seen := make(map[string]struct{}, len(r.entries))
 		for _, e := range r.entries {
 			merged = append(merged, e)
+			seen[e.Addr] = struct{}{}
 		}
-		if len(r.entries) == 0 {
-			merged = append(merged, r.seeds...)
+		for _, s := range r.seeds {
+			if _, dup := seen[s.Addr]; !dup {
+				merged = append(merged, s)
+			}
 		}
 
 		sort.Slice(merged, func(i, j int) bool {

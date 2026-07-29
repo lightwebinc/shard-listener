@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -146,13 +147,13 @@ func TestRegistry_SnapshotSorting(t *testing.T) {
 	r.Upsert(makeAdvert(1, 150, 4))
 	r.Seed([]string{"seed:9300"})
 
-	// Seeds suppressed because beacon entries are present.
+	// Beacon entries sort ahead of the seed, which trails at Tier 0xFF.
 	snap := r.Snapshot()
-	if len(snap) != 4 {
-		t.Fatalf("Snapshot len = %d, want 4 (seed suppressed by beacon entries)", len(snap))
+	if len(snap) != 5 {
+		t.Fatalf("Snapshot len = %d, want 5 (4 beacons + trailing seed)", len(snap))
 	}
 
-	// Expected order: Tier 0 Pref 200, Tier 0 Pref 100, Tier 1 Pref 150, Tier 2 Pref 50
+	// Expected order: Tier 0 Pref 200, Tier 0 Pref 100, Tier 1 Pref 150, Tier 2 Pref 50, seed 0xFF
 	expected := []struct {
 		tier uint8
 		pref uint8
@@ -161,6 +162,7 @@ func TestRegistry_SnapshotSorting(t *testing.T) {
 		{0, 100},
 		{1, 150},
 		{2, 50},
+		{0xFF, 0},
 	}
 	for i, want := range expected {
 		if snap[i].Tier != want.tier || snap[i].Preference != want.pref {
@@ -170,18 +172,44 @@ func TestRegistry_SnapshotSorting(t *testing.T) {
 	}
 }
 
-func TestRegistry_BeaconSuppressesSeed(t *testing.T) {
-	// Seeds are suppressed once any beacon entry is present.
+func TestRegistry_SeedRetainedBehindBeacons(t *testing.T) {
+	// A beacon does NOT suppress the seeds: it only outranks them. Seeds are the
+	// deeper fallback that recovers loss upstream of the beacon's scope, where
+	// every locally-discovered cache is missing the same frames.
 	r := NewRegistry()
 	r.Seed([]string{"seed:9300"})
 	r.Upsert(makeAdvert(0, 128, 1))
 
 	snap := r.Snapshot()
-	if len(snap) != 1 {
-		t.Fatalf("Snapshot len = %d, want 1 (seed suppressed)", len(snap))
+	if len(snap) != 2 {
+		t.Fatalf("Snapshot len = %d, want 2 (beacon + seed fallback)", len(snap))
 	}
 	if snap[0].Tier != 0 {
-		t.Errorf("beacon endpoint should be returned, got tier=%d", snap[0].Tier)
+		t.Errorf("beacon endpoint must sort first, got tier=%d", snap[0].Tier)
+	}
+	if snap[1].Tier != 0xFF || snap[1].Addr != "seed:9300" {
+		t.Errorf("seed must sort last, got tier=%d addr=%q", snap[1].Tier, snap[1].Addr)
+	}
+}
+
+func TestRegistry_SeedDedupedAgainstBeacon(t *testing.T) {
+	// A cache that both beacons and appears in the static list must appear once,
+	// at its real (beacon) tier — not twice.
+	r := NewRegistry()
+	adv := makeAdvert(0, 128, 1)
+	advAddr := fmt.Sprintf("[%s]:%d", adv.NACKAddr, adv.NACKPort)
+	r.Seed([]string{advAddr, "remote:9300"})
+	r.Upsert(adv)
+
+	snap := r.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("Snapshot len = %d, want 2 (deduped beacon + distinct seed)", len(snap))
+	}
+	if snap[0].Addr != advAddr || snap[0].Tier != 0 {
+		t.Errorf("beacon entry wrong: addr=%q tier=%d", snap[0].Addr, snap[0].Tier)
+	}
+	if snap[1].Addr != "remote:9300" {
+		t.Errorf("distinct seed missing, got %q", snap[1].Addr)
 	}
 }
 
