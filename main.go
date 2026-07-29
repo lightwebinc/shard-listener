@@ -610,6 +610,7 @@ func run() error {
 				cfg.VerifyPayloadHash,
 				wLocal.DeliverReassembled,
 			)
+			buf.SetMaxObjectBytesV9(cfg.BEEFMaxObjectBytes)
 			buf.SetStartedHook(rec.ReassemblyStarted)
 			buf.SetAbandonedHook(rec.ReassemblyAbandoned)
 			buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)

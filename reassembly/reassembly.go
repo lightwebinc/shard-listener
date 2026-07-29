@@ -40,6 +40,15 @@ const (
 
 	// DefaultTTL is the default time before an incomplete slot is abandoned.
 	DefaultTTL = 10 * time.Second
+
+	// DefaultMaxObjectBytes bounds one declared original payload (OrigPayloadLen).
+	// The field is ATTACKER-DECLARED: without a bound, one fragment claiming
+	// OrigPayloadLen≈4 GiB with FragTotal=65535 opens a slot whose frags array
+	// alone costs ~1.5 MiB — 4096 such datagrams command gigabytes of heap.
+	// 64 MiB matches the object-stream ceiling (objfmt.DefaultMaxObject); the
+	// BEEF plane (OrigFrameVer 0x09) is separately clamped to the operator's
+	// -beef-max-object-bytes via SetMaxObjectBytesV9.
+	DefaultMaxObjectBytes = 64 << 20
 )
 
 // Callback is invoked when BRC-124/BRC-128 (OrigFrameVer V2) reassembly
@@ -86,6 +95,8 @@ type Buffer struct {
 	onStarted         func()              // metrics hook
 	onHashMismatch    func()              // metrics hook (SHA256d mismatch, V2)
 	onMerkleMismatch  func()              // metrics hook (Merkle root mismatch, V5)
+	maxObject         int                 // general declared-length cap (DefaultMaxObjectBytes)
+	maxObjectV9       int                 // BRC-148 plane cap (-beef-max-object-bytes); 0 = use general
 }
 
 // slot holds the fragments received so far for one TxID.
@@ -124,8 +135,22 @@ func New(maxSlots int, ttl time.Duration, verifyHash bool, cb Callback) *Buffer 
 		ttl:        ttl,
 		verifyHash: verifyHash,
 		onComplete: cb,
+		maxObject:  DefaultMaxObjectBytes,
 	}
 }
+
+// SetMaxObjectBytes overrides the general declared-length bound (0 keeps the
+// default; this is a hard cap on OrigPayloadLen, never an allocation hint).
+func (b *Buffer) SetMaxObjectBytes(n int) {
+	if n > 0 {
+		b.maxObject = n
+	}
+}
+
+// SetMaxObjectBytesV9 sets the BRC-148 object-plane bound: fragments with
+// OrigFrameVer 0x09 are clamped to the operator's -beef-max-object-bytes
+// (matching the ingress bound, BRC-149's MUST), independent of the general cap.
+func (b *Buffer) SetMaxObjectBytesV9(n int) { b.maxObjectV9 = n }
 
 // SetAbandonedHook sets a metrics hook called once per abandoned slot.
 func (b *Buffer) SetAbandonedHook(fn func()) { b.onAbandoned = fn }
@@ -180,6 +205,15 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 		}
 		if ff.OrigPayloadLen == 0 || uint32(ff.FragTotal) > ff.OrigPayloadLen+1 {
 			// FragTotal > payload bytes is impossible under any valid MTU.
+			return
+		}
+		// Declared-length bound BEFORE the slot exists: OrigPayloadLen sizes
+		// both the frags array (via FragTotal) and the final assembly copy.
+		maxObj := b.maxObject
+		if ff.OrigFrameVer == frame.FrameVerV9 && b.maxObjectV9 > 0 {
+			maxObj = b.maxObjectV9
+		}
+		if maxObj > 0 && int(ff.OrigPayloadLen) > maxObj {
 			return
 		}
 

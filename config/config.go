@@ -218,11 +218,12 @@ type Config struct {
 	// BRC-148 BEEF object plane (listener side). The plane is joined when
 	// topics and/or explicit groups are configured; otherwise the listener
 	// ignores the band entirely.
-	BEEFTopics        []string // elected topic names and/or 64-hex TopicIDs; derives joins + topic filter
-	BEEFGroups        []uint32 // explicit plane-relative group indices (aggregator: joined with no topic restriction)
-	BEEFShardBits     uint     // plane shard-bit width (0-12, 0 = single group); must match the proxy
-	BEEFVersions      []string // accepted encodings: beef|beefv2|atomic (empty = all)
-	BEEFVerifyContent bool     // debug: verify ContentID == SHA-256d(object) before fan-out
+	BEEFTopics         []string // elected topic names and/or 64-hex TopicIDs; derives joins + topic filter
+	BEEFGroups         []uint32 // explicit plane-relative group indices (aggregator: joined with no topic restriction)
+	BEEFShardBits      uint     // plane shard-bit width (0-12, 0 = single group); must match the proxy
+	BEEFMaxObjectBytes int      // reassembly bound for OrigFrameVer 0x09 (matches the proxies' ingress bound)
+	BEEFVersions       []string // accepted encodings: beef|beefv2|atomic (empty = all)
+	BEEFVerifyContent  bool     // debug: verify ContentID == SHA-256d(object) before fan-out
 
 	// RebucketRelay marks this listener as an intentional re-bucket relay (it runs
 	// a different ShardBits than the bundles it receives and re-buckets them). When
@@ -519,8 +520,10 @@ func Load() (*Config, error) {
 		"comma-separated BRC-148 overlay topics to elect (names or 64-hex TopicIDs); derives plane joins + the topic filter")
 	beefGroupsFlag := flag.String("beef-groups", envStr("BEEF_GROUPS", ""),
 		"comma-separated plane-relative BRC-148 group indices to join (aggregator mode — no topic restriction)")
-	beefBits := flag.Uint("beef-shard-bits", uint(envInt("BEEF_SHARD_BITS", 4)),
-		"BRC-148 BEEF plane shard-bit width (1–12); must match proxy")
+	beefBits := flag.Uint("beef-shard-bits", uint(envInt("BEEF_SHARD_BITS", 0)),
+		"BRC-148 BEEF plane shard-bit width (0-12, 0 = single group); must match proxy")
+	beefMaxObject := flag.Int("beef-max-object-bytes", envInt("BEEF_MAX_OBJECT_BYTES", 1<<20),
+		"BRC-148/149 per-object byte bound applied to fragment reassembly for OrigFrameVer 0x09 (declared OrigPayloadLen); MUST match the ingress proxies' -beef-max-object-bytes")
 	beefVersionsFlag := flag.String("beef-versions", envStr("BEEF_VERSIONS", ""),
 		"accepted BEEF encodings, comma of beef|beefv2|atomic (empty = all)")
 	flag.BoolVar(&c.BEEFVerifyContent, "beef-verify-content", envBool("BEEF_VERIFY_CONTENT", false),
@@ -557,6 +560,10 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("beef-shard-bits must be in [0, 12], got %d", *beefBits)
 	}
 	c.BEEFShardBits = *beefBits
+	if *beefMaxObject < 1 {
+		return nil, fmt.Errorf("beef-max-object-bytes must be positive, got %d", *beefMaxObject)
+	}
+	c.BEEFMaxObjectBytes = *beefMaxObject
 	for _, t := range strings.Split(*beefTopicsFlag, ",") {
 		if t = strings.TrimSpace(t); t != "" {
 			c.BEEFTopics = append(c.BEEFTopics, t)
