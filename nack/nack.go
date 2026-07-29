@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -147,6 +148,9 @@ type Tracker struct {
 	// globally routable address on a tunnelled fabric so the retry's unicast
 	// return traffic routes back to this node.
 	nackSrc string
+	// seeds is the static retry-endpoint list, retained so SetNACKSource can
+	// re-order it once this node's own address is known.
+	seeds []string
 
 	mu           sync.Mutex
 	flows        map[uint64]*flowState // keyed by hashKey
@@ -157,6 +161,42 @@ type Tracker struct {
 
 	// sem bounds concurrent sendNACK goroutines.
 	sem chan struct{}
+}
+
+// demoteSelf moves this node's OWN retry endpoint to the END of the seed list.
+// A retry co-located with the listener sits behind the SAME link and therefore
+// missed exactly the frames the listener missed — it cannot repair link loss,
+// only the listener's own local drops (socket overflow, where the separate retry
+// process did receive). The tracker escalates ONE endpoint per retry with
+// backoff, so leaving self first spends a gap's whole retry budget on the one
+// endpoint guaranteed not to help, and the remote caches that DO hold the frames
+// are reached only after the gap expires. Demoting rather than removing keeps
+// the local-drop repair case, as a last resort.
+func demoteSelf(endpoints []string, selfAddr string) []string {
+	if selfAddr == "" || len(endpoints) < 2 {
+		return endpoints
+	}
+	remote := make([]string, 0, len(endpoints))
+	var self []string
+	for _, ep := range endpoints {
+		host, _, err := net.SplitHostPort(ep)
+		if err == nil && sameHost(host, selfAddr) {
+			self = append(self, ep)
+			continue
+		}
+		remote = append(remote, ep)
+	}
+	return append(remote, self...)
+}
+
+// sameHost compares address literals, tolerating brackets and differing textual
+// forms of the same IPv6 address.
+func sameHost(a, b string) bool {
+	ia, ib := net.ParseIP(strings.Trim(a, "[]")), net.ParseIP(strings.Trim(b, "[]"))
+	if ia != nil && ib != nil {
+		return ia.Equal(ib)
+	}
+	return strings.EqualFold(strings.Trim(a, "[]"), strings.Trim(b, "[]"))
 }
 
 // New constructs a Tracker. retryEndpoints is the static seed list.
@@ -181,6 +221,7 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 
 	return &Tracker{
 		cfg:           cfg,
+		seeds:         retryEndpoints,
 		iface:         iface,
 		rec:           rec,
 		log:           slog.Default().With("component", "nack"),
@@ -218,7 +259,14 @@ func (t *Tracker) FlowsRefused() uint64 {
 // SetNACKSource binds the NACK socket to a specific source address so NACKs and
 // the retry's unicast return traffic use a globally routable identity. Leave
 // unset (empty) to let the kernel pick the source per-route.
-func (t *Tracker) SetNACKSource(addr string) { t.nackSrc = addr }
+func (t *Tracker) SetNACKSource(addr string) {
+	t.nackSrc = addr
+	// Re-seed with self demoted now that this node's own address is known (the
+	// commercial listener calls this AFTER New).
+	if len(t.seeds) > 0 && t.registry != nil {
+		t.registry.Seed(demoteSelf(t.seeds, addr))
+	}
+}
 
 // Observe is called by the listener worker on every BRC-124/BRC-128 frame.
 // It detects gaps by comparing seqNum against the last known seqNum for the
