@@ -194,14 +194,53 @@ func TestTailProbeHitRecovers(t *testing.T) {
 	if !ok {
 		t.Skip("flow aged out")
 	}
-	if pending != 0 {
-		t.Errorf("pending=%d after ACK; a recovered probe must be retired", pending)
+	// NOTE: pending/probing may legitimately be non-zero here. This fake retry
+	// ACKs but sends no DATA, so lastSeqNum never advances and the flow correctly
+	// re-probes the same SeqNum on the next sweep. The property that actually
+	// separates the ACK path from the MISS path is the miss budget: an ACK must
+	// not consume it, so a flow that is genuinely losing frames keeps probing.
+	_ = pending
+	_ = probing
+	if misses != 0 {
+		t.Errorf("probeMisses=%d after a successful recovery; an ACK must not consume "+
+			"the miss budget or a genuinely lossy flow stops probing", misses)
+	}
+}
+
+// Regression: a probe whose frame returns via the DATA path (Observe auto-fill or
+// out-of-band Fill) must be accounted identically to one closed by an ACK.
+// Live measurement caught this: accounting lived only in the ACK path, so a
+// data-path recovery incremented gaps_suppressed without gaps_detected and drove
+// the repair ratio above 1.0 (observed suppressed=2, detected absent).
+func TestTailProbeAccountedOnDataPathFill(t *testing.T) {
+	fr := newFakeRetry(t, false) // MISS, so only the data path can close it
+	tr := New(probeCfg(), []string{fr.addr()}, nil, nil, nil)
+	tr.Start(t.Context())
+	settleFlow(tr)
+
+	// Force a probe entry to exist deterministically.
+	tr.mu.Lock()
+	fs := tr.flows[42]
+	seq := fs.lastSeqNum + 1
+	fs.pending[seq] = &gapEntry{
+		hashKey: 42, seqNum: seq, groupIdx: 1,
+		deadline: time.Now().Add(time.Second), speculative: true,
+	}
+	fs.probing = seq
+	tr.mu.Unlock()
+
+	// The frame arrives on the data path.
+	tr.Fill(42, seq)
+
+	tr.mu.Lock()
+	_, stillPending := tr.flows[42].pending[seq]
+	probing := tr.flows[42].probing
+	tr.mu.Unlock()
+
+	if stillPending {
+		t.Error("data-path Fill did not close the probe entry")
 	}
 	if probing != 0 {
-		t.Errorf("probing=%d still set after ACK; the flow would never probe again", probing)
-	}
-	if misses != 0 {
-		t.Errorf("probeMisses=%d after a successful recovery; a losing flow must keep "+
-			"its full probe budget", misses)
+		t.Error("probing flag not cleared by data-path fill; the flow would never probe again")
 	}
 }

@@ -368,11 +368,9 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 	}
 
 	// Step 3: auto-fill — close any pending gap whose seqNum matches.
-	if _, found := fs.pending[seqNum]; found {
+	if e, found := fs.pending[seqNum]; found {
 		delete(fs.pending, seqNum)
-		if t.rec != nil {
-			t.rec.GapSuppressed(fs.flowType, srcStr(fs.source))
-		}
+		t.bookFill(fs, e)
 		// Fall through: update lastSeqNum if this advances the stream.
 	}
 
@@ -507,6 +505,31 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 	fs.contiguous = 0 // a real gap breaks the contiguous run
 }
 
+// bookFill records the metrics for a pending entry being closed, whatever path
+// closed it (ACK response, auto-fill in Observe, or out-of-band Fill).
+//
+// A recovered PROBE is booked as detected AND suppressed at the same instant:
+// detection is deliberately never booked at probe issue, so a MISS leaves no
+// phantom loss behind, which means success is the only place the real loss it
+// uncovered can be counted. Every fill path must go through here — an earlier
+// version accounted only in the ACK path, so a probe whose frame returned via the
+// DATA path incremented suppressed without detected and drove the repair ratio
+// above 1.0. Caller must hold t.mu.
+func (t *Tracker) bookFill(fs *flowState, e *gapEntry) {
+	if fs.probing == e.seqNum {
+		fs.probing = 0
+	}
+	if t.rec == nil {
+		return
+	}
+	if e.speculative {
+		fs.probeMisses = 0
+		t.rec.TailProbeRecovered(fs.flowType, srcStr(fs.source))
+		t.rec.GapDetected(fs.flowType, srcStr(fs.source))
+	}
+	t.rec.GapSuppressed(fs.flowType, srcStr(fs.source))
+}
+
 // RequestGaps registers explicit missing SeqNums on a flow and dispatches NACKs
 // for them, for losses discovered by a means OTHER than a sequence discontinuity.
 //
@@ -585,11 +608,9 @@ func (t *Tracker) Fill(hashKey, seqNum uint64) {
 	defer t.mu.Unlock()
 
 	if fs, ok := t.flows[hashKey]; ok {
-		if _, found := fs.pending[seqNum]; found {
+		if e, found := fs.pending[seqNum]; found {
 			delete(fs.pending, seqNum)
-			if t.rec != nil {
-				t.rec.GapSuppressed(fs.flowType, srcStr(fs.source))
-			}
+			t.bookFill(fs, e)
 		}
 	}
 }
@@ -1081,24 +1102,11 @@ func (t *Tracker) cancelGap(e *gapEntry) {
 	defer t.mu.Unlock()
 
 	if fs, ok := t.flows[e.hashKey]; ok {
-		if _, found := fs.pending[e.seqNum]; found {
+		if pend, found := fs.pending[e.seqNum]; found {
 			delete(fs.pending, e.seqNum)
-			if fs.probing == e.seqNum {
-				fs.probing = 0
-			}
-			if t.rec != nil {
-				if e.speculative {
-					// The probe returned a real frame: tail loss that no successor
-					// frame would ever have revealed. Count it as BOTH detected and
-					// suppressed so the repair ratio stays coherent — detection is
-					// deliberately booked here, at success, and never at probe
-					// issue, so a MISS leaves no phantom unrecovered gap behind.
-					fs.probeMisses = 0
-					t.rec.TailProbeRecovered(flowLabel(e.groupIdx), srcStr(e.source))
-					t.rec.GapDetected(flowLabel(e.groupIdx), srcStr(e.source))
-				}
-				t.rec.GapSuppressed(flowLabel(e.groupIdx), srcStr(e.source))
-			}
+			// e is a shallow copy taken at dispatch; the stored entry is
+			// authoritative for the speculative flag.
+			t.bookFill(fs, pend)
 		}
 	}
 }
