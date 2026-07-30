@@ -34,7 +34,36 @@ type TrackerConfig struct {
 	// loss — the flow re-baselines instead of registering (and NACK-storming) a
 	// phantom gap range. 0 = default 4096.
 	MaxForwardJump uint64
+	// TailProbe enables speculative probing of the next expected SeqNum on a flow
+	// that has gone quiet. Gap detection is otherwise INFERENTIAL — frame N is only
+	// known lost when N+1 arrives — so the last frames before a sender goes idle,
+	// and losses on very low-rate flows, are invisible no matter how good the
+	// retry path is. A probe asks the question the missing successor frame would
+	// have answered. It needs no protocol addition: BRC-126 already defines a MISS
+	// response, so a probe for a SeqNum that was never emitted is answered cheaply
+	// and definitively.
+	TailProbe bool
+	// TailProbeIdleFactor multiplies the flow's smoothed inter-arrival estimate to
+	// decide when silence is abnormal. Too low and healthy jitter triggers probes;
+	// too high and the tail sits unrecovered. 0 = default 4.
+	TailProbeIdleFactor float64
+	// TailProbeMinIdle floors the idle threshold so a fast flow (sub-millisecond
+	// inter-arrival) does not probe continuously. 0 = default 500ms.
+	TailProbeMinIdle time.Duration
+	// TailProbeMaxMisses stops probing a flow after this many consecutive MISS
+	// answers — the sender is genuinely idle, not lossy. Reset by new traffic.
+	// 0 = default 3.
+	TailProbeMaxMisses int
 }
+
+// Tail-probe defaults. Chosen so a probe costs at most a handful of 64-byte
+// NACKs per flow per idle period and then stops — the mechanism must not turn
+// every idle flow into standing traffic.
+const (
+	defaultTailProbeIdleFactor = 4.0
+	defaultTailProbeMinIdle    = 500 * time.Millisecond
+	defaultTailProbeMaxMisses  = 3
+)
 
 // groupBlockBroadcast is the reserved group index for BRC-131 block control frames.
 // Mirrors shard.GroupBlockBroadcast = 0xFFFE without importing the shard package.
@@ -96,6 +125,13 @@ type flowState struct {
 	// re-baseline only NACK-recovers its transition tail once the rate estimate is
 	// trustworthy (contiguous >= minContiguousForRecover); reset on any gap/re-baseline.
 	contiguous uint64
+	// probeMisses counts consecutive tail probes answered MISS. Reset by any new
+	// frame, so a flow that goes quiet, is confirmed idle, then resumes, is
+	// eligible to probe again on its next tail.
+	probeMisses int
+	// probing is the SeqNum of the in-flight tail probe (0 = none), so a slow
+	// probe is not re-issued on every 100ms sweep.
+	probing uint64
 }
 
 // minContiguousForRecover is how many consecutive in-order frames must have settled the
@@ -125,6 +161,11 @@ type gapEntry struct {
 	nextAttempt time.Time
 	deadline    time.Time // absolute eviction deadline
 	endpointIdx int       // index into registry snapshot, clamped to the deepest tier
+	// speculative marks a tail probe: a NACK for a SeqNum that may never have been
+	// emitted. It is a QUESTION, not an observed loss, so it must never count as a
+	// detected gap — otherwise every idle flow inflates the unrecovered ratio with
+	// phantom losses and the repair alerts fire on healthy fabrics.
+	speculative bool
 }
 
 // Tracker is the gap state machine. Construct with [New] and call [Start] to
@@ -315,6 +356,10 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 	}
 	elapsed := now.Sub(fs.lastSeen)
 	fs.lastSeen = now
+	// Traffic resumed: a flow previously confirmed idle becomes eligible to probe
+	// its next tail. Without this reset, a flow that goes quiet once would never
+	// be probed again for the rest of its life.
+	fs.probeMisses = 0
 	// Sources are stable per flow. Keep the latest non-empty source so a recovered
 	// frame re-injected by the tracker (which carries no live source) does not
 	// clobber the real source attribution.
@@ -462,6 +507,73 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 	fs.contiguous = 0 // a real gap breaks the contiguous run
 }
 
+// RequestGaps registers explicit missing SeqNums on a flow and dispatches NACKs
+// for them, for losses discovered by a means OTHER than a sequence discontinuity.
+//
+// The motivating case is an incomplete reassembly slot: fragments are cached and
+// NACK-recoverable individually, but losing a trailing fragment loses the whole
+// object with no successor frame to expose it, so without this the listener
+// discards objects it could have asked for. These are REAL observed losses (the
+// slot proves the object was in flight), so unlike a tail probe they are counted
+// as detected gaps.
+//
+// Safe to call for a flow the tracker has never seen; it is created on demand.
+func (t *Tracker) RequestGaps(hashKey uint64, groupIdx uint32, subtreeID [32]byte, seqs []uint64) {
+	if len(seqs) == 0 {
+		return
+	}
+	t.mu.Lock()
+	now := time.Now()
+	fs, ok := t.flows[hashKey]
+	if !ok {
+		if t.cfg.MaxFlows > 0 && len(t.flows) >= t.cfg.MaxFlows {
+			t.mu.Unlock()
+			return
+		}
+		fs = &flowState{
+			groupIdx:  groupIdx,
+			subtreeID: subtreeID,
+			flowType:  flowLabel(groupIdx),
+			pending:   make(map[uint64]*gapEntry),
+			lastSeen:  now,
+		}
+		t.flows[hashKey] = fs
+	}
+	queued := make([]*gapEntry, 0, len(seqs))
+	for _, seq := range seqs {
+		if _, exists := fs.pending[seq]; exists {
+			continue
+		}
+		jitter := time.Duration(rand.Int64N(int64(t.cfg.JitterMax) + 1))
+		e := &gapEntry{
+			hashKey:     hashKey,
+			seqNum:      seq,
+			groupIdx:    groupIdx,
+			subtreeID:   subtreeID,
+			source:      fs.source,
+			nextAttempt: now.Add(jitter),
+			deadline:    now.Add(t.cfg.GapTTL),
+		}
+		fs.pending[seq] = e
+		cp := *e
+		queued = append(queued, &cp)
+		if t.rec != nil {
+			t.rec.GapDetected(fs.flowType, srcStr(fs.source))
+		}
+	}
+	t.mu.Unlock()
+
+	// Enqueue outside the lock; a full queue simply defers to the next sweep,
+	// which will pick these up via their nextAttempt.
+	for _, e := range queued {
+		select {
+		case t.nackQueue <- e:
+		default:
+			return
+		}
+	}
+}
+
 // Fill cancels a pending gap when a retransmitted frame arrives out-of-band
 // and the caller has (hashKey, seqNum) but not the full frame. Observe handles
 // the same fill check automatically when the retransmit is processed normally.
@@ -517,23 +629,32 @@ func (t *Tracker) sweepOnce(now time.Time) {
 		for seq, e := range fs.pending {
 			if now.After(e.deadline) {
 				delete(fs.pending, seq)
-				if t.rec != nil {
+				// An unanswered PROBE is not a lost frame — it is an unanswered
+				// question. Counting it as unrecovered would manufacture loss on
+				// every quiet flow and make the repair-ratio alerts unusable.
+				if e.speculative {
+					t.retireProbe(fs, seq)
+				} else if t.rec != nil {
 					t.rec.GapUnrecovered(fs.flowType, srcStr(e.source))
 				}
 				t.log.Debug("gap evicted (TTL)",
 					"hash_key", hk,
 					"seq_num", e.seqNum,
+					"speculative", e.speculative,
 				)
 				continue
 			}
 			if e.failRounds >= t.cfg.MaxRetries {
 				delete(fs.pending, seq)
-				if t.rec != nil {
+				if e.speculative {
+					t.retireProbe(fs, seq)
+				} else if t.rec != nil {
 					t.rec.GapUnrecovered(fs.flowType, srcStr(e.source))
 				}
 				t.log.Debug("gap evicted (retries)",
 					"hash_key", hk,
 					"seq_num", e.seqNum,
+					"speculative", e.speculative,
 				)
 				continue
 			}
@@ -551,10 +672,120 @@ func (t *Tracker) sweepOnce(now time.Time) {
 			}
 		}
 
+		// Tail probe: a flow with no pending gaps that has gone abnormally quiet
+		// may be sitting on a lost tail that no successor frame will ever reveal.
+		if len(fs.pending) == 0 {
+			t.maybeProbeTail(hk, fs, now)
+		}
+
 		// Evict idle flows with no pending gaps.
 		if len(fs.pending) == 0 && now.Sub(fs.lastSeen) > flowTTL {
 			delete(t.flows, hk)
 		}
+	}
+}
+
+// maybeProbeTail issues a speculative NACK for the next expected SeqNum when a
+// flow has been quiet for materially longer than its own established rhythm.
+// Caller must hold t.mu.
+//
+// The idle threshold is derived from the flow's OWN smoothed inter-arrival
+// (ewmaIPG) rather than a fixed timeout, because a "long silence" means nothing
+// in absolute terms: 200ms is unremarkable on a 1-per-second flow and a total
+// stall on a 10k/s one. That is also why the probe is gated on the same
+// contiguity guard the re-baseline path uses — until the estimate has settled,
+// silence cannot be distinguished from an unestablished rate.
+func (t *Tracker) maybeProbeTail(hashKey uint64, fs *flowState, now time.Time) {
+	if !t.cfg.TailProbe || fs.probing != 0 {
+		return
+	}
+	// An unsettled rate estimate cannot tell an abnormal silence from a normal one.
+	if fs.ewmaIPG <= 0 || fs.contiguous < minContiguousForRecover {
+		return
+	}
+	maxMisses := t.cfg.TailProbeMaxMisses
+	if maxMisses <= 0 {
+		maxMisses = defaultTailProbeMaxMisses
+	}
+	// Confirmed idle: stop asking until the sender speaks again.
+	if fs.probeMisses >= maxMisses {
+		return
+	}
+	factor := t.cfg.TailProbeIdleFactor
+	if factor <= 0 {
+		factor = defaultTailProbeIdleFactor
+	}
+	minIdle := t.cfg.TailProbeMinIdle
+	if minIdle <= 0 {
+		minIdle = defaultTailProbeMinIdle
+	}
+	threshold := time.Duration(float64(fs.ewmaIPG) * factor)
+	if threshold < minIdle {
+		threshold = minIdle
+	}
+	if now.Sub(fs.lastSeen) < threshold {
+		return
+	}
+
+	seq := fs.lastSeqNum + 1
+	fs.probing = seq
+	e := &gapEntry{
+		hashKey:     hashKey,
+		seqNum:      seq,
+		groupIdx:    fs.groupIdx,
+		subtreeID:   fs.subtreeID,
+		source:      fs.source,
+		nextAttempt: now,
+		// A probe gets the ordinary gap lifetime: if it turns out to be a real
+		// loss it should be retried like any other.
+		deadline:    now.Add(t.cfg.GapTTL),
+		speculative: true,
+	}
+	fs.pending[seq] = e
+	if t.rec != nil {
+		t.rec.TailProbeSent(flowLabel(fs.groupIdx), srcStr(fs.source))
+	}
+	t.log.Debug("tail probe issued",
+		"hash_key", hashKey, "seq_num", seq,
+		"idle", now.Sub(fs.lastSeen), "ewma_ipg", fs.ewmaIPG)
+
+	entry := *e
+	select {
+	case t.nackQueue <- &entry:
+	default:
+		// Queue full — drop the probe entirely rather than let speculative work
+		// displace real gap recovery. It will be reconsidered next sweep.
+		delete(fs.pending, seq)
+		fs.probing = 0
+	}
+}
+
+// retireProbe clears in-flight probe state for a flow and counts the attempt
+// against the consecutive-miss budget. Caller must hold t.mu.
+func (t *Tracker) retireProbe(fs *flowState, seq uint64) {
+	if fs.probing == seq {
+		fs.probing = 0
+	}
+	fs.probeMisses++
+}
+
+// probeMissed retires a tail probe that was answered MISS: the SeqNum was never
+// emitted, so the flow was simply idle. No gap is recorded — nothing was lost.
+func (t *Tracker) probeMissed(e *gapEntry) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	fs, ok := t.flows[e.hashKey]
+	if !ok {
+		return
+	}
+	delete(fs.pending, e.seqNum)
+	if fs.probing == e.seqNum {
+		fs.probing = 0
+	}
+	fs.probeMisses++
+	if t.rec != nil {
+		t.rec.TailProbeMiss(flowLabel(fs.groupIdx), srcStr(fs.source))
 	}
 }
 
@@ -694,6 +925,14 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 				t.log.Debug("NACK: ACK received", "endpoint", endpoint.Addr, "seq_num", e.seqNum, "flags", resp.Flags)
 				return
 			case MsgTypeMISS:
+				if e.speculative {
+					// A probe MISS is a definitive answer: that SeqNum does not
+					// exist. Escalating tiers would only ask other caches about a
+					// frame that was never sent, so retire the probe here.
+					t.log.Debug("tail probe: MISS (flow idle, no loss)", "endpoint", endpoint.Addr, "seq_num", e.seqNum)
+					t.probeMissed(e)
+					return
+				}
 				t.log.Debug("NACK: MISS received, advancing endpoint", "endpoint", endpoint.Addr, "seq_num", e.seqNum)
 				t.advanceEndpoint(e, true, len(snap))
 				return
@@ -844,7 +1083,20 @@ func (t *Tracker) cancelGap(e *gapEntry) {
 	if fs, ok := t.flows[e.hashKey]; ok {
 		if _, found := fs.pending[e.seqNum]; found {
 			delete(fs.pending, e.seqNum)
+			if fs.probing == e.seqNum {
+				fs.probing = 0
+			}
 			if t.rec != nil {
+				if e.speculative {
+					// The probe returned a real frame: tail loss that no successor
+					// frame would ever have revealed. Count it as BOTH detected and
+					// suppressed so the repair ratio stays coherent — detection is
+					// deliberately booked here, at success, and never at probe
+					// issue, so a MISS leaves no phantom unrecovered gap behind.
+					fs.probeMisses = 0
+					t.rec.TailProbeRecovered(flowLabel(e.groupIdx), srcStr(e.source))
+					t.rec.GapDetected(flowLabel(e.groupIdx), srcStr(e.source))
+				}
 				t.rec.GapSuppressed(flowLabel(e.groupIdx), srcStr(e.source))
 			}
 		}

@@ -714,6 +714,10 @@ func (w *Worker) processFrame(raw []byte) {
 // the NACK tracker's metric label (the flow identity is the fragment
 // HashKey). It mirrors the per-OrigFrameVer routing the retry endpoint
 // applies to the same cached fragment.
+// FragGroupIdx exposes the fragment group resolver to the reassembly buffer so an
+// incomplete slot can name its flow when requesting the fragments it never got.
+func (w *Worker) FragGroupIdx(ff *frame.FragFrame) uint32 { return w.fragGroupIdx(ff) }
+
 func (w *Worker) fragGroupIdx(ff *frame.FragFrame) uint32 {
 	switch ff.OrigFrameVer {
 	case frame.FrameVerV4, frame.FrameVerV6:

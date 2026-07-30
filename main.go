@@ -199,6 +199,11 @@ func run() error {
 				GapTTL:         cfg.NACKGapTTL,
 				MaxFlows:       cfg.NACKMaxFlows,
 				MaxForwardJump: uint64(cfg.NACKMaxForwardJump),
+
+				TailProbe:           cfg.NACKTailProbe,
+				TailProbeIdleFactor: cfg.NACKTailProbeIdleFactor,
+				TailProbeMinIdle:    cfg.NACKTailProbeMinIdle,
+				TailProbeMaxMisses:  cfg.NACKTailProbeMaxMisses,
 			},
 			cfg.RetryEndpoints,
 			cfg.Iface,
@@ -613,6 +618,16 @@ func run() error {
 			buf.SetMaxObjectBytesV9(cfg.BEEFMaxObjectBytes)
 			buf.SetStartedHook(rec.ReassemblyStarted)
 			buf.SetAbandonedHook(rec.ReassemblyAbandoned)
+			// Tail loss on the object plane: a slot that expires holding SOME
+			// fragments proves the object was in flight, so the fragments it never
+			// got are real losses. Fragments are individually cached and
+			// NACK-recoverable, so ask for them instead of discarding the object.
+			if tracker != nil {
+				buf.SetGroupIdxFunc(wLocal.FragGroupIdx)
+				buf.SetIncompleteHook(func(hashKey uint64, groupIdx uint32, subtreeID [32]byte, missing []uint64) {
+					tracker.RequestGaps(hashKey, groupIdx, subtreeID, missing)
+				})
+			}
 			buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)
 			buf.SetBlockCallback(wLocal.DeliverReassembledBlock)
 			buf.SetSubtreeDataCallback(wLocal.DeliverReassembledSubtreeData)

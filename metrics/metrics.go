@@ -89,13 +89,16 @@ type Recorder struct {
 	headerEgressErrors metric.Int64Counter
 
 	// NACK / gap counters
-	gapsDetected     metric.Int64Counter
-	gapsSuppressed   metric.Int64Counter // cancelled by retransmit fill or ACK response
-	flowsRefused     metric.Int64Counter // new flows skipped at the MaxFlows flood-guard cap
-	seqRebaselines   metric.Int64Counter // flows re-baselined on an implausible SeqNum jump (emitter change)
-	nacksDispatched  metric.Int64Counter
-	nacksThrottled   metric.Int64Counter // held after a THROTTLED congestion signal
-	nacksUnrecovered metric.Int64Counter // retries exhausted or TTL exceeded
+	tailProbesSent      metric.Int64Counter
+	tailProbesRecovered metric.Int64Counter
+	tailProbesMiss      metric.Int64Counter
+	gapsDetected        metric.Int64Counter
+	gapsSuppressed      metric.Int64Counter // cancelled by retransmit fill or ACK response
+	flowsRefused        metric.Int64Counter // new flows skipped at the MaxFlows flood-guard cap
+	seqRebaselines      metric.Int64Counter // flows re-baselined on an implausible SeqNum jump (emitter change)
+	nacksDispatched     metric.Int64Counter
+	nacksThrottled      metric.Int64Counter // held after a THROTTLED congestion signal
+	nacksUnrecovered    metric.Int64Counter // retries exhausted or TTL exceeded
 
 	// BRC-127 subtree group announce counters
 	subtreeGroupAnnouncesReceived metric.Int64Counter
@@ -314,6 +317,18 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.headerEgressErrors, err = meter.Int64Counter("bsl_header_egress_errors_total",
 		metric.WithDescription("Errors sending to header egress downstream")); err != nil {
+		return nil, err
+	}
+	if r.tailProbesSent, err = meter.Int64Counter("bsl_tail_probes_sent_total",
+		metric.WithDescription("speculative NACKs for the next expected SeqNum on an idle flow (BRC-126 tail-loss probe)")); err != nil {
+		return nil, err
+	}
+	if r.tailProbesRecovered, err = meter.Int64Counter("bsl_tail_probes_recovered_total",
+		metric.WithDescription("tail probes that returned a real frame — loss that no successor frame would ever have revealed")); err != nil {
+		return nil, err
+	}
+	if r.tailProbesMiss, err = meter.Int64Counter("bsl_tail_probes_miss_total",
+		metric.WithDescription("tail probes answered MISS — the flow was genuinely idle, not lossy")); err != nil {
 		return nil, err
 	}
 	if r.gapsDetected, err = meter.Int64Counter("bsl_gaps_detected_total",
@@ -808,4 +823,27 @@ func (r *Recorder) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = fmt.Fprintf(w, `{"status":"starting","workers_ready":%d,"workers_total":%d}`, ready, total)
+}
+
+// TailProbeSent records a speculative NACK issued for the next expected SeqNum
+// on a flow that has gone quiet. Unlike a gap, a probe is a QUESTION, not an
+// observed loss — it must never be counted as a detected gap or the unrecovered
+// ratio inflates with phantom losses on every idle flow.
+func (r *Recorder) TailProbeSent(flow, source string) {
+	r.tailProbesSent.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
+}
+
+// TailProbeRecovered records a probe that returned a real frame: tail loss that
+// no successor frame would ever have revealed.
+func (r *Recorder) TailProbeRecovered(flow, source string) {
+	r.tailProbesRecovered.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
+}
+
+// TailProbeMiss records a probe answered MISS — the flow was simply idle. This
+// is the expected steady-state outcome and is the cost of the mechanism.
+func (r *Recorder) TailProbeMiss(flow, source string) {
+	r.tailProbesMiss.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }

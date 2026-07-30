@@ -92,11 +92,20 @@ type Buffer struct {
 	onCompleteSubtree SubtreeDataCallback // V5 (FrameVerV5) completion
 	onCompleteBEEF    BEEFCallback        // V9 (FrameVerV9) completion
 	onAbandoned       func()              // metrics hook: one call per evicted slot
-	onStarted         func()              // metrics hook
-	onHashMismatch    func()              // metrics hook (SHA256d mismatch, V2)
-	onMerkleMismatch  func()              // metrics hook (Merkle root mismatch, V5)
-	maxObject         int                 // general declared-length cap (DefaultMaxObjectBytes)
-	maxObjectV9       int                 // BRC-148 plane cap (-beef-max-object-bytes); 0 = use general
+	// onIncomplete is called for a slot evicted with SOME fragments present,
+	// carrying the flow key and the SeqNums that never arrived. It is what turns
+	// an abandoned object into a recovery request: losing one trailing fragment
+	// loses the WHOLE object, and no successor frame reveals it, so without this
+	// the listener silently discards objects it could have asked for.
+	onIncomplete func(hashKey uint64, groupIdx uint32, subtreeID [32]byte, missing []uint64)
+	// groupIdxFn resolves a fragment's shard group index. Injected so this package
+	// stays free of shard semantics.
+	groupIdxFn       func(*frame.FragFrame) uint32
+	onStarted        func() // metrics hook
+	onHashMismatch   func() // metrics hook (SHA256d mismatch, V2)
+	onMerkleMismatch func() // metrics hook (Merkle root mismatch, V5)
+	maxObject        int    // general declared-length cap (DefaultMaxObjectBytes)
+	maxObjectV9      int    // BRC-148 plane cap (-beef-max-object-bytes); 0 = use general
 }
 
 // slot holds the fragments received so far for one TxID.
@@ -110,9 +119,22 @@ type slot struct {
 	fragTotal      uint16
 	received       uint16   // count of distinct fragments received
 	frags          [][]byte // indexed by FragIndex; nil = not yet received
-	deadline       time.Time
-	origFrameVer   byte // from the first fragment received (0/2=V2, 4=V4, 5=V5)
-	msgType        byte // frame-type-specific message type preserved from byte 7
+	// fragSeq holds each received fragment's own SeqNum, indexed by FragIndex
+	// (0 = not received). Without it an incomplete slot knows WHICH FragIndex is
+	// missing but has no way back to the SeqNum a NACK must name — the slot's
+	// scalar seqNum belongs to whichever fragment happened to arrive first.
+	// Interpolating between known neighbours (below) needs only per-object SeqNum
+	// monotonicity; deriving from a single base index would additionally assume
+	// strictly consecutive per-object emission, which the fragmenter does not
+	// guarantee.
+	fragSeq []uint64
+	// groupIdx is the flow's shard group, supplied by the caller (this package
+	// deliberately knows nothing about shard group semantics). Needed so a recovery
+	// request for missing fragments names the correct flow.
+	groupIdx     uint32
+	deadline     time.Time
+	origFrameVer byte // from the first fragment received (0/2=V2, 4=V4, 5=V5)
+	msgType      byte // frame-type-specific message type preserved from byte 7
 }
 
 // New creates a Buffer.
@@ -154,6 +176,29 @@ func (b *Buffer) SetMaxObjectBytesV9(n int) { b.maxObjectV9 = n }
 
 // SetAbandonedHook sets a metrics hook called once per abandoned slot.
 func (b *Buffer) SetAbandonedHook(fn func()) { b.onAbandoned = fn }
+
+// SetIncompleteHook installs the callback invoked when a partially-filled slot is
+// evicted. Fragments are cached and NACK-recoverable individually (each carries
+// its own HashKey/SeqNum), so the missing ones can be requested exactly like any
+// other gap.
+func (b *Buffer) SetIncompleteHook(fn func(hashKey uint64, groupIdx uint32, subtreeID [32]byte, missing []uint64)) {
+	b.onIncomplete = fn
+}
+
+// SetGroupIdxFunc supplies the shard group resolver used to label a slot's flow.
+// Without it slots carry group 0 and a recovery request cannot name the flow.
+func (b *Buffer) SetGroupIdxFunc(fn func(*frame.FragFrame) uint32) { b.groupIdxFn = fn }
+
+// notifyIncomplete reports the SeqNums an evicted slot never received. Must be
+// called with b.mu held, BEFORE the slot is removed.
+func (b *Buffer) notifyIncomplete(s *slot) {
+	if b.onIncomplete == nil {
+		return
+	}
+	if missing := s.missingSeqNums(); len(missing) > 0 {
+		b.onIncomplete(s.hashKey, s.groupIdx, s.subtreeID, missing)
+	}
+}
 
 // SetStartedHook sets a metrics hook called when a new slot is opened.
 func (b *Buffer) SetStartedHook(fn func()) { b.onStarted = fn }
@@ -231,6 +276,8 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 			origPayloadLen: ff.OrigPayloadLen,
 			fragTotal:      ff.FragTotal,
 			frags:          make([][]byte, ff.FragTotal),
+			fragSeq:        make([]uint64, ff.FragTotal),
+			groupIdx:       groupIdxOf(b.groupIdxFn, ff),
 			deadline:       now.Add(b.ttl),
 			origFrameVer:   ff.OrigFrameVer,
 			msgType:        ff.MsgType,
@@ -255,6 +302,7 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 	cp := make([]byte, len(ff.FragData))
 	copy(cp, ff.FragData)
 	s.frags[ff.FragIndex] = cp
+	s.fragSeq[ff.FragIndex] = ff.SeqNum
 	s.received++
 
 	if s.received < s.fragTotal {
@@ -389,6 +437,50 @@ func slotKey(ff *frame.FragFrame) [32]byte {
 
 // evictExpired removes all slots whose deadline has passed.
 // Must be called with b.mu held.
+// missingSeqNums returns the SeqNums of fragments this slot never received.
+//
+// A fragment's SeqNum is recovered by interpolating from the nearest RECEIVED
+// fragment: SeqNums within one object are monotonic in FragIndex, so for a known
+// fragment at index j with SeqNum S, the fragment at index i is S+(i-j). Scanning
+// from the nearest neighbour keeps that extrapolation as short as possible, which
+// matters if the origin ever interleaves other frames into the same flow — a long
+// extrapolation would drift, a short one stays exact for the common contiguous case.
+//
+// Returns nil if no fragment was ever received (nothing to anchor on).
+func (s *slot) missingSeqNums() []uint64 {
+	if s.received == 0 {
+		return nil
+	}
+	out := make([]uint64, 0, int(s.fragTotal)-int(s.received))
+	for i := 0; i < int(s.fragTotal); i++ {
+		if s.frags[i] != nil {
+			continue
+		}
+		// Nearest received neighbour, preferring the closest on either side.
+		best := -1
+		for d := 1; d < int(s.fragTotal); d++ {
+			if i-d >= 0 && s.frags[i-d] != nil {
+				best = i - d
+				break
+			}
+			if i+d < int(s.fragTotal) && s.frags[i+d] != nil {
+				best = i + d
+				break
+			}
+		}
+		if best < 0 {
+			continue
+		}
+		base := s.fragSeq[best]
+		delta := int64(i - best)
+		if int64(base)+delta < 0 {
+			continue
+		}
+		out = append(out, uint64(int64(base)+delta))
+	}
+	return out
+}
+
 func (b *Buffer) evictExpired(now time.Time) {
 	for _, txID := range b.insertOrder {
 		s, ok := b.slots[txID]
@@ -396,6 +488,7 @@ func (b *Buffer) evictExpired(now time.Time) {
 			continue
 		}
 		if now.After(s.deadline) {
+			b.notifyIncomplete(s)
 			if b.onAbandoned != nil {
 				b.onAbandoned()
 			}
@@ -416,6 +509,9 @@ func (b *Buffer) evictExpired(now time.Time) {
 func (b *Buffer) evictOldest() {
 	for i, txID := range b.insertOrder {
 		if _, ok := b.slots[txID]; ok {
+			// No incomplete-notify here: this is capacity pressure, and asking for
+			// missing fragments while already at the slot cap adds load exactly
+			// when there is none to spare. TTL expiry is the tail-loss path.
 			if b.onAbandoned != nil {
 				b.onAbandoned()
 			}
@@ -462,6 +558,7 @@ func (b *Buffer) Purge() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for txID := range b.slots {
+		// No incomplete-notify: a purge is a deliberate reset, not observed loss.
 		if b.onAbandoned != nil {
 			b.onAbandoned()
 		}
@@ -479,4 +576,14 @@ func validateFragment(ff *frame.FragFrame) error {
 		return fmt.Errorf("FragIndex=%d >= FragTotal=%d", ff.FragIndex, ff.FragTotal)
 	}
 	return nil
+}
+
+// groupIdxOf resolves a fragment's group index via the injected resolver, or 0
+// when none is installed (recovery of that slot's tail is then skipped rather
+// than mislabelled).
+func groupIdxOf(fn func(*frame.FragFrame) uint32, ff *frame.FragFrame) uint32 {
+	if fn == nil {
+		return 0
+	}
+	return fn(ff)
 }

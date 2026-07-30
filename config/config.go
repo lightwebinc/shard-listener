@@ -169,13 +169,19 @@ type Config struct {
 	SSMBootstrapRefresh    time.Duration
 
 	// NACK
-	NACKJitterMax      time.Duration
-	NACKBackoffBase    time.Duration
-	NACKBackoffMax     time.Duration
-	NACKMaxRetries     int
-	NACKGapTTL         time.Duration
-	NACKMaxFlows       int
-	NACKMaxForwardJump int
+	NACKJitterMax   time.Duration
+	NACKBackoffBase time.Duration
+	NACKBackoffMax  time.Duration
+	NACKMaxRetries  int
+	NACKGapTTL      time.Duration
+	NACKMaxFlows    int
+	// BRC-126 tail probe: closes the tail-loss blind spot without a protocol
+	// addition by reusing the existing MISS response.
+	NACKTailProbe           bool
+	NACKTailProbeIdleFactor float64
+	NACKTailProbeMinIdle    time.Duration
+	NACKTailProbeMaxMisses  int
+	NACKMaxForwardJump      int
 
 	// Multicast egress (domain bridging)
 	MCEgressEnabled  bool
@@ -395,6 +401,14 @@ func Load() (*Config, error) {
 		"max failed recovery rounds per gap before declaring unrecoverable (tier-escalation hops are free)")
 	flag.DurationVar(&c.NACKGapTTL, "nack-gap-ttl", envDuration("NACK_GAP_TTL", 10*time.Minute),
 		"max time to hold a gap entry before evicting (~Bitcoin block interval)")
+	flag.BoolVar(&c.NACKTailProbe, "nack-tail-probe", envBool("NACK_TAIL_PROBE", true),
+		"BRC-126: speculatively NACK the next expected SeqNum on a flow that has gone quiet. Gap detection is otherwise inferential (frame N is only known lost when N+1 arrives), so the last frames before a sender idles are invisible. Uses the existing MISS response — no protocol change")
+	flag.Float64Var(&c.NACKTailProbeIdleFactor, "nack-tail-probe-idle-factor", envFloat("NACK_TAIL_PROBE_IDLE_FACTOR", 4.0),
+		"BRC-126: multiple of the flow's own smoothed inter-arrival before silence counts as abnormal")
+	flag.DurationVar(&c.NACKTailProbeMinIdle, "nack-tail-probe-min-idle", envDuration("NACK_TAIL_PROBE_MIN_IDLE", 500*time.Millisecond),
+		"BRC-126: floor on the tail-probe idle threshold so fast flows do not probe continuously")
+	flag.IntVar(&c.NACKTailProbeMaxMisses, "nack-tail-probe-max-misses", envInt("NACK_TAIL_PROBE_MAX_MISSES", 3),
+		"BRC-126: stop probing a flow after this many consecutive MISS answers (it is genuinely idle); reset by new traffic")
 	flag.IntVar(&c.NACKMaxFlows, "nack-max-flows", envInt("NACK_MAX_FLOWS", 100000),
 		"cap on tracked per-source flows (flood guard; new sources past the cap still forward but skip NACK recovery until idle flows age out); 0 = unbounded")
 	flag.IntVar(&c.NACKMaxForwardJump, "nack-max-forward-jump", envInt("NACK_MAX_FORWARD_JUMP", 4096),
