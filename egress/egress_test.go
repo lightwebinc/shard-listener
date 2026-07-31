@@ -139,6 +139,9 @@ func TestSend_UDP_ReconnectAfterPathLoss(t *testing.T) {
 	if s.udpConn != nil {
 		t.Fatal("closeUDP must clear the socket")
 	}
+	if !s.udpDialed {
+		t.Error("a Sender that has connected must stay marked, so the reconnect logs")
+	}
 	if err := s.SendRaw([]byte("two")); err != nil {
 		t.Fatalf("next frame should re-dial: %v", err)
 	}

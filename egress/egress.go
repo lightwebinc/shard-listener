@@ -65,6 +65,11 @@ type Sender struct {
 	udpErr     error
 	udpRetryAt time.Time
 	udpBackoff time.Duration
+	// udpDialed records that this Sender has connected once, so only a
+	// RECONNECT is logged. The consumer table is rebuilt on every snapshot
+	// reload (30s), which builds a fresh Sender per consumer — logging each
+	// first connect put a line per consumer per reload into the journal.
+	udpDialed bool
 }
 
 // New constructs a Sender. Construction never fails on the network: the
@@ -118,7 +123,11 @@ func (s *Sender) dialUDP() error {
 		if conn, err = net.DialUDP("udp", nil, dst); err == nil {
 			s.udpConn, s.udpDst = conn, dst
 			s.udpErr, s.udpBackoff = nil, 0
-			s.log.Info("UDP egress connected", "addr", s.addr)
+			// Only a reconnect is worth a line: it means the path came back.
+			if s.udpDialed {
+				s.log.Info("UDP egress reconnected", "addr", s.addr)
+			}
+			s.udpDialed = true
 			return nil
 		}
 	}
