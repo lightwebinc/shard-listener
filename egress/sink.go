@@ -1,6 +1,31 @@
 package egress
 
-import "github.com/lightwebinc/shard-common/frame"
+import (
+	"errors"
+
+	"github.com/lightwebinc/shard-common/frame"
+)
+
+// ErrNotElected reports that a consumer did not elect the class being
+// delivered, so the frame was deliberately not sent to it. It is a routing
+// OUTCOME, not a failure: in a per-class fan-out most consumers do not elect
+// most classes, so this is the common case on every frame.
+//
+// A class-routing sink must return an error (rather than nil) for an unelected
+// class, or a metering wrapper keyed on "err == nil" would bill a delivery that
+// never happened. But an aggregating fan-out must NOT surface it as the batch's
+// error, or the worker books an egress failure — and skips its "forwarded"
+// counter — on ordinary traffic. Wrapping this sentinel is what lets both hold
+// at once: the biller still sees a non-nil error, while the fan-out recognises
+// it with [errors.Is] and keeps aggregating.
+//
+// Class routers should wrap it (`fmt.Errorf("...: %w", egress.ErrNotElected)`)
+// so the specific message survives for logs.
+var ErrNotElected = errors.New("egress: class not elected by consumer")
+
+// IsNotElected reports whether err is (or wraps) [ErrNotElected] — i.e. the
+// frame was withheld by election rather than lost.
+func IsNotElected(err error) bool { return errors.Is(err, ErrNotElected) }
 
 // EgressSink is the forwarding contract the listener worker delivers decoded
 // frames through. The default single-destination [Sender] satisfies it; an

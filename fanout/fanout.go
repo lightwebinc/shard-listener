@@ -219,7 +219,7 @@ func (s *Sink) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 			}
 			return
 		}
-		if err := c.Sink.SendBeef(raw, bf); err != nil && firstErr == nil {
+		if err := c.Sink.SendBeef(raw, bf); err != nil && firstErr == nil && !egress.IsNotElected(err) {
 			firstErr = err
 		}
 	}
@@ -264,7 +264,7 @@ func (s *Sink) Send(raw []byte, f *frame.Frame) error {
 			}
 			return
 		}
-		if err := c.Sink.Send(raw, f); err != nil && firstErr == nil {
+		if err := c.Sink.Send(raw, f); err != nil && firstErr == nil && !egress.IsNotElected(err) {
 			firstErr = err
 		}
 	}
@@ -318,7 +318,7 @@ func (s *Sink) SendBundle(raw []byte, b *bundle.Bundle) error {
 		}
 		if c.BundleCapable {
 			if bs, ok := c.Sink.(egress.BundleSink); ok {
-				if err := bs.SendBundle(raw, b); err != nil && firstErr == nil {
+				if err := bs.SendBundle(raw, b); err != nil && firstErr == nil && !egress.IsNotElected(err) {
 					firstErr = err
 				}
 				return
@@ -329,7 +329,7 @@ func (s *Sink) SendBundle(raw []byte, b *bundle.Bundle) error {
 			members = s.decoalesce(b)
 		}
 		for i := range members {
-			if err := c.Sink.Send(members[i].raw, members[i].f); err != nil && firstErr == nil {
+			if err := c.Sink.Send(members[i].raw, members[i].f); err != nil && firstErr == nil && !egress.IsNotElected(err) {
 				firstErr = err
 			}
 		}
@@ -434,13 +434,18 @@ func (s *Sink) SendRaw(buf []byte) error {
 	return s.broadcast(func(c *Consumer) error { return c.Sink.SendRaw(buf) })
 }
 
+// broadcast delivers to every consumer and returns the first REAL error. An
+// [egress.ErrNotElected] return is skipped: in a per-class fan-out most
+// consumers have not elected most classes, so treating election as a failure
+// would make the worker's egress-error counter tick on ordinary traffic and
+// suppress its forwarded counter entirely.
 func (s *Sink) broadcast(send func(*Consumer) error) error {
 	s.mu.RLock()
 	cs := s.consumers
 	s.mu.RUnlock()
 	var firstErr error
 	for _, c := range cs {
-		if err := send(c); err != nil && firstErr == nil {
+		if err := send(c); err != nil && firstErr == nil && !egress.IsNotElected(err) {
 			firstErr = err
 		}
 	}
