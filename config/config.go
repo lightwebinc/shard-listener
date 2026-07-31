@@ -456,8 +456,8 @@ func Load() (*Config, error) {
 		"distributed-trace head sampling ratio 0..1 (0 = tracing off; exports via -otlp-endpoint)")
 	flag.BoolVar(&c.VerifyPayloadHash, "verify-payload-hash", envBool("VERIFY_PAYLOAD_HASH", false),
 		"verify SHA256d(payload) == TxID on BRC-124/BRC-128 frames; drop on mismatch")
-	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", false),
-		"gate BRC-131 announces on header proof-of-work + correlate BRC-133 coinbase with a validated block before fan-out (validates inter-domain block control)")
+	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", true),
+		"gate BRC-131 announces on header proof-of-work + correlate BRC-133 coinbase with a validated block before fan-out (validates inter-domain block control); default ON — everything downstream of a block announce, including BRC-135 header egress, inherits this gate")
 	minPoWBits := flag.String("min-pow-bits", envStr("MIN_POW_BITS", "0"),
 		"PoW difficulty floor for -require-block-pow in Bitcoin compact nBits form (e.g. 0x1d00ffff); 0 = header self-consistency only")
 	flag.IntVar(&c.CoinbaseCorrCap, "coinbase-corr-cap", envInt("COINBASE_CORR_CAP", 4096),

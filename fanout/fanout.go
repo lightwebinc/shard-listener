@@ -127,6 +127,7 @@ type Sink struct {
 var (
 	_ egress.EgressSink = (*Sink)(nil)
 	_ egress.BundleSink = (*Sink)(nil)
+	_ egress.HeaderSink = (*Sink)(nil)
 )
 
 // New constructs an empty fan-out sink. engine derives a frame's shard index
@@ -406,6 +407,25 @@ func (s *Sink) SendBlock(raw []byte, bf *frame.BlockFrame) error {
 // SendSubtreeData broadcasts a BRC-132 subtree data frame to every consumer.
 func (s *Sink) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) error {
 	return s.broadcast(func(c *Consumer) error { return c.Sink.SendSubtreeData(raw, sf) })
+}
+
+// SendHeader broadcasts a BRC-135 block header frame to every consumer, exactly
+// as blocks and subtree data are broadcast: headers are fleet-global, not
+// shard-scoped, so there is no index to route on. Which consumers actually
+// receive one is decided by their own sink — a class router delivers only to a
+// consumer that elected a header lane and reports the rest as not-elected.
+//
+// A consumer whose sink does not implement [egress.HeaderSink] is skipped
+// rather than failed: the seam is optional, so not implementing it means "this
+// consumer has no header lane", which is the common case and not an error.
+func (s *Sink) SendHeader(raw []byte, hf *frame.Frame) error {
+	return s.broadcast(func(c *Consumer) error {
+		hs, ok := c.Sink.(egress.HeaderSink)
+		if !ok {
+			return nil
+		}
+		return hs.SendHeader(raw, hf)
+	})
 }
 
 // SendRaw broadcasts an arbitrary buffer (BRC-135 header egress) to every

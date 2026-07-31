@@ -32,3 +32,30 @@ type EgressSink interface {
 
 // compile-time assertion that the built-in Sender satisfies the seam.
 var _ EgressSink = (*Sender)(nil)
+
+// HeaderSink is an OPTIONAL seam an [EgressSink] may also implement to receive
+// BRC-135 block headers as a routable class rather than as the worker's
+// node-global header egress. A downstream fan-out build implements it to offer
+// headers as a per-consumer elected lane; a sink that does not implement it is
+// simply never offered headers, so this is additive to [EgressSink] and every
+// existing implementation keeps compiling.
+//
+// It is a separate interface rather than an EgressSink method for the same
+// reason [BundleSink] is: only a fan-out sink can act on it, and widening the
+// base seam would force a no-op method onto every implementation of a contract
+// that is deliberately small.
+//
+// SendRaw is NOT this seam. It is class-agnostic — a fan-out sink cannot tell a
+// header from any other buffer, so it can neither route on election nor meter
+// under the right class, and a class router forwarding it would have to guess a
+// lane. Headers therefore get their own typed method, exactly as blocks,
+// subtree data, and BEEF objects do.
+type HeaderSink interface {
+	// SendHeader forwards one BRC-135 block header frame. raw is the whole
+	// 172-byte frame (92-byte header + the 80-byte block header); hf is the
+	// decoded view (Version FrameVerV7, TxID = the block hash) whose Payload
+	// aliases raw's 80-byte block header — the form a subscriber that wants
+	// merkle roots actually consumes. Neither buffer may be retained after the
+	// call returns.
+	SendHeader(raw []byte, hf *frame.Frame) error
+}

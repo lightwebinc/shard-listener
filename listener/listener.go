@@ -83,6 +83,7 @@ type Worker struct {
 	mcastEgr          *egress.MCastSender // nil when multicast egress is disabled
 	headerEgr         *egress.Sender      // nil when unicast header egress is disabled
 	headerMCastEgr    *egress.MCastSender // nil when multicast header egress is disabled
+	headerFanout      egress.HeaderSink   // nil when no per-consumer header lane exists (OSS default)
 	headerHashKey     uint64              // BRC-135 emitter HashKey (XXH64(emitterIPv6 ∥ 0xFFFA ∥ zeros))
 	headerSeqNum      atomic.Uint64       // BRC-135 monotonic per-emitter counter (starts at 1)
 	tracker           *nack.Tracker
@@ -224,6 +225,24 @@ func (w *Worker) SetHeaderEgress(s *egress.Sender) { w.headerEgr = s }
 // header retransmission to the GroupBlockHeader (0xFFFA) multicast
 // group. nil disables.
 func (w *Worker) SetHeaderMCastEgress(s *egress.MCastSender) { w.headerMCastEgr = s }
+
+// SetHeaderFanout attaches the per-consumer BRC-135 header seam: a routing sink
+// that offers headers as an ELECTED class, the way blocks, subtree data, and
+// BEEF objects are already offered. nil (the OSS default) disables it, leaving
+// only the node-global unicast/multicast header egress above.
+//
+// Unlike those two, this seam is set unconditionally by a fan-out build rather
+// than by an operator flag: whether a header crosses any consumer wire is the
+// consumer's election, decided downstream in the class router, not the node's
+// configuration. The cost of feeding it when nobody has elected is one 172-byte
+// encode per block announce — roughly one per ten minutes — which is why it
+// needs no enabling flag of its own.
+//
+// It is attached separately from the main egress sink because a sink may
+// implement [egress.HeaderSink] and still not want headers (a receiver-tier
+// MultiSink already forwards the whole BRC-131 announce, from which the
+// delivery tier derives its own headers; feeding both would double-emit).
+func (w *Worker) SetHeaderFanout(s egress.HeaderSink) { w.headerFanout = s }
 
 // SetRebucketRelay marks this listener an intentional BRC-142 re-bucket relay.
 // A relay re-buckets without raising the unguarded-rebucket alarm; a bare
@@ -1030,7 +1049,7 @@ func (w *Worker) processBlockFrame(raw []byte) {
 	}
 
 	// Block header egress: extract and retransmit the 80-byte header.
-	if w.headerEgr != nil || w.headerMCastEgr != nil {
+	if w.headerEgr != nil || w.headerMCastEgr != nil || w.headerFanout != nil {
 		w.emitBlockHeader(bf)
 	}
 
@@ -1093,6 +1112,29 @@ func (w *Worker) emitBlockHeader(bf *frame.BlockFrame) {
 				w.rec.HeaderEgressError(w.id)
 			}
 			w.log.Debug("header mc egress send error", "err", err)
+		} else if w.rec != nil {
+			w.rec.HeaderForwarded(w.id)
+		}
+	}
+
+	// Per-consumer header lane. The decode cannot fail on a buffer we just
+	// encoded, but routing needs the parsed view (block hash in TxID, the
+	// 80-byte header aliased as Payload) rather than a second parse per
+	// consumer downstream.
+	if w.headerFanout != nil {
+		hf, err := frame.DecodeBlockHeader(buf)
+		if err != nil {
+			w.log.Debug("header fanout decode error", "err", err)
+			return
+		}
+		if err := w.headerFanout.SendHeader(buf, hf); err != nil {
+			// A consumer that did not elect the lane is reported as a
+			// not-elected drop by the class router, so this is a real egress
+			// failure, not the common no-subscriber case.
+			if w.rec != nil {
+				w.rec.HeaderEgressError(w.id)
+			}
+			w.log.Debug("header fanout send error", "err", err)
 		} else if w.rec != nil {
 			w.rec.HeaderForwarded(w.id)
 		}
@@ -1262,7 +1304,7 @@ func (w *Worker) DeliverReassembledBlock(payload []byte, bf *frame.BlockFrame) {
 	}
 
 	// Block header egress: extract and retransmit the 80-byte header.
-	if w.headerEgr != nil || w.headerMCastEgr != nil {
+	if w.headerEgr != nil || w.headerMCastEgr != nil || w.headerFanout != nil {
 		w.emitBlockHeader(bf)
 	}
 
