@@ -1,7 +1,9 @@
 package egress
 
 import (
+	"errors"
 	"net"
+	"syscall"
 	"testing"
 	"time"
 
@@ -104,11 +106,14 @@ func TestSend_UDP_RedialBackoff(t *testing.T) {
 	}
 }
 
-// TestSend_UDP_ReconnectAfterWriteError: a connected UDP socket pins its route
-// at connect time, so it stays dead once the destination's tunnel goes away.
-// The failed write drops it and the next frame re-connects — which is how a
+// TestSend_UDP_ReconnectAfterPathLoss: a connected UDP socket pins its route at
+// connect time, so it stays dead once the destination's tunnel goes away. The
+// path-error branch drops it and the next frame re-connects — which is how a
 // Sender picks up a consumer that fails over onto this edge.
-func TestSend_UDP_ReconnectAfterWriteError(t *testing.T) {
+//
+// It also pins the other half: a write error that is NOT a path error must keep
+// the socket (see TestIsPathError), so only a genuine route change costs a redial.
+func TestSend_UDP_ReconnectAfterPathLoss(t *testing.T) {
 	addr, pc, cleanup := newUDPSink(t)
 	defer cleanup()
 	s, err := New(addr, "udp", false)
@@ -120,13 +125,19 @@ func TestSend_UDP_ReconnectAfterWriteError(t *testing.T) {
 	if err := s.SendRaw([]byte("one")); err != nil {
 		t.Fatal(err)
 	}
-	// Kill the socket under the Sender (stands in for the route going away).
-	_ = s.udpConn.Close()
+	// A non-path write error (the fd was closed under us) must not re-dial.
+	conn := s.udpConn
+	_ = conn.Close()
 	if err := s.SendRaw([]byte("lost")); err == nil {
-		t.Error("write on a dead socket should error")
+		t.Error("write on a closed socket should error")
 	}
+	if s.udpConn != conn {
+		t.Error("a non-path write error must keep the socket")
+	}
+	// The path-error branch: drop the socket, and the next frame re-dials.
+	s.closeUDP()
 	if s.udpConn != nil {
-		t.Error("failed socket should be dropped, not reused")
+		t.Fatal("closeUDP must clear the socket")
 	}
 	if err := s.SendRaw([]byte("two")); err != nil {
 		t.Fatalf("next frame should re-dial: %v", err)
@@ -142,6 +153,72 @@ func TestSend_UDP_ReconnectAfterWriteError(t *testing.T) {
 		if string(buf[:n]) != want {
 			t.Errorf("got %q, want %q", buf[:n], want)
 		}
+	}
+}
+
+// TestIsPathError separates "the route changed" (re-dial fixes it) from "the
+// destination said no" (re-dialing is churn).
+func TestIsPathError(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{syscall.ENETUNREACH, true},
+		{syscall.EHOSTUNREACH, true},
+		{syscall.ENETDOWN, true},
+		{syscall.EADDRNOTAVAIL, true},
+		{syscall.EINVAL, true},
+		{syscall.ECONNREFUSED, false}, // remote port shut; socket and route fine
+		{syscall.EMSGSIZE, false},     // this frame is too big; socket fine
+		{errors.New("plain"), false},
+		{&net.OpError{Op: "write", Err: syscall.ENETUNREACH}, true},
+		{&net.OpError{Op: "write", Err: syscall.ECONNREFUSED}, false},
+	} {
+		if got := isPathError(tc.err); got != tc.want {
+			t.Errorf("isPathError(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestSend_UDP_ConnRefusedKeepsSocket is the live regression: a consumer whose
+// receiver is down makes every write return ECONNREFUSED (the ICMP
+// port-unreachable surfaces on the next send). Dropping the socket for that
+// flapped connected/closed every few seconds and re-dialed per frame.
+func TestSend_UDP_ConnRefusedKeepsSocket(t *testing.T) {
+	// A port with nothing bound: bind then immediately release it.
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := pc.LocalAddr().String()
+	_ = pc.Close()
+
+	s, err := New(addr, "udp", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	conn := s.udpConn
+	if conn == nil {
+		t.Fatal("expected a connected socket to a local closed port")
+	}
+
+	// The first send usually succeeds; the ICMP error lands on a later one.
+	var refused bool
+	for range 5 {
+		if err := s.SendRaw([]byte("x")); errors.Is(err, syscall.ECONNREFUSED) {
+			refused = true
+			break
+		}
+	}
+	if !refused {
+		t.Skip("platform did not surface ECONNREFUSED on a connected UDP socket")
+	}
+	if s.udpConn == nil {
+		t.Fatal("ECONNREFUSED must NOT drop the socket (route and socket are healthy)")
+	}
+	if s.udpConn != conn {
+		t.Error("socket was re-dialed on ECONNREFUSED")
 	}
 }
 

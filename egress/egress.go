@@ -25,9 +25,11 @@
 package egress
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/lightwebinc/shard-common/frame"
@@ -158,10 +160,32 @@ func (s *Sender) sendUDP(buf []byte) error {
 		// write fails on the same dead socket. Drop it and let the next frame
 		// re-dial (on backoff): that is what re-homes this Sender when the
 		// consumer fails over onto this edge.
-		s.closeUDP()
+		//
+		// ONLY for a path error, though. ECONNREFUSED is the common case here —
+		// a connected UDP socket surfaces the destination's ICMP port-unreachable
+		// on the next write — and it means the opposite: the host answered, so
+		// the route and socket are healthy and only the remote port is shut.
+		// Re-dialing that is pure churn (a socket+connect and two log lines per
+		// frame, at fabric rate), and it was observed live flapping
+		// connected/closed every few seconds against a consumer whose receiver
+		// was down.
+		if isPathError(err) {
+			s.closeUDP()
+		}
 		return fmt.Errorf("egress: UDP write %q: %w", s.addr, err)
 	}
 	return nil
+}
+
+// isPathError reports whether err says the route to the destination changed
+// under us — the case a fresh socket can fix. Errors about the destination
+// itself (ECONNREFUSED) or about this frame (EMSGSIZE) leave the socket alone.
+func isPathError(err error) bool {
+	return errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETDOWN) ||
+		errors.Is(err, syscall.EADDRNOTAVAIL) ||
+		errors.Is(err, syscall.EINVAL) // source address gone with its interface
 }
 
 func (s *Sender) closeUDP() {
