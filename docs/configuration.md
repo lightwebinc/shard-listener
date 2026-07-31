@@ -645,7 +645,7 @@ SHA256d hash of the payload. Frames with mismatched TxIDs are dropped before
 egress and gap tracking, and `bsl_frames_invalid_payload_total` is incremented.
 BRC-12 legacy frames are forwarded verbatim regardless of this setting.
 
-### `-require-block-pow` / `REQUIRE_BLOCK_POW` (default: `false`)
+### `-require-block-pow` / `REQUIRE_BLOCK_POW` (default: `true`)
 
 Validate block control frames before fan-out. Inter-domain block announcements
 reach the listener over the multicast fabric without passing our proxy, so the
@@ -671,15 +671,7 @@ PoW difficulty floor for `-require-block-pow`, in Bitcoin compact `nBits` form
 a forger satisfies by claiming trivial difficulty — set a real floor in
 production.
 
-### `-coinbase-corr-cap` / `COINBASE_CORR_CAP` (default: `4096`)
 
-Maximum correlated coinbase TxIDs retained for BRC-133 correlation. `0` disables
-coinbase correlation (PoW on announces still applies). Block announcements are
-low-rate, so the set stays small.
-
-### `-coinbase-corr-ttl` / `COINBASE_CORR_TTL` (default: `10m`)
-
-Maximum age of a correlated coinbase TxID before it expires from the set.
 
 ### `-drain-timeout` / `DRAIN_TIMEOUT` (default: `0`)
 

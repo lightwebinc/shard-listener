@@ -64,8 +64,7 @@ func TestBlockGate_PoWAndInlineCoinbase(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
 	defer cleanup()
 	w := newWorker(t, addr, filter.New(nil, nil, nil, nil))
-	corr := NewCoinbaseCorrelator(128, time.Minute)
-	w.SetBlockPoW(true, 0, corr)
+	w.SetBlockPoW(true, 0)
 
 	cb := [32]byte{0xCC, 0x01}
 
@@ -92,8 +91,9 @@ func TestBlockGate_PoWAndInlineCoinbase(t *testing.T) {
 		t.Fatal("valid-PoW block announce must forward")
 	}
 
-	// Separate BRC-133 coinbase frames are retired: none can correlate (nothing
-	// records coinbase TxIDs anymore), so any such frame is dropped.
+	// Separate BRC-133 coinbase frames are retired: such a frame carries no PoW
+	// of its own and the push model carries the coinbase inline, so it is
+	// dropped outright while the gate is on.
 	w.processBlockFrame(coinbaseFrame(t, cb))
 	if forwarded(ch) {
 		t.Fatal("separate coinbase frame must be dropped (coinbase is inline now)")
@@ -115,18 +115,5 @@ func TestBlockGate_OffForwardsEverything(t *testing.T) {
 	w.processBlockFrame(buf)
 	if !forwarded(ch) {
 		t.Fatal("gate off: block announce must forward regardless of PoW")
-	}
-}
-
-func TestCoinbaseCorrelator_TTLExpiry(t *testing.T) {
-	c := NewCoinbaseCorrelator(8, 10*time.Millisecond)
-	k := [32]byte{0x42}
-	c.Add(k)
-	if !c.Has(k) {
-		t.Fatal("entry should be present immediately")
-	}
-	time.Sleep(20 * time.Millisecond)
-	if c.Has(k) {
-		t.Fatal("entry should expire after TTL")
 	}
 }

@@ -490,17 +490,14 @@ func run() error {
 		}
 	}
 
-	// Block-control gate (opt-in): one CoinbaseCorrelator shared across all
-	// workers, since a block announce and its coinbase can land on different
-	// worker sockets under SO_REUSEPORT.
-	var coinbaseCorr *listener.CoinbaseCorrelator
-	if !delivery && cfg.RequireBlockPoW && cfg.CoinbaseCorrCap > 0 {
-		coinbaseCorr = listener.NewCoinbaseCorrelator(cfg.CoinbaseCorrCap, cfg.CoinbaseCorrTTL)
-	}
+	// Block-control gate (default ON): BRC-131 announces must carry valid PoW
+	// before fan-out. A standalone BRC-133 coinbase frame is legacy and is
+	// dropped while the gate is on — it carries no PoW of its own, and the push
+	// model supersedes it by carrying the coinbase inline in the block body.
 	if !delivery && cfg.RequireBlockPoW {
 		slog.Info("block-control gate enabled",
 			"min_pow_bits", fmt.Sprintf("0x%08x", cfg.MinPoWBits),
-			"coinbase_correlation", coinbaseCorr != nil)
+			"legacy_coinbase_frames", "dropped")
 	}
 
 	// Start workers. Collect them so the auto-join applier can drive
@@ -589,7 +586,7 @@ func run() error {
 		w.SetBEEF(beefEngine, beefTopicSet, beefVersionSet, cfg.BEEFVerifyContent)
 		w.SetRebucketRelay(cfg.RebucketRelay)
 		if !delivery && cfg.RequireBlockPoW {
-			w.SetBlockPoW(true, cfg.MinPoWBits, coinbaseCorr)
+			w.SetBlockPoW(true, cfg.MinPoWBits)
 		}
 		// Sender ACL is a receiver-side ingress filter on the ORIGINAL source; on
 		// a delivery worker the datagram source is the receiver, so it must not run.

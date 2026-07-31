@@ -100,7 +100,6 @@ type Worker struct {
 	beefVerifyContent bool                  // debug: verify ContentID == SHA-256d(payload)
 	requireBlockPoW   bool                  // gate BRC-131 announces on header PoW before fan-out
 	powFloor          *big.Int              // PoW difficulty floor; nil = self-consistency only
-	coinbaseCorr      *CoinbaseCorrelator   // shared; nil = no coinbase correlation
 	log               *slog.Logger
 
 	// curSource is the source address of the frame currently being processed,
@@ -299,9 +298,8 @@ func (w *Worker) SetBEEF(pe *shard.PlaneEngine, topics map[[32]byte]struct{}, ve
 // corr is shared across workers; pass nil to skip coinbase correlation.
 // Validates the artifact, not the emitter — permissionless. Must be called
 // before Run.
-func (w *Worker) SetBlockPoW(require bool, floorBits uint32, corr *CoinbaseCorrelator) {
+func (w *Worker) SetBlockPoW(require bool, floorBits uint32) {
 	w.requireBlockPoW = require
-	w.coinbaseCorr = corr
 	if require && floorBits != 0 {
 		w.powFloor = pow.CompactToTarget(floorBits)
 	} else {
@@ -1122,21 +1120,36 @@ func (w *Worker) emitBlockHeader(bf *frame.BlockFrame) {
 	// 80-byte header aliased as Payload) rather than a second parse per
 	// consumer downstream.
 	if w.headerFanout != nil {
-		hf, err := frame.DecodeBlockHeader(buf)
-		if err != nil {
-			w.log.Debug("header fanout decode error", "err", err)
+		hf, derr := frame.DecodeBlockHeader(buf)
+		if derr != nil {
+			w.log.Debug("header fanout decode error", "err", derr)
 			return
 		}
-		if err := w.headerFanout.SendHeader(buf, hf); err != nil {
-			// A consumer that did not elect the lane is reported as a
-			// not-elected drop by the class router, so this is a real egress
-			// failure, not the common no-subscriber case.
+		// Book the number of consumers actually reached, not one per emission:
+		// in a per-class fan-out most consumers have no header lane, and a nil
+		// return covers "withheld by election" as well as "delivered". A sink
+		// that cannot report the count is counted as one on success, which is
+		// the single-destination case.
+		delivered, err := 1, error(nil)
+		if fs, ok := w.headerFanout.(egress.HeaderFanoutSink); ok {
+			delivered, err = fs.SendHeaderN(buf, hf)
+		} else {
+			err = w.headerFanout.SendHeader(buf, hf)
+			if err != nil {
+				delivered = 0
+			}
+		}
+		if err != nil {
+			// Election is filtered out upstream, so this is a real failure.
 			if w.rec != nil {
 				w.rec.HeaderEgressError(w.id)
 			}
 			w.log.Debug("header fanout send error", "err", err)
-		} else if w.rec != nil {
-			w.rec.HeaderForwarded(w.id)
+		}
+		if w.rec != nil {
+			for i := 0; i < delivered; i++ {
+				w.rec.HeaderForwarded(w.id)
+			}
 		}
 	}
 }

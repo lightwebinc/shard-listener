@@ -260,9 +260,7 @@ type Config struct {
 	// independently validates before fan-out: PoW on the announce, and
 	// coinbase↔block correlation on BRC-133. Off by default.
 	RequireBlockPoW bool
-	MinPoWBits      uint32        // PoW difficulty floor (compact nBits); 0 = self-consistency only
-	CoinbaseCorrCap int           // max correlated coinbase TxIDs held; 0 disables correlation
-	CoinbaseCorrTTL time.Duration // max age of a correlated coinbase TxID
+	MinPoWBits      uint32 // PoW difficulty floor (compact nBits); 0 = self-consistency only
 
 	// Egress TxID dedup (per-deployment): HA listener siblings sharing a
 	// DeploymentID race to win the SETNX claim under EgressDedupPrefix +
@@ -460,10 +458,6 @@ func Load() (*Config, error) {
 		"gate BRC-131 announces on header proof-of-work + correlate BRC-133 coinbase with a validated block before fan-out (validates inter-domain block control); default ON — everything downstream of a block announce, including BRC-135 header egress, inherits this gate")
 	minPoWBits := flag.String("min-pow-bits", envStr("MIN_POW_BITS", "0"),
 		"PoW difficulty floor for -require-block-pow in Bitcoin compact nBits form (e.g. 0x1d00ffff); 0 = header self-consistency only")
-	flag.IntVar(&c.CoinbaseCorrCap, "coinbase-corr-cap", envInt("COINBASE_CORR_CAP", 4096),
-		"max correlated coinbase TxIDs retained for BRC-133 correlation (0 disables coinbase correlation; PoW on announces still applies)")
-	flag.DurationVar(&c.CoinbaseCorrTTL, "coinbase-corr-ttl", envDuration("COINBASE_CORR_TTL", 10*time.Minute),
-		"max age of a correlated coinbase TxID")
 	flag.BoolVar(&c.SubtreeDataEnabled, "subtree-data-enabled", envBool("SUBTREE_DATA_ENABLED", false),
 		"enable BRC-132 subtree data reception: join GroupSubtreeDataAnnounce (0xFFFB) group")
 	flag.BoolVar(&c.SubtreeDataVerifyMerkle, "subtree-data-verify-merkle", envBool("SUBTREE_DATA_VERIFY_MERKLE", false),

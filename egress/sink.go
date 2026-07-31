@@ -84,3 +84,21 @@ type HeaderSink interface {
 	// call returns.
 	SendHeader(raw []byte, hf *frame.Frame) error
 }
+
+// HeaderFanoutSink is an OPTIONAL refinement of [HeaderSink] for a sink that
+// fans one header out to many consumers. It reports how many consumers the
+// header actually reached.
+//
+// A plain HeaderSink returning nil means "no error", which in a per-class
+// fan-out ALSO covers "nobody had elected this lane" — so a caller that books a
+// forwarded-counter on a nil return counts emissions that never crossed a wire.
+// Measured live: bsl_header_forwarded_total advancing on an edge where no
+// consumer had a header lane. A sink that can distinguish the two implements
+// this and the worker books the real count.
+type HeaderFanoutSink interface {
+	HeaderSink
+	// SendHeaderN forwards the header and returns the number of consumers it
+	// was delivered to, plus the first real delivery error (election is not an
+	// error — see [ErrNotElected]).
+	SendHeaderN(raw []byte, hf *frame.Frame) (int, error)
+}

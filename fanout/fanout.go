@@ -125,9 +125,10 @@ type Sink struct {
 
 // compile-time assertions that Sink satisfies the listener's egress seams.
 var (
-	_ egress.EgressSink = (*Sink)(nil)
-	_ egress.BundleSink = (*Sink)(nil)
-	_ egress.HeaderSink = (*Sink)(nil)
+	_ egress.EgressSink       = (*Sink)(nil)
+	_ egress.BundleSink       = (*Sink)(nil)
+	_ egress.HeaderSink       = (*Sink)(nil)
+	_ egress.HeaderFanoutSink = (*Sink)(nil)
 )
 
 // New constructs an empty fan-out sink. engine derives a frame's shard index
@@ -419,13 +420,36 @@ func (s *Sink) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) error {
 // rather than failed: the seam is optional, so not implementing it means "this
 // consumer has no header lane", which is the common case and not an error.
 func (s *Sink) SendHeader(raw []byte, hf *frame.Frame) error {
-	return s.broadcast(func(c *Consumer) error {
+	_, err := s.SendHeaderN(raw, hf)
+	return err
+}
+
+// SendHeaderN is [SendHeader] plus the number of consumers the header actually
+// reached, so the caller can tell "delivered to nobody" (every consumer skipped
+// or unelected) from "delivered". Satisfies [egress.HeaderFanoutSink].
+func (s *Sink) SendHeaderN(raw []byte, hf *frame.Frame) (int, error) {
+	s.mu.RLock()
+	cs := s.consumers
+	s.mu.RUnlock()
+
+	delivered := 0
+	var firstErr error
+	for _, c := range cs {
 		hs, ok := c.Sink.(egress.HeaderSink)
 		if !ok {
-			return nil
+			continue // no header lane on this consumer
 		}
-		return hs.SendHeader(raw, hf)
-	})
+		err := hs.SendHeader(raw, hf)
+		switch {
+		case err == nil:
+			delivered++
+		case egress.IsNotElected(err):
+			// withheld by election, not a failure
+		case firstErr == nil:
+			firstErr = err
+		}
+	}
+	return delivered, firstErr
 }
 
 // SendRaw broadcasts an arbitrary buffer (BRC-135 header egress) to every

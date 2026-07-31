@@ -115,3 +115,47 @@ func TestSendHeader_NoConsumers(t *testing.T) {
 		t.Fatalf("SendHeader with no consumers: %v", err)
 	}
 }
+
+// SendHeaderN must report the number of consumers actually reached, so the
+// worker's forwarded counter cannot advance on an edge where nobody elected the
+// lane. Observed live: bsl_header_forwarded_total climbing with zero header
+// consumers configured.
+func TestSendHeaderN_CountsOnlyRealDeliveries(t *testing.T) {
+	capable := &headerRecSink{}
+	plain := &recSink{} // no HeaderSink at all
+
+	s := fanout.New(shard.New(0xFF05, shard.DefaultGroupID, 2))
+	s.Apply([]*fanout.Consumer{{ID: "capable", Sink: capable}, {ID: "plain", Sink: plain}})
+
+	raw, hf := brc135Frame(t, 0xAA, 1)
+	n, err := s.SendHeaderN(raw, hf)
+	if err != nil {
+		t.Fatalf("SendHeaderN: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("delivered = %d, want 1 (only the header-capable consumer)", n)
+	}
+
+	// Nobody capable at all ⇒ zero delivered, no error.
+	s.Apply([]*fanout.Consumer{{ID: "plain", Sink: plain}})
+	if n, err := s.SendHeaderN(raw, hf); n != 0 || err != nil {
+		t.Fatalf("no header consumers: delivered=%d err=%v, want 0/nil", n, err)
+	}
+}
+
+// A consumer that elected no header lane returns ErrNotElected; that must count
+// as zero delivered AND not as an error.
+func TestSendHeaderN_NotElectedIsNeitherDeliveredNorError(t *testing.T) {
+	unelected := &notElectedSink{}
+	s := fanout.New(shard.New(0xFF05, shard.DefaultGroupID, 2))
+	s.Apply([]*fanout.Consumer{{ID: "unelected", Sink: unelected}})
+
+	raw, hf := brc135Frame(t, 0xBB, 1)
+	n, err := s.SendHeaderN(raw, hf)
+	if n != 0 {
+		t.Errorf("delivered = %d, want 0", n)
+	}
+	if err != nil {
+		t.Errorf("err = %v, want nil (election is not a failure)", err)
+	}
+}

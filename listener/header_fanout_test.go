@@ -145,7 +145,7 @@ func TestHeaderFanout_BlockedByPoWGate(t *testing.T) {
 	w := newWorker(t, mainAddr, filter.New(nil, nil, nil, nil))
 	// The announce helper builds an all-but-empty 80-byte header, whose nBits
 	// is zero and therefore expands to no valid target — it cannot pass.
-	w.SetBlockPoW(true, 0, nil)
+	w.SetBlockPoW(true, 0)
 
 	cap := &captureHeaderSink{}
 	w.SetHeaderFanout(cap)
