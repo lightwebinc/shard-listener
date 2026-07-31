@@ -5,7 +5,10 @@
 // # UDP sender
 //
 // Each call to [Sender.Send] writes the frame (or payload) into a single
-// UDP datagram. No connection state is maintained.
+// UDP datagram on a connected socket. The socket is opened on demand and
+// re-opened after a write error, so a destination that is unroutable when the
+// listener starts (or that goes away later) costs failed sends, never a failed
+// start-up — see [New].
 //
 // # TCP sender
 //
@@ -31,7 +34,15 @@ import (
 	"github.com/lightwebinc/shard-common/objfmt"
 )
 
-const tcpWriteDeadline = 5 * time.Second
+const (
+	tcpWriteDeadline = 5 * time.Second
+
+	// udpRedialMin/Max bound how often a Sender re-opens a connected UDP
+	// socket for an unreachable destination. Without them the retry is one
+	// socket+connect per FRAME on a fan-out that sees the full fabric rate.
+	udpRedialMin = 250 * time.Millisecond
+	udpRedialMax = 5 * time.Second
+)
 
 // Sender forwards frames to a single downstream unicast address.
 type Sender struct {
@@ -46,10 +57,30 @@ type Sender struct {
 	// UDP-only state (nil for TCP)
 	udpConn *net.UDPConn
 	udpDst  *net.UDPAddr
+	// udpErr is the last dial failure and udpRetryAt the earliest next
+	// attempt, so a down destination is retried on a backoff rather than on
+	// every frame.
+	udpErr     error
+	udpRetryAt time.Time
+	udpBackoff time.Duration
 }
 
-// New constructs a Sender. For UDP, the underlying socket is opened immediately.
-// For TCP, the connection is established lazily on first Send.
+// New constructs a Sender. Construction never fails on the network: the
+// address is validated, a UDP socket is opened best-effort, and a destination
+// that is not connectable yet is connected on a later Send instead.
+//
+// UDP construction USED to dial, and that made an unroutable destination fatal
+// at start-up. A consumer's tunnel exists only on the edge currently serving
+// it, so on that consumer's standby edge its address is unreachable by
+// design — and any restart of a standby listener (a roll, a config reload)
+// died in New with "dial udp <sda>: network is unreachable" and crash-looped.
+// Dialing on demand also lets a Sender pick up a tunnel that appears AFTER
+// start-up, which is exactly what a failover onto the standby edge does.
+//
+// A syntactically bad address is still rejected here: that is a config error
+// no amount of retrying fixes, and it should fail the roll. Name resolution is
+// deferred with the dial — a resolver that is briefly unavailable is a
+// transient, not a config error.
 func New(addr, proto string, stripHeader bool) (*Sender, error) {
 	s := &Sender{
 		addr:        addr,
@@ -58,18 +89,41 @@ func New(addr, proto string, stripHeader bool) (*Sender, error) {
 		log:         slog.Default().With("component", "egress"),
 	}
 	if proto == "udp" {
-		dst, err := net.ResolveUDPAddr("udp", addr)
-		if err != nil {
-			return nil, fmt.Errorf("egress: resolve UDP addr %q: %w", addr, err)
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return nil, fmt.Errorf("egress: UDP addr %q: %w", addr, err)
 		}
-		conn, err := net.DialUDP("udp", nil, dst)
-		if err != nil {
-			return nil, fmt.Errorf("egress: dial UDP %q: %w", addr, err)
+		// Best-effort: connect now so a reachable destination is ready before
+		// the first frame arrives. A failure is logged, not returned.
+		if err := s.dialUDP(); err != nil {
+			s.log.Warn("UDP egress destination not reachable at start; will connect on demand",
+				"addr", addr, "err", err)
 		}
-		s.udpConn = conn
-		s.udpDst = dst
 	}
 	return s, nil
+}
+
+// dialUDP opens the connected socket, rate-limited by backoff. It reports the
+// dial error (cached between attempts) so a caller that cannot send still gets
+// an error to count, without paying a syscall per frame.
+func (s *Sender) dialUDP() error {
+	now := time.Now()
+	if s.udpBackoff > 0 && now.Before(s.udpRetryAt) {
+		return s.udpErr
+	}
+	dst, err := net.ResolveUDPAddr("udp", s.addr)
+	if err == nil {
+		var conn *net.UDPConn
+		if conn, err = net.DialUDP("udp", nil, dst); err == nil {
+			s.udpConn, s.udpDst = conn, dst
+			s.udpErr, s.udpBackoff = nil, 0
+			s.log.Info("UDP egress connected", "addr", s.addr)
+			return nil
+		}
+	}
+	s.udpErr = fmt.Errorf("egress: UDP dial %q: %w", s.addr, err)
+	s.udpBackoff = min(max(2*s.udpBackoff, udpRedialMin), udpRedialMax)
+	s.udpRetryAt = now.Add(s.udpBackoff)
+	return s.udpErr
 }
 
 // Send forwards f to the downstream. raw is the verbatim wire buffer (used
@@ -93,8 +147,29 @@ func (s *Sender) Send(raw []byte, f *frame.Frame) error {
 }
 
 func (s *Sender) sendUDP(buf []byte) error {
-	_, err := s.udpConn.Write(buf)
-	return err
+	if s.udpConn == nil {
+		if err := s.dialUDP(); err != nil {
+			return err
+		}
+	}
+	if _, err := s.udpConn.Write(buf); err != nil {
+		// A connected UDP socket pins its source address and route at connect
+		// time, so once the destination's tunnel is torn down every subsequent
+		// write fails on the same dead socket. Drop it and let the next frame
+		// re-dial (on backoff): that is what re-homes this Sender when the
+		// consumer fails over onto this edge.
+		s.closeUDP()
+		return fmt.Errorf("egress: UDP write %q: %w", s.addr, err)
+	}
+	return nil
+}
+
+func (s *Sender) closeUDP() {
+	if s.udpConn != nil {
+		_ = s.udpConn.Close()
+		s.udpConn = nil
+		s.log.Info("UDP egress socket closed; will reconnect on next frame", "addr", s.addr)
+	}
 }
 
 func (s *Sender) sendTCP(buf []byte) error {
@@ -208,10 +283,13 @@ func (s *Sender) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 // Proto returns the configured egress protocol ("udp" or "tcp").
 func (s *Sender) Proto() string { return s.proto }
 
-// Close releases all underlying connections.
+// Close releases all underlying connections. A Sender that never managed to
+// connect closes cleanly (nothing was opened).
 func (s *Sender) Close() error {
 	if s.udpConn != nil {
-		return s.udpConn.Close()
+		err := s.udpConn.Close()
+		s.udpConn = nil
+		return err
 	}
 	s.closeTCP()
 	return nil

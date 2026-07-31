@@ -39,6 +39,112 @@ func TestNew_UDP_InvalidAddr(t *testing.T) {
 	}
 }
 
+// unreachableUDP is a destination connect() always rejects: an IPv6
+// link-local address carries no zone, so it cannot be bound to an interface.
+// It stands in for the real case — an SDA reachable only through a tunnel that
+// exists on another edge.
+const unreachableUDP = "[fe80::1]:9701"
+
+// newUnreachableUDP builds a Sender whose destination could not be connected,
+// skipping if the platform dialed it anyway (nothing left to test).
+func newUnreachableUDP(t *testing.T) *Sender {
+	t.Helper()
+	s, err := New(unreachableUDP, "udp", false)
+	if err != nil {
+		t.Fatalf("New must not fail on an unreachable UDP destination: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if s.udpConn != nil {
+		t.Skip("platform connected the probe address; no unroutable destination available")
+	}
+	return s
+}
+
+// TestNew_UDP_UnreachableDest is the standby-edge regression. A consumer's
+// tunnel exists only on the edge currently serving it, so on its standby edge
+// the SDA is unroutable by design. Dialing in New made that fatal, and every
+// restart of a standby listener crash-looped on "network is unreachable".
+func TestNew_UDP_UnreachableDest(t *testing.T) {
+	s := newUnreachableUDP(t)
+	// Frames fail (the caller counts an egress error) instead of hitting a
+	// nil socket.
+	if err := s.Send([]byte("raw"), &frame.Frame{Payload: []byte("p")}); err == nil {
+		t.Error("Send to an unreachable destination should error")
+	}
+}
+
+// TestNew_UDP_UnresolvableHost: name resolution is deferred with the dial, so a
+// resolver that is briefly unavailable does not fail start-up either.
+func TestNew_UDP_UnresolvableHost(t *testing.T) {
+	s, err := New("no-such-host.invalid:9701", "udp", false)
+	if err != nil {
+		t.Fatalf("New must not fail on an unresolvable host: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.SendRaw([]byte("x")); err == nil {
+		t.Error("SendRaw to an unresolvable host should error")
+	}
+}
+
+// TestSend_UDP_RedialBackoff: a destination that stays down must cost one dial
+// per backoff interval, not one per frame — this sink sees the full fabric rate.
+func TestSend_UDP_RedialBackoff(t *testing.T) {
+	s := newUnreachableUDP(t)
+	if s.udpBackoff != udpRedialMin {
+		t.Fatalf("backoff after first failed dial = %v, want %v", s.udpBackoff, udpRedialMin)
+	}
+	retryAt := s.udpRetryAt
+	for range 10 {
+		if err := s.SendRaw([]byte("x")); err == nil {
+			t.Fatal("send to an unreachable destination should error")
+		}
+	}
+	if !s.udpRetryAt.Equal(retryAt) {
+		t.Error("re-dialed inside the backoff window")
+	}
+}
+
+// TestSend_UDP_ReconnectAfterWriteError: a connected UDP socket pins its route
+// at connect time, so it stays dead once the destination's tunnel goes away.
+// The failed write drops it and the next frame re-connects — which is how a
+// Sender picks up a consumer that fails over onto this edge.
+func TestSend_UDP_ReconnectAfterWriteError(t *testing.T) {
+	addr, pc, cleanup := newUDPSink(t)
+	defer cleanup()
+	s, err := New(addr, "udp", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if err := s.SendRaw([]byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	// Kill the socket under the Sender (stands in for the route going away).
+	_ = s.udpConn.Close()
+	if err := s.SendRaw([]byte("lost")); err == nil {
+		t.Error("write on a dead socket should error")
+	}
+	if s.udpConn != nil {
+		t.Error("failed socket should be dropped, not reused")
+	}
+	if err := s.SendRaw([]byte("two")); err != nil {
+		t.Fatalf("next frame should re-dial: %v", err)
+	}
+
+	buf := make([]byte, 100)
+	for _, want := range []string{"one", "two"} {
+		_ = pc.SetReadDeadline(time.Now().Add(time.Second))
+		n, _, err := pc.ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("read %q: %v", want, err)
+		}
+		if string(buf[:n]) != want {
+			t.Errorf("got %q, want %q", buf[:n], want)
+		}
+	}
+}
+
 func TestNew_TCP_LazyDial(t *testing.T) {
 	s, err := New("127.0.0.1:1", "tcp", false)
 	if err != nil {
