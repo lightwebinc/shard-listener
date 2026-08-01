@@ -182,7 +182,7 @@ type Tracker struct {
 	// recoverFn re-injects a frame returned by a retry endpoint over the
 	// unicast NACK return channel back into the listener pipeline (set via
 	// SetRecoverFunc). nil disables unicast recovery (multicast-only repair).
-	recoverFn func(raw []byte)
+	recoverFn func(raw []byte) bool
 
 	// nackSrc is the source address the NACK socket binds to (set via
 	// SetNACKSource). Empty = wildcard (kernel picks per-route). Set this to a
@@ -280,7 +280,7 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 // drains any data frame the retry unicasts back on the NACK socket and re-feeds
 // it through the listener pipeline (the gap is then auto-filled by Observe).
 // Typically wired to (*listener.Worker).Reinject.
-func (t *Tracker) SetRecoverFunc(f func(raw []byte)) { t.recoverFn = f }
+func (t *Tracker) SetRecoverFunc(f func(raw []byte) bool) { t.recoverFn = f }
 
 // FlowCount returns the number of tracked per-source flows (diagnostics/tests).
 func (t *Tracker) FlowCount() int {
@@ -921,7 +921,19 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 		if t.recoverFn != nil && nr >= minRetransmitFrame && binary.BigEndian.Uint32(rbuf[0:4]) == nackMagic {
 			cp := make([]byte, nr)
 			copy(cp, rbuf[:nr])
-			t.recoverFn(cp)
+			if !t.recoverFn(cp) {
+				// The pipeline REJECTED the frame — a BRC-131 announce that
+				// fails the block-control gate is the case. Asking again cannot
+				// help: the retry endpoint holds exactly this frame and the gate
+				// will reject it every time. Stop retrying, but do NOT book a
+				// repair: the gap is real and permanent, so it must read as
+				// unrecovered or the repair ratio reports success for data no
+				// consumer ever received.
+				t.abandonGap(e, "rejected")
+				t.log.Debug("NACK: unicast retransmit rejected by the pipeline",
+					"endpoint", endpoint.Addr, "seq_num", e.seqNum, "bytes", nr)
+				return
+			}
 			t.cancelGap(e)
 			t.log.Debug("NACK: unicast retransmit recovered", "endpoint", endpoint.Addr, "seq_num", e.seqNum, "bytes", nr)
 			return
@@ -1097,6 +1109,30 @@ func (t *Tracker) ActiveFlows() int {
 }
 
 // cancelGap removes a gap entry after receiving an ACK.
+// abandonGap removes a gap that can never be filled, WITHOUT booking a fill.
+// cancelGap is the success path (it calls bookFill and counts a suppression);
+// this is the failure path, so the gap is counted unrecovered instead.
+func (t *Tracker) abandonGap(e *gapEntry, reason string) {
+	t.mu.Lock()
+	fs, ok := t.flows[e.hashKey]
+	if ok {
+		delete(fs.pending, e.seqNum)
+		if fs.probing == e.seqNum {
+			fs.probing = 0
+		}
+	}
+	t.mu.Unlock()
+	if ok && t.rec != nil {
+		// A speculative tail probe that comes back rejected was never an
+		// observed loss, so it is retired silently — booking it would
+		// manufacture phantom loss on an idle flow.
+		if !e.speculative {
+			t.rec.GapUnrecovered(fs.flowType, srcStr(fs.source))
+		}
+	}
+	_ = reason
+}
+
 func (t *Tracker) cancelGap(e *gapEntry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -507,30 +507,41 @@ func (w *Worker) serve(ctx context.Context, fd int, readyMsg string) error {
 // endpoint returns a frame over the unicast NACK return channel, so a
 // gap-repaired frame reaches downstream consumers without any client logic.
 // Serialised against the Run loop via procMu.
-func (w *Worker) Reinject(raw []byte) {
+// Reinject re-injects a frame recovered over the unicast NACK return channel and
+// reports whether the pipeline ACCEPTED it.
+//
+// The return value is what stops a rejected frame being booked as a repair. A
+// BRC-131 announce that fails the block-control gate is dropped here exactly as
+// it would be off the wire, so re-requesting it can never succeed; without the
+// signal the tracker cancelled the gap and counted a suppression, turning a
+// permanent hole into a phantom "repaired" statistic.
+func (w *Worker) Reinject(raw []byte) bool {
 	w.procMu.Lock()
 	w.curSource = nil // recovered frame: no live source — don't clobber per-flow source attribution
-	w.processFrame(raw)
+	accepted := w.processFrame(raw)
 	w.procMu.Unlock()
+	return accepted
 }
 
-func (w *Worker) processFrame(raw []byte) {
+// processFrame routes one frame and reports whether it was accepted for
+// delivery. Only the gated classes can answer false; every other class is
+// accepted by construction once it decodes.
+func (w *Worker) processFrame(raw []byte) bool {
 	// BRC-131 block control frame (FrameVer 0x04): route to block handler.
 	if frame.IsBlockFrame(raw) {
-		w.processBlockFrame(raw)
-		return
+		return w.processBlockFrame(raw)
 	}
 
 	// BRC-132 subtree data frame (FrameVer 0x05): route to subtree data handler.
 	if frame.IsSubtreeDataFrame(raw) {
 		w.processSubtreeDataFrame(raw)
-		return
+		return true
 	}
 
 	// BRC-134 anchor transaction frame (FrameVer 0x06): route to anchor handler.
 	if frame.IsAnchorFrame(raw) {
 		w.processAnchorFrame(raw)
-		return
+		return true
 	}
 
 	// BRC-130 fragment: route to reassembly buffer and return.
@@ -539,7 +550,7 @@ func (w *Worker) processFrame(raw []byte) {
 			if w.rec != nil {
 				w.rec.FrameDropped(w.id, "no_reassembly_buffer")
 			}
-			return
+			return true
 		}
 		ff, err := frame.DecodeFragment(raw)
 		if err != nil {
@@ -549,7 +560,7 @@ func (w *Worker) processFrame(raw []byte) {
 			if w.debug {
 				w.log.Debug("BRC-130 decode error", "err", err)
 			}
-			return
+			return true
 		}
 		w.reassemBuf.Observe(ff)
 		// Fragment-level gap tracking: feed each fragment's (HashKey,
@@ -573,19 +584,19 @@ func (w *Worker) processFrame(raw []byte) {
 			}
 			w.tracker.Observe(w.fragGroupIdx(ff), sub, ff.HashKey, ff.SeqNum, ff.TxID, w.curSource)
 		}
-		return
+		return true
 	}
 
 	// BRC-142 bundle frame (FrameVer 0x08): edge-decoalesce and forward members.
 	if frame.IsBundle(raw) {
 		w.processBundle(raw)
-		return
+		return true
 	}
 
 	// BRC-148 BEEF object frame (FrameVer 0x09): route to the BEEF handler.
 	if frame.IsBEEFFrame(raw) {
 		w.processBeefFrame(raw)
-		return
+		return true
 	}
 
 	f, err := frame.Decode(raw)
@@ -596,7 +607,7 @@ func (w *Worker) processFrame(raw []byte) {
 		if w.debug {
 			w.log.Debug("decode error", "err", err, "len", len(raw))
 		}
-		return
+		return true
 	}
 
 	if w.rec != nil {
@@ -633,7 +644,7 @@ func (w *Worker) processFrame(raw []byte) {
 					"payload_len", len(f.Payload),
 				)
 			}
-			return
+			return true
 		}
 	}
 
@@ -643,7 +654,7 @@ func (w *Worker) processFrame(raw []byte) {
 		if w.rec != nil {
 			w.rec.FrameDropped(w.id, reason)
 		}
-		return
+		return true
 	}
 
 	// Cross-listener TxID dedup: when multiple listeners receive the same
@@ -666,7 +677,7 @@ func (w *Worker) processFrame(raw []byte) {
 			if w.tracker != nil && f.SeqNum != 0 {
 				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 			}
-			return
+			return true
 		}
 	}
 
@@ -684,7 +695,7 @@ func (w *Worker) processFrame(raw []byte) {
 			if w.tracker != nil {
 				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 			}
-			return
+			return true
 		}
 	}
 
@@ -725,6 +736,7 @@ func (w *Worker) processFrame(raw []byte) {
 			"seq_num", f.SeqNum,
 		)
 	}
+	return true
 }
 
 // fragGroupIdx returns the flow's group index for a fragment, used only for
@@ -1009,7 +1021,11 @@ func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 // transactions) and are forwarded directly to egress. Gap tracking is performed
 // on the block control flow so NACK-based retransmission can recover lost
 // block announcements.
-func (w *Worker) processBlockFrame(raw []byte) {
+// processBlockFrame handles a BRC-131 block control frame and reports whether it
+// was ACCEPTED. A frame the block-control gate rejects returns false so a
+// recovered retransmit is not booked as a repair — re-requesting it can never
+// succeed.
+func (w *Worker) processBlockFrame(raw []byte) bool {
 	bf, err := frame.DecodeBlock(raw)
 	if err != nil {
 		if w.rec != nil {
@@ -1018,7 +1034,7 @@ func (w *Worker) processBlockFrame(raw []byte) {
 		if w.debug {
 			w.log.Debug("block frame decode error", "err", err, "len", len(raw))
 		}
-		return
+		return false
 	}
 
 	if w.rec != nil {
@@ -1032,7 +1048,7 @@ func (w *Worker) processBlockFrame(raw []byte) {
 			w.log.Debug("block frame dropped by block-control gate",
 				"msg_type", bf.MsgType, "content_id", fmt.Sprintf("%x", bf.ContentID[:8]))
 		}
-		return
+		return false
 	}
 
 	if err := w.egr.SendBlock(raw, bf); err != nil {
@@ -1064,6 +1080,7 @@ func (w *Worker) processBlockFrame(raw []byte) {
 			"seq_num", bf.SeqNum,
 		)
 	}
+	return true
 }
 
 // emitBlockHeader extracts the 80-byte block header from a BlockAnnounce

@@ -545,7 +545,7 @@ func TestSendNACK_UnicastRetransmit_Recovered(t *testing.T) {
 	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
 
 	recovered := make(chan []byte, 4)
-	tr.SetRecoverFunc(func(raw []byte) { recovered <- raw })
+	tr.SetRecoverFunc(func(raw []byte) bool { recovered <- raw; return true })
 
 	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
 	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum 2
@@ -595,7 +595,7 @@ func TestSendNACK_UnicastACK_NoData_NotCancelled(t *testing.T) {
 	// eviction. The old bug cancelled on the first ACK (~one respTimeout).
 	cfg := nack.TrackerConfig{JitterMax: 0, BackoffBase: 50 * time.Millisecond, BackoffMax: 100 * time.Millisecond, MaxRetries: 50, GapTTL: 10 * time.Second}
 	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
-	tr.SetRecoverFunc(func(raw []byte) {}) // recoverFn set, but no data will arrive
+	tr.SetRecoverFunc(func(raw []byte) bool { return true }) // recoverFn set, but no data will arrive
 
 	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
 	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum 2
