@@ -1044,6 +1044,23 @@ func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 // transactions) and are forwarded directly to egress. Gap tracking is performed
 // on the block control flow so NACK-based retransmission can recover lost
 // block announcements.
+// blockFlowIdx returns the virtual flow index used for gap tracking a block
+// control frame. A BRC-133 coinbase shares GroupBlockBroadcast as its egress
+// group but the proxy stamps its HashKey against GroupCoinbaseFlow, so it owns
+// an independent SeqNum stream; tracking it under the announce index reports
+// its gaps as brc131. The index is process-local — it is never encoded on the
+// NACK wire (which carries only HashKey and the seq range), so this affects
+// metric labelling only, never recovery routing.
+//
+// BRC-133 is legacy: the block-control gate drops standalone coinbase frames
+// by default, so brc133 only appears where an operator disabled the gate.
+func blockFlowIdx(msgType byte) uint32 {
+	if msgType == frame.BlockMsgCoinbase {
+		return uint32(shard.GroupCoinbaseFlow)
+	}
+	return uint32(shard.GroupBlockBroadcast)
+}
+
 // processBlockFrame handles a BRC-131 block control frame and reports whether it
 // was ACCEPTED. A frame the block-control gate rejects returns false so a
 // recovered retransmit is not booked as a repair — re-requesting it can never
@@ -1093,7 +1110,7 @@ func (w *Worker) processBlockFrame(raw []byte) bool {
 	// Gap tracking on the control flow uses a zero SubtreeID.
 	if w.tracker != nil && bf.SeqNum != 0 {
 		var zeroSub [32]byte
-		w.tracker.Observe(uint32(shard.GroupBlockBroadcast), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
+		w.tracker.Observe(blockFlowIdx(bf.MsgType), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
 	}
 
 	if w.debug {
@@ -1363,7 +1380,7 @@ func (w *Worker) DeliverReassembledBlock(payload []byte, bf *frame.BlockFrame) {
 
 	if w.tracker != nil && bf.SeqNum != 0 {
 		var zeroSub [32]byte
-		w.tracker.Observe(uint32(shard.GroupBlockBroadcast), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
+		w.tracker.Observe(blockFlowIdx(bf.MsgType), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
 	}
 
 	if w.debug {

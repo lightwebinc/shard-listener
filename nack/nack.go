@@ -73,6 +73,14 @@ const groupBlockBroadcast uint32 = 0xFFFE
 // Mirrors shard.GroupSubtreeDataAnnounce = 0xFFFB without importing the shard package.
 const groupSubtreeDataAnnounce uint32 = 0xFFFB
 
+// groupCoinbaseFlow is the virtual group index for BRC-133 coinbase frames.
+// Like groupAnchorFlow it never appears in an IPv6 address and is not carried
+// on the NACK wire — it exists so a coinbase flow is counted separately from
+// the block announces it shares GroupBlockBroadcast with. BRC-133 is legacy:
+// the block-control gate (default on) drops standalone coinbase frames, so
+// this label only appears when an operator has disabled the gate.
+const groupCoinbaseFlow uint32 = 0xFFF8
+
 // groupAnchorFlow is the virtual group index for BRC-134 anchor transaction frames.
 // Anchors share the GroupBlockBroadcast multicast address on the wire but use a
 // dedicated groupIdx for HashKey derivation so they have their own SeqNum counter.
@@ -86,6 +94,8 @@ func flowLabel(groupIdx uint32) string {
 		return "brc131"
 	case groupSubtreeDataAnnounce:
 		return "brc132"
+	case groupCoinbaseFlow:
+		return "brc133"
 	case groupAnchorFlow:
 		return "brc134"
 	default:
