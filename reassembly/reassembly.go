@@ -5,14 +5,16 @@
 // The proxy splits large BSV transactions into K BRC-130 fragment datagrams,
 // each carrying a slice of the original payload together with TxID, FragIndex,
 // FragTotal, and OrigPayloadLen. The listener receives fragments in any order
-// and reassembles them into the original payload keyed by TxID.
+// and reassembles them into the original payload.
 //
 // # Reassembly buffer
 //
 // A [Buffer] holds at most MaxSlots reassembly slots. Each slot is keyed by a
-// [32]byte TxID and tracks the K expected fragments. When all K fragments
-// arrive the payload is verified (SHA256d(payload) == TxID, optional) and
-// delivered via the callback.
+// [32]byte key — the fragment's offset-8 field (TxID) for non-V9 slots; V9
+// (BRC-149 BEEF) fragments key on the (ContentID, TopicID) pair as
+// SHA-256(ContentID ∥ TopicID) — and tracks the K expected fragments. When
+// all K fragments arrive the payload is verified (SHA256d(payload) == TxID,
+// optional) and delivered via the callback.
 //
 // Slots that never complete are evicted after TTL. The oldest slot is evicted
 // when the slot limit is reached.

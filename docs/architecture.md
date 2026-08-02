@@ -79,6 +79,8 @@ Each worker:
    - `FrameVerV5` (0x05) → `processSubtreeDataFrame` (BRC-132)
    - `FrameVerV6` (0x06) → `processAnchorFrame` (BRC-134)
    - `FrameVerV3` (0x03) → fragment reassembly buffer (`Buffer.Observe`)
+   - `FrameVerV8` (0x08, `frame.IsBundle`) → `processBundle` (BRC-142 decoalesce/re-bucket)
+   - `FrameVerV9` (0x09) → `processBeefFrame` (BRC-149 BEEF)
    - Otherwise → BRC-12/BRC-124/BRC-128 hot path: `frame.Decode`, `shard.Engine.GroupIndex`,
      `filter.Allow`, `egress.Send`, optionally `mcastEgr.Send`
 4. Calls `nack.Tracker.Observe` for BRC-124/BRC-128 frames with non-zero `SeqNum`,
@@ -402,13 +404,14 @@ correctly if the inner chain turns out not to be bundle-aware.
 
 ## Fragment Reassembly Callbacks
 
-Three callback types are registered on the reassembly buffer (`reassembly.Buffer`):
+Four callback types are registered on the reassembly buffer (`reassembly.Buffer`):
 
 | Callback | Frame version | Triggered by | Delivers to |
 |---|---|---|---|
 | `Callback` | V2 (BRC-124/BRC-128) | Fragment set complete | BRC-124/128 egress path; optional SHA256d verification |
 | `BlockCallback` | V4 (BRC-131) | Fragment set complete | `DeliverReassembledBlock` |
 | `SubtreeDataCallback` | V5 (BRC-132) | Fragment set complete | Merkle verify if enabled → `DeliverReassembledSubtreeData` |
+| `BEEFCallback` | V9 (BRC-149 BEEF) | Fragment set complete | Registered via `SetBEEFCallback`; BEEF egress path — ContentID is the SHA-256d verification hash |
 
 ## Egress deduplication
 
@@ -463,7 +466,9 @@ and/or address-space translation.
 | `-mc-egress-hoplimit` | `IPV6_MULTICAST_HOPS` (default 1) |
 
 Multicast egress fires independently of unicast egress — both paths execute
-for every accepted frame. `strip-header` applies to both egress modes.
+for every accepted frame. `strip-header` governs only the final unicast hop;
+multicast egress always re-emits the complete frame (header + payload), since
+bridged-domain members must decode the header to demux, gap-track, and NACK.
 
 The per-frame address derivation is zero-alloc: bytes 0–13 are fixed at
 construction (scope prefix, zero IANA boundary, 16-bit group-id); only bytes
@@ -476,7 +481,7 @@ concrete `*egress.Sender`. The default single-destination `Sender` satisfies it,
 so the stock listener is unchanged; an alternative sink can be injected via
 `listener.New` to receive every frame the worker would otherwise unicast. The
 interface mirrors `Sender`'s surface exactly (`Send`, `SendBlock`,
-`SendSubtreeData`, `SendRaw`, `Proto`, `Close`) and leaks no routing or policy
+`SendSubtreeData`, `SendBeef`, `SendRaw`, `Proto`, `Close`) and leaks no routing or policy
 detail — analogous to the proxy's pluggable-ingress seam. A downstream build
 can plug a multi-consumer sink into this seam without forking.
 

@@ -38,7 +38,7 @@ The default `0x000B` corresponds to the IANA-assigned Bitcoin allocation
 
 ### `-mode` / `LISTENER_MODE` (default: `collapsed`)
 
-Role in the receiver/delivery split (mirrors the proxy's `-mode`):
+Role in the receiver/delivery split:
 
 | Value | Behaviour |
 |-------------|--------------------------------------------------------------|
@@ -134,7 +134,6 @@ Txid prefix bit width used as the shard key. Must exactly match the proxy's
 | 2 | 4 |
 | 8 | 256 |
 | 12 | 4 096 |
-| 15 | 32 768 (max; top of 16-bit space reserved for control) |
 
 ### `-shard-include` / `SHARD_INCLUDE`
 
@@ -153,13 +152,16 @@ Empty means exclude nothing.
 
 ### BRC-142 bundle handling
 
-BRC-142 coalescing bundles (FrameVer `0x08`) are handled automatically — there is
-**no CLI flag**. Bundles are decoalesced/re-bucketed and delivered by the normal
+BRC-142 coalescing bundles (FrameVer `0x08`) are handled automatically —
+decoalescing needs **no CLI flag**. Bundles are decoalesced/re-bucketed and delivered by the normal
 egress path (see [architecture — BRC-142 Bundle Processing](architecture.md#brc-142-bundle-processing)).
 When a bundle's ShardBits generation differs from this listener's, it is
 re-bucketed to the local generation; the re-bucketed datagram size cap is the
 hardcoded public-internet MTU baseline (`rebucketMaxBytes = 1500` in `listener.go`),
-not configurable.
+not configurable. `-rebucket-relay` / `REBUCKET_RELAY` (default: `false`)
+marks this listener an **intentional** re-bucket relay (it runs a different
+ShardBits than the bundles it receives); when false, re-bucketing raises the
+`bsl_rebucket_unguarded` alarm.
 
 ---
 
@@ -372,6 +374,22 @@ registering — and NACK-storming — a phantom gap range. `0` selects the
 default 4096. See
 [architecture — Gap tracking](architecture.md#gap-tracking-nack--norm-inspired)
 for the rate-aware plausibility check and the v1.7.1 transition-tail recovery.
+
+### Tail probe
+
+Gap detection is otherwise inferential — frame N is only known lost when N+1
+arrives — so the last frames before a sender idles are invisible. The tail
+probe speculatively NACKs the next expected `SeqNum` on a flow that has gone
+quiet, using the existing MISS response (no protocol change). Silence counts
+as abnormal after `idle-factor ×` the flow's own smoothed inter-arrival,
+floored at `min-idle`.
+
+| Flag | Env | Default | Notes |
+|------|-----|---------|-------|
+| `-nack-tail-probe` | `NACK_TAIL_PROBE` | `true` | Master switch |
+| `-nack-tail-probe-idle-factor` | `NACK_TAIL_PROBE_IDLE_FACTOR` | `4.0` | Multiple of the flow's smoothed inter-arrival before silence counts as abnormal |
+| `-nack-tail-probe-min-idle` | `NACK_TAIL_PROBE_MIN_IDLE` | `500ms` | Floor on the idle threshold so fast flows do not probe continuously |
+| `-nack-tail-probe-max-misses` | `NACK_TAIL_PROBE_MAX_MISSES` | `3` | Stop probing a flow after this many consecutive MISS answers (it is genuinely idle); reset by new traffic |
 
 ---
 
@@ -661,8 +679,7 @@ listener must independently validate them — this is the permissionless gate
   if its TxID matches one (`reason="coinbase_uncorrelated"` otherwise).
 
 This is anti-spam at fan-out, not consensus validation (no chain context); the
-consuming node does full validation. Off by default. BRC-134 anchors are
-deliberately ungated.
+consuming node does full validation. BRC-134 anchors are deliberately ungated.
 
 ### `-min-pow-bits` / `MIN_POW_BITS` (default: `0`)
 
@@ -863,9 +880,10 @@ filter → version filter → delivery. Canonical spec:
 |------------|---------|-------------|
 | `-beef-topics` / `BEEF_TOPICS` | — | Comma-separated elected topics (names, or 64-hex TopicIDs verbatim); derives band joins + the worker topic filter |
 | `-beef-groups` / `BEEF_GROUPS` | — | Plane-relative group indices to join (aggregator mode: no topic restriction) |
-| `-beef-shard-bits` / `BEEF_SHARD_BITS` | `4` | Plane width; must match the proxy |
+| `-beef-shard-bits` / `BEEF_SHARD_BITS` | `0` | Plane width (`0` = single group); must match the proxy |
 | `-beef-versions` / `BEEF_VERSIONS` | all | Accepted encodings: comma of `beef`\|`beefv2`\|`atomic` (capability gate on payload word) |
 | `-beef-verify-content` / `BEEF_VERIFY_CONTENT` | `false` | Debug: verify ContentID == SHA-256d(object) before fan-out (BEEF analogue of `-verify-payload-hash`) |
+| `-beef-max-object-bytes` / `BEEF_MAX_OBJECT_BYTES` | `1048576` | Per-object byte bound applied to `OrigFrameVer 0x09` fragment reassembly (declared OrigPayloadLen); must match the ingress proxies' `-beef-max-object-bytes` |
 
 Join/emit sites: `buildGroups` (band joins; SSM inherits the global source
 roster per the spec), `processBeefFrame` (filters → `bsl:egr` claim on the

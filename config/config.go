@@ -157,8 +157,8 @@ type Config struct {
 	// LocalSource: the co-located proxy's BIND_SOURCE on a collapsed node.
 	//   Excluded from every roster-driven (S,G) join — joining the node's
 	//   own source on the PIM interface installs an iif==oif mroute and
-	//   loops originated frames until hop-limit death (~60x amplification;
-	//   see lab-spine-ssm-geo/LATENCY-GEO.md). Consequence: this listener
+	//   loops originated frames until hop-limit death (~60x amplification,
+	//   measured in a geo SSM lab). Consequence: this listener
 	//   does not receive own-node frames via multicast.
 	SourceMode             string
 	LocalSource            string

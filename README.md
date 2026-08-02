@@ -23,7 +23,7 @@ FF05::<shard>:9001  ──multicast──►  shard-listener  ──UDP/TCP─�
                                            │  shard + subtree filter
                                      gap detected
                                            │
-                          NACK (BRC-126) ──▼──────►  [nack-addr]:9300
+                          NACK (BRC-126) ──▼──────►  [retry-endpoint]:9300
                                            ◄─── ACK / MISS
 ```
 

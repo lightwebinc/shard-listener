@@ -303,7 +303,7 @@ func (t *Tracker) FlowsRefused() uint64 {
 func (t *Tracker) SetNACKSource(addr string) {
 	t.nackSrc = addr
 	// Re-seed with self demoted now that this node's own address is known (the
-	// commercial listener calls this AFTER New).
+	// downstream embedders call this AFTER New).
 	if len(t.seeds) > 0 && t.registry != nil {
 		t.registry.Seed(demoteSelf(t.seeds, addr))
 	}

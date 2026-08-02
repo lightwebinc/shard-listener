@@ -70,7 +70,7 @@ func TestHeaderFanout_ReceivesDecodedHeader(t *testing.T) {
 }
 
 // TestHeaderFanout_WithoutNodeGlobalEgress is the case that motivates D8: a
-// commercial edge configures NO -header-egress-addr and NO multicast header
+// delivery edge configures NO -header-egress-addr and NO multicast header
 // egress, yet consumers must still be able to elect the lane. Before the seam
 // existed the emit site was gated on those two senders, so this produced
 // nothing at all.
