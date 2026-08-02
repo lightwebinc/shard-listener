@@ -37,6 +37,7 @@ import (
 	"github.com/lightwebinc/shard-common/bundle"
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/netjoin"
+	"github.com/lightwebinc/shard-common/objfmt"
 	"github.com/lightwebinc/shard-common/pow"
 	"github.com/lightwebinc/shard-common/shard"
 
@@ -268,12 +269,28 @@ func (w *Worker) SetSenderACL(a *filter.SenderACL) {
 	w.senderACL = a
 }
 
-// SetVerifyPayloadHash toggles SHA256d(payload)==TxID verification on
-// BRC-124/BRC-128 frames. When true, frames whose payload hash does not match
-// their TxID are dropped before egress and gap tracking, and
+// SetVerifyPayloadHash toggles canonical-TxID verification on BRC-124/
+// BRC-128 frames: SHA256d(payload) for BRC-12 raw payloads, objfmt.TxID
+// (SHA256d over the standard serialization, EF extras excluded) for BRC-30
+// EF payloads. When true, frames whose payload does not hash to their TxID
+// are dropped before egress and gap tracking, and
 // bsl_frames_invalid_payload_total is incremented. Defaults to false.
 func (w *Worker) SetVerifyPayloadHash(v bool) {
 	w.verifyPayloadHash = v
+}
+
+// payloadTxID derives the canonical TxID for a V2 tx payload: SHA256d over
+// the raw bytes for a BRC-12 payload, objfmt.TxID (standard serialization,
+// EF extras excluded) for a BRC-30 EF payload — the same id producers stamp
+// (proxy bare-tx push path, subtx-gen) and consumers dedup on. ok=false when
+// an EF-marked payload does not walk as a transaction (structurally invalid).
+func payloadTxID(p []byte) (id [32]byte, ok bool) {
+	if objfmt.IsEF(p) {
+		id, err := objfmt.TxID(p)
+		return id, err == nil
+	}
+	first := sha256.Sum256(p)
+	return sha256.Sum256(first[:]), true
 }
 
 // SetBEEF wires the BRC-148 BEEF object plane: the plane-aware derivation
@@ -627,21 +644,27 @@ func (w *Worker) processFrame(raw []byte) bool {
 	}
 
 	// Optional payload-hash verification (GAP-2). Only meaningful for V2
-	// frames (BRC-12 has no chain semantics; the TxID is still the BSV
-	// double-SHA256 of the payload but legacy frames are forwarded verbatim
-	// regardless). When disabled, this branch is skipped entirely.
+	// frames (BRC-12 has no chain semantics; legacy frames are forwarded
+	// verbatim regardless). The check verifies the CANONICAL TxID: for a
+	// BRC-12 raw payload that is SHA256d over the payload bytes; for a
+	// BRC-30 EF payload (BRC-128 frame) it is SHA256d over the STANDARD
+	// serialization (objfmt.TxID — EF extras excluded), which is the id
+	// every producer stamps and every consumer derives. Hashing the raw EF
+	// bytes here instead would drop 100% of honest EF frames. When
+	// disabled, this branch is skipped entirely.
 	if w.verifyPayloadHash && f.Version == frame.FrameVerV2 {
-		first := sha256.Sum256(f.Payload)
-		second := sha256.Sum256(first[:])
-		if second != f.TxID {
+		computed, ok := payloadTxID(f.Payload)
+		if !ok || computed != f.TxID {
 			if w.rec != nil {
 				w.rec.FrameInvalidPayload(w.id)
 			}
 			if w.debug {
 				w.log.Debug("payload hash mismatch",
 					"txid_prefix", fmt.Sprintf("%x", f.TxID[:8]),
-					"computed_prefix", fmt.Sprintf("%x", second[:8]),
+					"computed_prefix", fmt.Sprintf("%x", computed[:8]),
 					"payload_len", len(f.Payload),
+					"ef", objfmt.IsEF(f.Payload),
+					"walkable", ok,
 				)
 			}
 			return true

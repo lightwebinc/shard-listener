@@ -10,6 +10,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/objfmt"
 	"github.com/lightwebinc/shard-common/shard"
 	"golang.org/x/sys/unix"
 
@@ -415,6 +416,108 @@ func TestProcessFrame_VerifyEnabled_AcceptsValid(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("verify-enabled: valid frame must forward")
+	}
+}
+
+// buildEFPayload returns a structurally valid BRC-30 EF transaction of
+// exactly total bytes: version | EF marker | 1 input (empty scripts, zero
+// spent satoshis) | 1 output whose locking script absorbs the slack | locktime.
+// Supports total in [75, 75+252] (1-byte script varint).
+func buildEFPayload(t *testing.T, total int) []byte {
+	t.Helper()
+	const min = 75
+	if total < min || total > min+252 {
+		t.Fatalf("buildEFPayload: unsupported total %d", total)
+	}
+	p := make([]byte, total)
+	p[0] = 2                                                  // version = 2 (LE)
+	copy(p[4:10], []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0xEF}) // EF marker
+	p[10] = 1                                                 // vin_count
+	for i := 11; i < 47; i++ {
+		p[i] = 0xAB // prev_hash + prev_index
+	}
+	// p[47] unlocking script len = 0; p[48:52] sequence = 0;
+	// p[52:60] spent_satoshis = 0; p[60] prev locking script len = 0.
+	p[61] = 1                 // vout_count
+	p[70] = byte(total - min) // output locking script varint
+	// script bytes + trailing locktime stay zero.
+	return p
+}
+
+// TestProcessFrame_VerifyEnabled_AcceptsValidEF proves the verify gate is
+// EF-aware: an honest BRC-128 frame stamps the canonical objfmt.TxID (EF
+// extras excluded), which is NOT sha256d over the payload bytes — the frame
+// must still forward.
+func TestProcessFrame_VerifyEnabled_AcceptsValidEF(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetVerifyPayloadHash(true)
+
+	payload := buildEFPayload(t, 100)
+	id, err := objfmt.TxID(payload)
+	if err != nil {
+		t.Fatalf("objfmt.TxID: %v", err)
+	}
+	if id == sha256d(payload) {
+		t.Fatal("test payload degenerate: EF id equals raw hash")
+	}
+	raw := buildBRC124Frame(t, id, payload)
+	w.processFrame(raw)
+
+	select {
+	case got := <-ch:
+		if len(got) != len(raw) {
+			t.Fatalf("got %d bytes want %d", len(got), len(raw))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("verify-enabled: honest EF frame must forward")
+	}
+}
+
+// TestProcessFrame_VerifyEnabled_RejectsRawHashStampedEF: sha256d over the
+// EF bytes is the pre-fix identity no producer stamps — such a frame carries
+// an id no consumer would ever derive and must be dropped.
+func TestProcessFrame_VerifyEnabled_RejectsRawHashStampedEF(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetVerifyPayloadHash(true)
+
+	payload := buildEFPayload(t, 100)
+	raw := buildBRC124Frame(t, sha256d(payload), payload)
+	w.processFrame(raw)
+
+	select {
+	case <-ch:
+		t.Fatal("verify-enabled: raw-hash-stamped EF frame must be dropped")
+	case <-time.After(150 * time.Millisecond):
+		// expected: dropped before egress
+	}
+}
+
+// TestProcessFrame_VerifyEnabled_RejectsUnwalkableEF: an EF-marked payload
+// that does not walk as a transaction is structurally invalid — even a
+// matching raw hash must not admit it.
+func TestProcessFrame_VerifyEnabled_RejectsUnwalkableEF(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetVerifyPayloadHash(true)
+
+	payload := make([]byte, 40) // EF marker, then truncated garbage
+	copy(payload[4:10], []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0xEF})
+	raw := buildBRC124Frame(t, sha256d(payload), payload)
+	w.processFrame(raw)
+
+	select {
+	case <-ch:
+		t.Fatal("verify-enabled: unwalkable EF payload must be dropped")
+	case <-time.After(150 * time.Millisecond):
+		// expected: dropped before egress
 	}
 }
 

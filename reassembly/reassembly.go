@@ -13,8 +13,9 @@
 // [32]byte key — the fragment's offset-8 field (TxID) for non-V9 slots; V9
 // (BRC-149 BEEF) fragments key on the (ContentID, TopicID) pair as
 // SHA-256(ContentID ∥ TopicID) — and tracks the K expected fragments. When
-// all K fragments arrive the payload is verified (SHA256d(payload) == TxID,
-// optional) and delivered via the callback.
+// all K fragments arrive the payload is verified (canonical TxID check —
+// SHA256d(payload) for BRC-12 raw, objfmt.TxID for BRC-30 EF; optional) and
+// delivered via the callback.
 //
 // Slots that never complete are evicted after TTL. The oldest slot is evicted
 // when the slot limit is reached.
@@ -32,7 +33,22 @@ import (
 	"time"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/objfmt"
 )
+
+// payloadTxID derives the canonical TxID for a reassembled V2 tx payload:
+// SHA256d over the raw bytes for a BRC-12 payload, objfmt.TxID (standard
+// serialization, EF extras excluded) for a BRC-30 EF payload — the same id
+// producers stamp and consumers dedup on. ok=false when an EF-marked payload
+// does not walk as a transaction (structurally invalid).
+func payloadTxID(p []byte) (id [32]byte, ok bool) {
+	if objfmt.IsEF(p) {
+		id, err := objfmt.TxID(p)
+		return id, err == nil
+	}
+	first := sha256.Sum256(p)
+	return sha256.Sum256(first[:]), true
+}
 
 const (
 	// DefaultMaxSlots is the default maximum number of concurrent reassembly
@@ -87,7 +103,7 @@ type Buffer struct {
 	insertOrder       [][32]byte // eviction order (FIFO)
 	maxSlots          int
 	ttl               time.Duration
-	verifyHash        bool                // SHA256d check for V2 slots
+	verifyHash        bool                // canonical-TxID check for V2 slots (EF-aware)
 	verifyMerkle      bool                // optional Merkle root check for V5 slots
 	onComplete        Callback            // V2 (FrameVerV2) completion
 	onCompleteBlock   BlockCallback       // V4 (FrameVerV4) completion
@@ -143,7 +159,8 @@ type slot struct {
 //
 //   - maxSlots: maximum concurrent reassembly slots (0 → DefaultMaxSlots).
 //   - ttl: slot TTL before abandonment (0 → DefaultTTL).
-//   - verifyHash: if true, SHA256d(payload) is verified against TxID for V2
+//   - verifyHash: if true, the canonical TxID (SHA256d of the payload for
+//     BRC-12 raw, objfmt.TxID for BRC-30 EF) is verified against TxID for V2
 //     slots; mismatches are dropped. Always false for V5 subtree data slots.
 //   - cb: called on successful V2 (FrameVerV2) completion.
 func New(maxSlots int, ttl time.Duration, verifyHash bool, cb Callback) *Buffer {
@@ -319,7 +336,8 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 // OrigFrameVer, and removes the slot. Must be called with b.mu held.
 //
 // OrigFrameVer dispatch:
-//   - 0x00 / 0x02 → SHA256d verification (if verifyHash); deliver via onComplete (V2).
+//   - 0x00 / 0x02 → canonical-TxID verification (if verifyHash; EF-aware);
+//     deliver via onComplete (V2).
 //   - 0x04        → deliver via onCompleteBlock (V4 BRC-131); no SHA256d.
 //   - 0x05        → deliver via onCompleteSubtree (V5 BRC-132); no SHA256d;
 //     optional Merkle root verification via verifyMerkle.
@@ -391,11 +409,13 @@ func (b *Buffer) complete(s *slot) {
 
 	default:
 		// OrigFrameVer 0x00 / 0x02 (or any unrecognised value): treat as V2.
-		// SHA256d verification applied when verifyHash is set.
+		// Canonical-TxID verification applied when verifyHash is set:
+		// SHA256d(payload) for BRC-12 raw payloads, objfmt.TxID (standard
+		// serialization, EF extras excluded) for BRC-30 EF payloads —
+		// hashing the raw EF bytes would reject every honest EF payload.
 		if b.verifyHash {
-			first := sha256.Sum256(payload)
-			second := sha256.Sum256(first[:])
-			if second != s.txID {
+			computed, ok := payloadTxID(payload)
+			if !ok || computed != s.txID {
 				if b.onHashMismatch != nil {
 					b.onHashMismatch()
 				}

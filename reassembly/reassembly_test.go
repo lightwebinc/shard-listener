@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lightwebinc/shard-common/frame"
+	"github.com/lightwebinc/shard-common/objfmt"
 )
 
 // buildFragFrame constructs a *frame.FragFrame from raw components.
@@ -176,6 +177,75 @@ func TestReassembly_HashMismatch_Disabled(t *testing.T) {
 
 	if calls != 1 {
 		t.Errorf("callback called %d times, want 1 when hash verify disabled", calls)
+	}
+}
+
+// buildEFPayloadR returns a structurally valid BRC-30 EF transaction of
+// exactly total bytes (total in [75, 75+252]); see listener_test.buildEFPayload.
+func buildEFPayloadR(t *testing.T, total int) []byte {
+	t.Helper()
+	const min = 75
+	if total < min || total > min+252 {
+		t.Fatalf("buildEFPayloadR: unsupported total %d", total)
+	}
+	p := make([]byte, total)
+	p[0] = 2
+	copy(p[4:10], []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0xEF})
+	p[10] = 1
+	for i := 11; i < 47; i++ {
+		p[i] = 0xAB
+	}
+	p[61] = 1
+	p[70] = byte(total - min)
+	return p
+}
+
+// TestReassembly_EFPayload_VerifyAccepts proves the reassembly verify gate is
+// EF-aware: fragments of an honest EF payload carry the canonical objfmt.TxID
+// (EF extras excluded), not sha256d over the payload bytes, and must deliver.
+func TestReassembly_EFPayload_VerifyAccepts(t *testing.T) {
+	payload := buildEFPayloadR(t, 100)
+	id, err := objfmt.TxID(payload)
+	if err != nil {
+		t.Fatalf("objfmt.TxID: %v", err)
+	}
+	if id == txIDOf(payload) {
+		t.Fatal("test payload degenerate: EF id equals raw hash")
+	}
+
+	var got []byte
+	mismatches := 0
+	b := New(16, time.Second, true, func(p []byte, _ *frame.Frame) { got = p })
+	b.SetHashMismatchHook(func() { mismatches++ })
+
+	b.Observe(buildFragFrame(id, uint32(len(payload)), 0, 2, payload[:50]))
+	b.Observe(buildFragFrame(id, uint32(len(payload)), 1, 2, payload[50:]))
+
+	if mismatches != 0 {
+		t.Errorf("honest EF payload tripped hash mismatch %d times", mismatches)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("payload mismatch: got %d bytes, want %d", len(got), len(payload))
+	}
+}
+
+// TestReassembly_EFPayload_RawHashRejected: sha256d over the EF bytes is the
+// pre-fix identity no producer stamps — such a slot must be dropped.
+func TestReassembly_EFPayload_RawHashRejected(t *testing.T) {
+	payload := buildEFPayloadR(t, 100)
+
+	calls := 0
+	mismatches := 0
+	b := New(16, time.Second, true, func(_ []byte, _ *frame.Frame) { calls++ })
+	b.SetHashMismatchHook(func() { mismatches++ })
+
+	b.Observe(buildFragFrame(txIDOf(payload), uint32(len(payload)), 0, 1, payload))
+
+	if calls != 0 {
+		t.Errorf("raw-hash-stamped EF payload must not deliver")
+	}
+	if mismatches != 1 {
+		t.Errorf("hash mismatch hook called %d times, want 1", mismatches)
 	}
 }
 

@@ -659,9 +659,14 @@ Enable per-frame debug logging (decode errors, forwarded frames, gap events).
 ### `-verify-payload-hash` / `VERIFY_PAYLOAD_HASH` (default: `false`)
  
 When `true`, verify that the TxID field in BRC-124/BRC-128 frames matches the
-SHA256d hash of the payload. Frames with mismatched TxIDs are dropped before
-egress and gap tracking, and `bsl_frames_invalid_payload_total` is incremented.
-BRC-12 legacy frames are forwarded verbatim regardless of this setting.
+canonical transaction id of the payload: SHA256d of the payload bytes for a
+BRC-12 raw payload, `objfmt.TxID` (SHA256d over the standard serialization,
+EF extras excluded) for a BRC-30 Extended Format payload. This is the same id
+producers stamp and consumers dedup on, so honest EF lanes verify cleanly. An
+EF-marked payload that does not walk as a transaction is treated as invalid.
+Frames with mismatched TxIDs are dropped before egress and gap tracking, and
+`bsl_frames_invalid_payload_total` is incremented. BRC-12 legacy frames are
+forwarded verbatim regardless of this setting.
 
 ### `-require-block-pow` / `REQUIRE_BLOCK_POW` (default: `true`)
 

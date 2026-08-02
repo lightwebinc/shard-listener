@@ -53,7 +53,7 @@
 //	-sender-exclude       SENDER_EXCLUDE                        IPv6/IPv4 addresses/CIDRs to reject (checked before include)
 //	-workers              NUM_WORKERS          NumCPU           Receive goroutine count
 //	-debug                DEBUG                false            Per-frame logging
-//	-verify-payload-hash  VERIFY_PAYLOAD_HASH  false            Verify SHA256d(payload)==TxID on V2 frames; drop on mismatch
+//	-verify-payload-hash  VERIFY_PAYLOAD_HASH  false            Verify canonical TxID on V2 frames (EF-aware); drop on mismatch
 //	-subtree-data-enabled SUBTREE_DATA_ENABLED false            Enable BRC-132 subtree data reception (join 0xFFFB group)
 //	-subtree-data-verify-merkle SUBTREE_DATA_VERIFY_MERKLE false Optional post-reassembly Merkle root verification (expensive)
 //	-egress-dedup-cap     EGRESS_DEDUP_CAP     0                Egress dedup capacity (0 = disabled)
@@ -453,7 +453,7 @@ func Load() (*Config, error) {
 	flag.Float64Var(&c.TraceSampling, "trace-sampling", envFloat("TRACE_SAMPLING", 0),
 		"distributed-trace head sampling ratio 0..1 (0 = tracing off; exports via -otlp-endpoint)")
 	flag.BoolVar(&c.VerifyPayloadHash, "verify-payload-hash", envBool("VERIFY_PAYLOAD_HASH", false),
-		"verify SHA256d(payload) == TxID on BRC-124/BRC-128 frames; drop on mismatch")
+		"verify the canonical TxID on BRC-124/BRC-128 frames (SHA256d(payload) for BRC-12 raw, objfmt.TxID for BRC-30 EF payloads); drop on mismatch")
 	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", true),
 		"gate BRC-131 announces on header proof-of-work + correlate BRC-133 coinbase with a validated block before fan-out (validates inter-domain block control); default ON — everything downstream of a block announce, including BRC-135 header egress, inherits this gate")
 	minPoWBits := flag.String("min-pow-bits", envStr("MIN_POW_BITS", "0"),

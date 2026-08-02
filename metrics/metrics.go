@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -116,9 +117,14 @@ type Recorder struct {
 
 	// BRC-139 ShardManifest counters and gauges. Updated by the
 	// auto-config consumer subsystem (shard-common/manifest).
-	manifestReceived       metric.Int64Counter
-	manifestPilotsKnown    atomic.Int64
-	manifestQuorumMetBits  atomic.Int32 // bitmap: bit0 shard_bits, bit1 source_mode, bit2 successor
+	manifestReceived      metric.Int64Counter
+	manifestPilotsKnown   atomic.Int64
+	manifestQuorumMetBits atomic.Int32 // bitmap: bit0 shard_bits, bit1 source_mode, bit2 successor
+	// Unix seconds of the most recent divergence per field. Read by an
+	// observable gauge, so a stale timestamp is the signal — a field that
+	// stops diverging keeps its last value rather than disappearing.
+	lastDivergenceMu       sync.Mutex
+	lastDivergence         map[string]int64
 	manifestDivergence     metric.Int64Counter
 	manifestAdoption       metric.Int64Counter
 	manifestReshardState   atomic.Int32 // 0 steady, 1 bridging, 2 cutover-pending
@@ -188,10 +194,11 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	shutdownFuncs = append(shutdownFuncs, mp.Shutdown)
 
 	r := &Recorder{
-		provider:   mp,
-		promReg:    promclient.Gatherers{reg, runtimeReg},
-		numWorkers: numWorkers,
-		startTime:  time.Now(),
+		provider:       mp,
+		promReg:        promclient.Gatherers{reg, runtimeReg},
+		numWorkers:     numWorkers,
+		startTime:      time.Now(),
+		lastDivergence: make(map[string]int64),
 		shutdownFn: func(ctx context.Context) error {
 			var last error
 			for _, fn := range shutdownFuncs {
@@ -407,6 +414,19 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		metric.WithDescription("Distinct authoritative announcers currently within TTL"),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
 			o.Observe(r.manifestPilotsKnown.Load())
+			return nil
+		}),
+	); err != nil {
+		return nil, err
+	}
+	if _, err = meter.Int64ObservableGauge("multicast_manifest_last_divergence_epoch",
+		metric.WithDescription("Unix seconds of the most recent divergence observed per field; absent until a field first diverges"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			r.lastDivergenceMu.Lock()
+			defer r.lastDivergenceMu.Unlock()
+			for field, ts := range r.lastDivergence {
+				o.Observe(ts, metric.WithAttributes(attribute.String("field", field)))
+			}
 			return nil
 		}),
 	); err != nil {
@@ -718,6 +738,9 @@ func (r *Recorder) ManifestDivergence(field, kind string) {
 		attribute.String("field", field),
 		attribute.String("kind", kind),
 	))
+	r.lastDivergenceMu.Lock()
+	r.lastDivergence[field] = time.Now().Unix()
+	r.lastDivergenceMu.Unlock()
 }
 
 // ManifestAdoption increments the adoption counter when the evaluator
