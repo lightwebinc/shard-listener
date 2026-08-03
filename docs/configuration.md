@@ -841,6 +841,98 @@ work without changes (deployment-id defaults to hostname).
 
 ---
 
+## Metrics reference
+
+Every `bsl_` series the listener registers, served on `-metrics-addr`
+(default `:9200`) at `/metrics`. Names and labels are generated from the
+registrations in `metrics/metrics.go`; `multicast_manifest_*` (BRC-139
+auto-config) is documented in the BRC-139 spec instead.
+
+### Frame pipeline
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `bsl_frames_received_total` | `worker`, `network_interface_name`, `version` | Multicast frames received |
+| `bsl_frames_forwarded_total` | `worker`, `proto` | Frames forwarded to downstream unicast |
+| `bsl_frames_dropped_total` | `worker`, `reason` | Frames dropped before egress |
+| `bsl_frames_invalid_payload_total` | `worker` | BRC-124/BRC-128 frames dropped because SHA256d(payload) != TxID |
+| `bsl_frames_deduped_total` | `worker` | BRC-124/BRC-128 retransmits suppressed before egress (egress dedup) |
+| `bsl_frames_tx_deduped_total` | `worker` | Frames suppressed by Redis TxID claim (cross-listener dedup) |
+| `bsl_egress_errors_total` | `worker` | Errors sending to downstream |
+| `bsl_mc_egress_errors_total` | `worker` | Errors sending to multicast egress |
+
+### Gap recovery (BRC-126)
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `bsl_gaps_detected_total` | — | Sequence gaps detected (missing frames) |
+| `bsl_gaps_suppressed_total` | — | Gaps cancelled by retransmit fill or ACK response |
+| `bsl_gaps_unrecovered_total` | — | Gaps evicted after retries exhausted or TTL exceeded |
+| `bsl_nacks_dispatched_total` | — | NACK datagrams sent to retry endpoints |
+| `bsl_nacks_throttled_total` | — | Gaps held after a THROTTLED congestion signal |
+| `bsl_nack_flows_refused_total` | — | New per-source flows skipped at the MaxFlows flood-guard cap |
+| `bsl_seq_rebaselines_total` | — | Flows re-baselined on an implausible SeqNum jump (emitter change, e.g. anycast failover) |
+| `bsl_tail_probes_sent_total` | — | speculative NACKs for the next expected SeqNum on an idle flow (BRC-126 tail-loss probe) |
+| `bsl_tail_probes_recovered_total` | — | tail probes that returned a real frame — loss that no successor frame would ever have revealed |
+| `bsl_tail_probes_miss_total` | — | tail probes answered MISS — the flow was genuinely idle, not lossy |
+
+### Reassembly (BRC-130)
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `bsl_reassembly_started_total` | — | BRC-130 reassembly slots opened (first fragment of a TxID received) |
+| `bsl_reassembly_completed_total` | — | BRC-130 reassemblies that produced a complete payload |
+| `bsl_reassembly_abandoned_total` | — | BRC-130 reassembly slots evicted before completion (TTL expired or buffer full) |
+| `bsl_reassembly_hash_mismatch_total` | — | Completed reassemblies dropped because SHA256d(payload) != TxID |
+| `bsl_reassembly_late_fragments_total` | — | Fragments dropped because their object already completed (multicast repair copies); a rate approaching bsl_reassembly_completed_total means repair is serving the group far more than the losses justify |
+
+### Bundles (BRC-142)
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `bsl_bundles_rebucketed_total` | `worker` | BRC-142 bundles re-bucketed to the local ShardBits generation before delivery (cross-generation/re-shard) |
+| `bsl_rebucket_unguarded_total` | `worker` | Bundles re-bucketed on a listener NOT configured as a re-bucket relay (-rebucket-relay) — a generation-mismatch alarm: parent-stream recovery is active, but re-multicast children are unrecoverable without a child-generation retry. Alert on rate > 0. |
+
+### Block header lane (BRC-135)
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `bsl_header_forwarded_total` | — | Block headers extracted and forwarded to header egress |
+| `bsl_header_egress_errors_total` | — | Errors sending to header egress downstream |
+
+### Egress / ingress TxID dedup
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `bsl_egress_claim_won_total` | — | Per-deployment egress claim SETNX wins (frame forwarded) |
+| `bsl_egress_claim_lost_total` | — | Per-deployment egress claim SETNX losses (HA sibling already forwarded) |
+| `bsl_egress_claim_local_hit_total` | — | Tier-1 local LRU short-circuit on per-deployment egress claim |
+| `bsl_egress_claim_errors_total` | — | Redis errors during egress claim (fail-open: frame was forwarded) |
+| `bsl_txid_dedup_errors_total` | — | Redis errors during TxID dedup claim (fail-open: frame was forwarded) |
+| `bsl_ingress_mark_set_total` | — | Courtesy SETNX into the proxy's ingress namespace that created a new key |
+| `bsl_ingress_mark_existed_total` | — | Courtesy SETNX into the proxy's ingress namespace where the key already existed |
+| `bsl_ingress_mark_dropped_total` | — | Ingress-set courtesy marks dropped because the async queue was full or local-only mode is active |
+| `bsl_ingress_mark_errors_total` | — | Redis errors during ingress-set courtesy mark (best-effort) |
+
+### Discovery (BRC-126 / BRC-127)
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `bsl_beacon_adverts_received_total` | — | Valid ADVERT beacon datagrams upserted into the endpoint registry |
+| `bsl_beacon_registry_endpoints` | — | Number of endpoints currently in the beacon discovery registry |
+| `bsl_subtree_group_announces_received_total` | — | Valid SubtreeGroupAnnounce datagrams processed (BRC-127) |
+| `bsl_subtree_group_announces_rejected_total` | — | SubtreeGroupAnnounce datagrams rejected before registry update |
+| `bsl_subtree_group_entries` | — | Live (groupID, subtreeID) pairs in the subtree group registry |
+| `bsl_subtree_group_evictions_total` | — | Subtree group registry entries removed by TTL expiry |
+
+### Process
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `bsl_uptime_seconds` | — | Seconds elapsed since the listener process started |
+
+---
+
 ## Example: minimal
 
 ```
