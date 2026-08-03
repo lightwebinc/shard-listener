@@ -73,6 +73,7 @@ type Recorder struct {
 	frameReassemblyCompleted    metric.Int64Counter
 	frameReassemblyAbandoned    metric.Int64Counter
 	frameReassemblyHashMismatch metric.Int64Counter
+	frameReassemblyLateFragment metric.Int64Counter
 	txDedupErrors               metric.Int64Counter // Redis errors during TxID claim
 
 	// Egress / ingress TxID dedup outcomes (txidset.Store callbacks)
@@ -280,6 +281,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.frameReassemblyHashMismatch, err = meter.Int64Counter("bsl_reassembly_hash_mismatch_total",
 		metric.WithDescription("Completed reassemblies dropped because SHA256d(payload) != TxID")); err != nil {
+		return nil, err
+	}
+	if r.frameReassemblyLateFragment, err = meter.Int64Counter("bsl_reassembly_late_fragments_total",
+		metric.WithDescription("Fragments dropped because their object already completed (multicast repair copies); a rate approaching bsl_reassembly_completed_total means repair is serving the group far more than the losses justify")); err != nil {
 		return nil, err
 	}
 	if r.txDedupErrors, err = meter.Int64Counter("bsl_txid_dedup_errors_total",
@@ -542,6 +547,12 @@ func (r *Recorder) ReassemblyAbandoned() {
 // because SHA256d(payload) != TxID.
 func (r *Recorder) ReassemblyHashMismatch() {
 	r.frameReassemblyHashMismatch.Add(context.Background(), 1)
+}
+
+// ReassemblyLateFragment records a fragment dropped because its object had
+// already completed — a multicast repair copy answering someone else's loss.
+func (r *Recorder) ReassemblyLateFragment() {
+	r.frameReassemblyLateFragment.Add(context.Background(), 1)
 }
 
 // FrameDeduped records a BRC-124/BRC-128 retransmit suppressed before egress

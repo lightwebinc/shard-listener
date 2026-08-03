@@ -563,6 +563,17 @@ func run() error {
 		}
 
 		w := listener.New(i, cfg.Iface, cfg.ListenPort, groups, engine, filt, egr, mcastEgr, tracker, rec, cfg.Debug)
+		// Unicast NACK recovery: a retry endpoint that answers on the NACK
+		// return channel (BRC-126 — the ONLY channel for a proxied cross-domain
+		// repair, and the deployed default where -beacon-flags-unicast is on)
+		// hands the frame back on the tracker goroutine. Without this it has
+		// nowhere to go: the frame is dropped and the ACK still cancels the gap,
+		// so the loss reads as repaired. Registered per worker because the
+		// recovered frame must re-enter the pipeline of the worker that owns the
+		// flow — the one holding the object's other fragments.
+		if tracker != nil {
+			tracker.RegisterRecover(w.ID(), w.Reinject)
+		}
 		if gs != nil {
 			w.SetGroupSources(gs)
 		}
@@ -622,10 +633,11 @@ func run() error {
 			if tracker != nil {
 				buf.SetGroupIdxFunc(wLocal.FragGroupIdx)
 				buf.SetIncompleteHook(func(hashKey uint64, groupIdx uint32, subtreeID [32]byte, missing []uint64) {
-					tracker.RequestGaps(hashKey, groupIdx, subtreeID, missing)
+					tracker.RequestGapsFrom(wLocal.ID(), hashKey, groupIdx, subtreeID, missing)
 				})
 			}
 			buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)
+			buf.SetLateFragmentHook(rec.ReassemblyLateFragment)
 			buf.SetBlockCallback(wLocal.DeliverReassembledBlock)
 			buf.SetSubtreeDataCallback(wLocal.DeliverReassembledSubtreeData)
 			buf.SetBEEFCallback(wLocal.DeliverReassembledBeef)

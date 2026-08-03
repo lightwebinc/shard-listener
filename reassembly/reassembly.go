@@ -59,6 +59,21 @@ const (
 	// DefaultTTL is the default time before an incomplete slot is abandoned.
 	DefaultTTL = 10 * time.Second
 
+	// DefaultCompletionTTL is how long a completed slot key is remembered so
+	// late copies of its fragments cannot reopen it. It is deliberately NOT the
+	// slot TTL: the slot TTL bounds how long THIS listener waits for fragments,
+	// while a repair copy is answering some OTHER member's NACK and arrives on
+	// that member's recovery schedule (backoff rounds, then endpoint
+	// escalation) — comfortably later than the slot it would resurrect.
+	//
+	// 60 s matches the egress dedup horizon (-egress-dedup-ttl-redis), and sits
+	// an order of magnitude INSIDE the origin's ingress dedup window
+	// (-txid-dedup-ttl, 10 min): the proxy will not re-admit the same identity
+	// for ten minutes, so suppressing a repeat within one minute cannot cost a
+	// delivery the fabric would have carried. Anything arriving in the window is
+	// a copy of the object already reassembled, by construction.
+	DefaultCompletionTTL = 60 * time.Second
+
 	// DefaultMaxObjectBytes bounds one declared original payload (OrigPayloadLen).
 	// The field is ATTACKER-DECLARED: without a bound, one fragment claiming
 	// OrigPayloadLen≈4 GiB with FragTotal=65535 opens a slot whose frags array
@@ -122,8 +137,50 @@ type Buffer struct {
 	onStarted        func() // metrics hook
 	onHashMismatch   func() // metrics hook (SHA256d mismatch, V2)
 	onMerkleMismatch func() // metrics hook (Merkle root mismatch, V5)
+	onLateFragment   func() // metrics hook (fragment for an already-completed object)
 	maxObject        int    // general declared-length cap (DefaultMaxObjectBytes)
 	maxObjectV9      int    // BRC-148 plane cap (-beef-max-object-bytes); 0 = use general
+	// done remembers slot keys that COMPLETED recently, mapped to the instant
+	// the memory expires.
+	//
+	// It exists for MULTICAST NACK repair: when the retry endpoint answers to
+	// the group rather than to the requester, every OTHER member receives a
+	// fragment it already consumed. That is the retry-endpoint BINARY default
+	// (-beacon-flags-multicast defaults true, -beacon-flags-unicast false) and
+	// what the container harness runs, so it is the default a plain build hits.
+	// It is NOT what the fabric currently runs: the shipped ops posture is
+	// unicast-only (integrated-infra sets beacon_flags_unicast: true /
+	// beacon_flags_multicast: false), and a unicast return reaches only the
+	// listener that asked. So on the live edges this memory is dormant, and
+	// bsl_reassembly_late_fragments_total sitting at zero there is the expected
+	// reading, not a broken hook. It is still the listener's own invariant to
+	// hold rather than a mode to configure around: the repair mode is the
+	// RESPONDER's choice, advertised per retry endpoint, so a listener can be
+	// moved onto a multicast-answering cache without any change of its own.
+	//
+	// Without the memory, a repeat fragment opens a fresh slot for an object
+	// already delivered, and the consequences compound —
+	//
+	//   - the object reassembles a SECOND time. Whether the duplicate reaches
+	//     the wire depends on the egress claim on (ContentID, TopicID) — which
+	//     caught it in the measured pre-fix run — but that claim is optional
+	//     (-egress-dedup-local-cap 0 removes it) and shorter-lived than the
+	//     recovery horizon, so the duplicate delivery (and the double billing
+	//     that follows it) is one config change away. A layer must not rely on a
+	//     later one to undo duplicates it manufactured;
+	//   - the fresh slot never fills, so its TTL eviction fires onIncomplete and
+	//     NACKs the very fragments the listener already has, which the responder
+	//     answers by multicast, which opens more slots — a self-feeding loop.
+	//
+	// The memory is the same duplicate suppression the live slot already applies
+	// (frags[i] != nil), extended past completion for completionTTL. It is
+	// bounded exactly like the slot table (maxSlots keys, FIFO): under a
+	// fragment rate that overruns the cap the window shortens rather than the
+	// heap growing, and the oldest key — the one least likely to still attract a
+	// repair — is the one that goes.
+	done          map[[32]byte]time.Time
+	doneOrder     [][32]byte
+	completionTTL time.Duration
 }
 
 // slot holds the fragments received so far for one TxID.
@@ -171,12 +228,23 @@ func New(maxSlots int, ttl time.Duration, verifyHash bool, cb Callback) *Buffer 
 		ttl = DefaultTTL
 	}
 	return &Buffer{
-		slots:      make(map[[32]byte]*slot, maxSlots),
-		maxSlots:   maxSlots,
-		ttl:        ttl,
-		verifyHash: verifyHash,
-		onComplete: cb,
-		maxObject:  DefaultMaxObjectBytes,
+		slots:         make(map[[32]byte]*slot, maxSlots),
+		done:          make(map[[32]byte]time.Time, maxSlots),
+		maxSlots:      maxSlots,
+		ttl:           ttl,
+		completionTTL: DefaultCompletionTTL,
+		verifyHash:    verifyHash,
+		onComplete:    cb,
+		maxObject:     DefaultMaxObjectBytes,
+	}
+}
+
+// SetCompletionTTL overrides how long a completed slot key is remembered
+// (0 keeps [DefaultCompletionTTL]). Shortening it below a deployment's recovery
+// horizon reopens the duplicate-reassembly window it exists to close.
+func (b *Buffer) SetCompletionTTL(d time.Duration) {
+	if d > 0 {
+		b.completionTTL = d
 	}
 }
 
@@ -229,6 +297,13 @@ func (b *Buffer) SetHashMismatchHook(fn func()) { b.onHashMismatch = fn }
 // verification fails for a V5 subtree data slot.
 func (b *Buffer) SetMerkleMismatchHook(fn func()) { b.onMerkleMismatch = fn }
 
+// SetLateFragmentHook sets a metrics hook called when a fragment is dropped
+// because its object already completed. It is the operator's separation between
+// healthy multicast repair (a trickle of late copies) and a repair storm (late
+// copies outnumbering completions), and it is what distinguishes suppression
+// from the fragments simply never arriving.
+func (b *Buffer) SetLateFragmentHook(fn func()) { b.onLateFragment = fn }
+
 // SetBlockCallback registers the callback invoked on successful V4 (BRC-131)
 // reassembly. If nil, completed V4 slots are silently discarded.
 func (b *Buffer) SetBlockCallback(cb BlockCallback) { b.onCompleteBlock = cb }
@@ -263,6 +338,18 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 	s, exists := b.slots[key]
 
 	if !exists {
+		// A late copy of a fragment whose object already completed. Dropping it
+		// here — rather than opening a slot that can only ever hold duplicates —
+		// is what keeps multicast repair from re-delivering the object and from
+		// NACKing fragments the listener already consumed. The caller still feeds
+		// this fragment to the gap tracker, so the copy books the fill it was
+		// sent to book.
+		if _, recentlyDone := b.done[key]; recentlyDone {
+			if b.onLateFragment != nil {
+				b.onLateFragment()
+			}
+			return
+		}
 		// Reject pathological fragment metadata before opening a slot.
 		if ff.FragTotal == 0 || ff.FragIndex >= ff.FragTotal {
 			return
@@ -342,6 +429,13 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 //   - 0x05        → deliver via onCompleteSubtree (V5 BRC-132); no SHA256d;
 //     optional Merkle root verification via verifyMerkle.
 func (b *Buffer) complete(s *slot) {
+	// Remember the key before any branch removes the slot. Every path below is
+	// terminal for this object — delivered or rejected on verification — so any
+	// further copy of its fragments is a duplicate either way. (A live slot
+	// already ignores duplicate fragments, so remembering the failed case costs
+	// no recovery that was ever available.)
+	b.markDone(s.key)
+
 	payload := make([]byte, 0, s.origPayloadLen)
 	for _, frag := range s.frags {
 		payload = append(payload, frag...)
@@ -503,7 +597,43 @@ func (s *slot) missingSeqNums() []uint64 {
 	return out
 }
 
+// markDone records a terminal slot key so late copies of its fragments cannot
+// reopen it. Must be called with b.mu held.
+func (b *Buffer) markDone(key [32]byte) {
+	if _, exists := b.done[key]; !exists {
+		if len(b.done) >= b.maxSlots && len(b.doneOrder) > 0 {
+			oldest := b.doneOrder[0]
+			b.doneOrder = b.doneOrder[1:]
+			delete(b.done, oldest)
+		}
+		b.doneOrder = append(b.doneOrder, key)
+	}
+	b.done[key] = time.Now().Add(b.completionTTL)
+}
+
+// sweepDone drops completion memories whose window has closed. Must be called
+// with b.mu held.
+func (b *Buffer) sweepDone(now time.Time) {
+	if len(b.done) == 0 {
+		return
+	}
+	live := b.doneOrder[:0]
+	for _, key := range b.doneOrder {
+		exp, ok := b.done[key]
+		if !ok {
+			continue
+		}
+		if now.After(exp) {
+			delete(b.done, key)
+			continue
+		}
+		live = append(live, key)
+	}
+	b.doneOrder = live
+}
+
 func (b *Buffer) evictExpired(now time.Time) {
+	b.sweepDone(now)
 	for _, txID := range b.insertOrder {
 		s, ok := b.slots[txID]
 		if !ok {
@@ -587,6 +717,10 @@ func (b *Buffer) Purge() {
 		delete(b.slots, txID)
 	}
 	b.insertOrder = b.insertOrder[:0]
+	// A purge is a deliberate reset of reassembly state; the completion memory
+	// belongs to that state, so it resets with it.
+	clear(b.done)
+	b.doneOrder = b.doneOrder[:0]
 }
 
 // validateFragment is a guard used by tests to verify fragment metadata.

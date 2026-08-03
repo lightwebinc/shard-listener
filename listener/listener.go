@@ -175,6 +175,11 @@ func (w *Worker) SetTxDedup(s *txdedup.Store) {
 	w.txDedup = s
 }
 
+// ID returns the worker's index. It is the key the NACK tracker routes a
+// unicast retransmit by, so the value registered with RegisterRecover and the
+// value stamped on observed flows are provably the same worker.
+func (w *Worker) ID() int { return w.id }
+
 // SetReassemblyBuffer attaches a BRC-130 fragment reassembly buffer to the
 // worker. When set, BRC-130 fragment datagrams are routed to the buffer
 // instead of being forwarded directly. Completed reassemblies are delivered
@@ -599,7 +604,7 @@ func (w *Worker) processFrame(raw []byte) bool {
 			if ff.OrigFrameVer == frame.FrameVerV9 {
 				sub = [32]byte{}
 			}
-			w.tracker.Observe(w.fragGroupIdx(ff), sub, ff.HashKey, ff.SeqNum, ff.TxID, w.curSource)
+			w.tracker.ObserveFrom(w.id, w.fragGroupIdx(ff), sub, ff.HashKey, ff.SeqNum, ff.TxID, w.curSource)
 		}
 		return true
 	}
@@ -698,7 +703,7 @@ func (w *Worker) processFrame(raw []byte) bool {
 			}
 			// Skip egress, but still observe so gap-fill bookkeeping stays accurate.
 			if w.tracker != nil && f.SeqNum != 0 {
-				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
+				w.tracker.ObserveFrom(w.id, groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 			}
 			return true
 		}
@@ -716,7 +721,7 @@ func (w *Worker) processFrame(raw []byte) bool {
 			// Skip egress, but still let the tracker observe the frame so
 			// gap-fill bookkeeping stays accurate.
 			if w.tracker != nil {
-				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
+				w.tracker.ObserveFrom(w.id, groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 			}
 			return true
 		}
@@ -749,7 +754,7 @@ func (w *Worker) processFrame(raw []byte) bool {
 
 	// Gap tracking: BRC-124/BRC-128 only, SeqNum must be non-zero (proxy-stamped).
 	if w.tracker != nil && f.Version == frame.FrameVerV2 && f.SeqNum != 0 {
-		w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
+		w.tracker.ObserveFrom(w.id, groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 	}
 
 	if w.debug {
@@ -882,7 +887,7 @@ func (w *Worker) processBundle(raw []byte) {
 		// per-parent-avoidable one.
 		if w.tracker != nil && b.SeqNum != 0 {
 			var zero [32]byte // a bundle has no single TxID
-			w.tracker.Observe(uint32(b.GroupIdx), b.SubtreeID, b.HashKey, b.SeqNum, zero, w.curSource)
+			w.tracker.ObserveFrom(w.id, uint32(b.GroupIdx), b.SubtreeID, b.HashKey, b.SeqNum, zero, w.curSource)
 		}
 		return
 	}
@@ -915,7 +920,7 @@ func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 	observe := func() {
 		if track && w.tracker != nil && b.SeqNum != 0 {
 			var zero [32]byte // a bundle has no single TxID
-			w.tracker.Observe(groupIdx, b.SubtreeID, b.HashKey, b.SeqNum, zero, w.curSource)
+			w.tracker.ObserveFrom(w.id, groupIdx, b.SubtreeID, b.HashKey, b.SeqNum, zero, w.curSource)
 		}
 	}
 
@@ -1110,7 +1115,7 @@ func (w *Worker) processBlockFrame(raw []byte) bool {
 	// Gap tracking on the control flow uses a zero SubtreeID.
 	if w.tracker != nil && bf.SeqNum != 0 {
 		var zeroSub [32]byte
-		w.tracker.Observe(blockFlowIdx(bf.MsgType), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
+		w.tracker.ObserveFrom(w.id, blockFlowIdx(bf.MsgType), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
 	}
 
 	if w.debug {
@@ -1243,7 +1248,7 @@ func (w *Worker) processSubtreeDataFrame(raw []byte) {
 
 	// Gap tracking on the subtree data flow uses SubtreeID as the flow scope.
 	if w.tracker != nil && sf.SeqNum != 0 {
-		w.tracker.Observe(uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID, w.curSource)
+		w.tracker.ObserveFrom(w.id, uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID, w.curSource)
 	}
 
 	if w.debug {
@@ -1297,7 +1302,7 @@ func (w *Worker) processAnchorFrame(raw []byte) {
 			const anchorGroupIdx = uint32(0xFFF9)
 			var zeroSub [32]byte
 			if w.tracker != nil && f.SeqNum != 0 {
-				w.tracker.Observe(anchorGroupIdx, zeroSub, f.HashKey, f.SeqNum, f.TxID, w.curSource)
+				w.tracker.ObserveFrom(w.id, anchorGroupIdx, zeroSub, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 			}
 			return
 		}
@@ -1320,7 +1325,7 @@ func (w *Worker) processAnchorFrame(raw []byte) {
 	if w.tracker != nil && f.SeqNum != 0 {
 		const anchorGroupIdx = uint32(0xFFF9)
 		var zeroSub [32]byte
-		w.tracker.Observe(anchorGroupIdx, zeroSub, f.HashKey, f.SeqNum, f.TxID, w.curSource)
+		w.tracker.ObserveFrom(w.id, anchorGroupIdx, zeroSub, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 	}
 
 	if w.debug {
@@ -1380,7 +1385,7 @@ func (w *Worker) DeliverReassembledBlock(payload []byte, bf *frame.BlockFrame) {
 
 	if w.tracker != nil && bf.SeqNum != 0 {
 		var zeroSub [32]byte
-		w.tracker.Observe(blockFlowIdx(bf.MsgType), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
+		w.tracker.ObserveFrom(w.id, blockFlowIdx(bf.MsgType), zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
 	}
 
 	if w.debug {
@@ -1425,7 +1430,7 @@ func (w *Worker) DeliverReassembledSubtreeData(payload []byte, sf *frame.Subtree
 	}
 
 	if w.tracker != nil && sf.SeqNum != 0 {
-		w.tracker.Observe(uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID, w.curSource)
+		w.tracker.ObserveFrom(w.id, uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID, w.curSource)
 	}
 
 	if w.debug {
@@ -1476,7 +1481,7 @@ func (w *Worker) DeliverReassembled(payload []byte, f *frame.Frame) {
 				w.rec.FrameTxDeduped(w.id)
 			}
 			if w.tracker != nil && f.SeqNum != 0 {
-				w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
+				w.tracker.ObserveFrom(w.id, groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 			}
 			return
 		}
@@ -1514,7 +1519,7 @@ func (w *Worker) DeliverReassembled(payload []byte, f *frame.Frame) {
 	}
 
 	if w.tracker != nil && f.SeqNum != 0 {
-		w.tracker.Observe(groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
+		w.tracker.ObserveFrom(w.id, groupIdx, f.SubtreeID, f.HashKey, f.SeqNum, f.TxID, w.curSource)
 	}
 }
 

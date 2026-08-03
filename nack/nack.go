@@ -142,7 +142,21 @@ type flowState struct {
 	// probing is the SeqNum of the in-flight tail probe (0 = none), so a slow
 	// probe is not re-issued on every 100ms sweep.
 	probing uint64
+	// owner is the id of the listener worker that observes this flow, or
+	// ownerUnknown. A unicast retransmit must be re-injected into THAT worker:
+	// reassembly state is per-worker (SO_REUSEPORT pins a source's 4-tuple to
+	// one worker), so a recovered fragment fed to any other worker lands in a
+	// buffer holding none of its siblings and the object never completes.
+	// Re-stamped on every Observe, so a re-hash that moves the flow follows it.
+	owner int
 }
+
+// ownerUnknown marks a flow whose observing worker is not known — a gap
+// registered through the legacy [Tracker.Observe] entry point. Such gaps fall
+// back to the single callback set by [Tracker.SetRecoverFunc]; with neither,
+// unicast recovery is off for that gap and the gap is booked unrecovered rather
+// than silently cancelled.
+const ownerUnknown = -1
 
 // minContiguousForRecover is how many consecutive in-order frames must have settled the
 // inter-arrival estimate before a re-baseline trusts it enough to NACK-recover the
@@ -176,6 +190,10 @@ type gapEntry struct {
 	// detected gap — otherwise every idle flow inflates the unrecovered ratio with
 	// phantom losses and the repair alerts fire on healthy fabrics.
 	speculative bool
+	// owner is copied from the flow at registration so the dispatch goroutine
+	// (which works on a shallow copy of this entry, outside the lock) knows which
+	// worker to re-inject the unicast retransmit into.
+	owner int
 }
 
 // Tracker is the gap state machine. Construct with [New] and call [Start] to
@@ -192,7 +210,22 @@ type Tracker struct {
 	// recoverFn re-injects a frame returned by a retry endpoint over the
 	// unicast NACK return channel back into the listener pipeline (set via
 	// SetRecoverFunc). nil disables unicast recovery (multicast-only repair).
+	// It is the fallback for gaps whose observing worker is unknown; a
+	// single-worker embedder can set only this.
+	//
+	// recovers holds the same callback per listener worker, indexed by worker
+	// id (set via RegisterRecover). A multi-worker listener must register per
+	// worker rather than set one global callback: reassembly is per-worker
+	// state, so the recovered frame has exactly one correct destination — the
+	// worker that observed the flow.
+	//
+	// Both are guarded by mu. They are written at wiring time and read once per
+	// NACK dispatch, so the lock costs nothing, and it is what makes the wiring
+	// safe AFTER Start — which is the order both listener binaries actually use
+	// (the workers that own the callbacks are built well after the tracker is
+	// started).
 	recoverFn func(raw []byte) bool
+	recovers  []func(raw []byte) bool
 
 	// nackSrc is the source address the NACK socket binds to (set via
 	// SetNACKSource). Empty = wildcard (kernel picks per-route). Set this to a
@@ -290,7 +323,52 @@ func New(cfg TrackerConfig, retryEndpoints []string, iface *net.Interface, rec *
 // drains any data frame the retry unicasts back on the NACK socket and re-feeds
 // it through the listener pipeline (the gap is then auto-filled by Observe).
 // Typically wired to (*listener.Worker).Reinject.
-func (t *Tracker) SetRecoverFunc(f func(raw []byte) bool) { t.recoverFn = f }
+//
+// Use RegisterRecover instead when the listener runs more than one worker: this
+// callback cannot express which worker owns a flow, and feeding a recovered
+// fragment to the wrong worker's reassembly buffer strands it.
+// Safe to call after Start.
+func (t *Tracker) SetRecoverFunc(f func(raw []byte) bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.recoverFn = f
+}
+
+// RegisterRecover binds worker id's re-injection callback (typically
+// (*listener.Worker).Reinject). A unicast retransmit is delivered to the worker
+// that observed the gap's flow, so per-worker reassembly and per-worker egress
+// see the recovered frame exactly as if it had arrived on that worker's socket.
+//
+// Registering is what makes unicast recovery live at all: with no callback for a
+// gap, the drained data frame has nowhere to go, so it is dropped and the gap is
+// booked UNRECOVERED rather than cancelled — the loss stays visible instead of
+// being papered over by an ACK that promised a frame the listener discarded.
+// Safe to call after Start.
+func (t *Tracker) RegisterRecover(id int, f func(raw []byte) bool) {
+	if id < 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for len(t.recovers) <= id {
+		t.recovers = append(t.recovers, nil)
+	}
+	t.recovers[id] = f
+}
+
+// recoverFor resolves the re-injection callback for a gap: the owning worker's,
+// falling back to the global one. nil means unicast recovery is unavailable for
+// this gap. Must NOT be called with t.mu held.
+func (t *Tracker) recoverFor(e *gapEntry) func(raw []byte) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if e.owner >= 0 && e.owner < len(t.recovers) {
+		if f := t.recovers[e.owner]; f != nil {
+			return f
+		}
+	}
+	return t.recoverFn
+}
 
 // FlowCount returns the number of tracked per-source flows (diagnostics/tests).
 func (t *Tracker) FlowCount() int {
@@ -334,7 +412,18 @@ func (t *Tracker) SetNACKSource(addr string) {
 //  4. Ignore: seqNum <= lastSeqNum (duplicate or old retransmit).
 //  5. Contiguous: seqNum == lastSeqNum+1 → advance.
 //  6. Gap: seqNum > lastSeqNum+1 → register each missing seqNum.
+//
+// Gaps it registers carry no worker ownership, so their unicast repairs fall
+// back to SetRecoverFunc. Multi-worker listeners must call ObserveFrom.
 func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum uint64, txid [32]byte, source net.IP) {
+	t.ObserveFrom(ownerUnknown, groupIdx, subtreeID, hashKey, seqNum, txid, source)
+}
+
+// ObserveFrom is Observe, told which listener worker is calling. The worker id
+// is recorded on the flow and copied onto every gap it registers, so a unicast
+// retransmit is re-injected into the worker that holds the flow's reassembly
+// state and per-flow sequence position.
+func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, hashKey, seqNum uint64, txid [32]byte, source net.IP) {
 	if seqNum == 0 {
 		return
 	}
@@ -361,8 +450,12 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 			subtreeID: subtreeID,
 			flowType:  flowLabel(groupIdx),
 			pending:   make(map[uint64]*gapEntry),
+			owner:     ownerUnknown,
 		}
 		t.flows[hashKey] = fs
+	}
+	if owner != ownerUnknown {
+		fs.owner = owner
 	}
 	elapsed := now.Sub(fs.lastSeen)
 	fs.lastSeen = now
@@ -477,6 +570,7 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 					source:      source,
 					nextAttempt: now.Add(jitter),
 					deadline:    now.Add(t.cfg.GapTTL),
+					owner:       fs.owner,
 				}
 				if t.rec != nil {
 					t.rec.GapDetected(fs.flowType, srcStr(source))
@@ -504,6 +598,7 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 				source:      source,
 				nextAttempt: now.Add(jitter),
 				deadline:    now.Add(t.cfg.GapTTL),
+				owner:       fs.owner,
 			}
 			fs.pending[missing] = e
 			if t.rec != nil {
@@ -551,7 +646,19 @@ func (t *Tracker) bookFill(fs *flowState, e *gapEntry) {
 // as detected gaps.
 //
 // Safe to call for a flow the tracker has never seen; it is created on demand.
+//
+// Gaps it registers carry no worker ownership. Use RequestGapsFrom from a
+// multi-worker listener so the recovered fragments return to the reassembly
+// buffer that is missing them.
 func (t *Tracker) RequestGaps(hashKey uint64, groupIdx uint32, subtreeID [32]byte, seqs []uint64) {
+	t.RequestGapsFrom(ownerUnknown, hashKey, groupIdx, subtreeID, seqs)
+}
+
+// RequestGapsFrom is RequestGaps, told which listener worker discovered the
+// loss. The caller is that worker's reassembly buffer, and it is the only
+// buffer holding the object's other fragments, so the recovered fragment must
+// come back to it.
+func (t *Tracker) RequestGapsFrom(owner int, hashKey uint64, groupIdx uint32, subtreeID [32]byte, seqs []uint64) {
 	if len(seqs) == 0 {
 		return
 	}
@@ -569,8 +676,12 @@ func (t *Tracker) RequestGaps(hashKey uint64, groupIdx uint32, subtreeID [32]byt
 			flowType:  flowLabel(groupIdx),
 			pending:   make(map[uint64]*gapEntry),
 			lastSeen:  now,
+			owner:     ownerUnknown,
 		}
 		t.flows[hashKey] = fs
+	}
+	if owner != ownerUnknown {
+		fs.owner = owner
 	}
 	queued := make([]*gapEntry, 0, len(seqs))
 	for _, seq := range seqs {
@@ -586,6 +697,7 @@ func (t *Tracker) RequestGaps(hashKey uint64, groupIdx uint32, subtreeID [32]byt
 			source:      fs.source,
 			nextAttempt: now.Add(jitter),
 			deadline:    now.Add(t.cfg.GapTTL),
+			owner:       fs.owner,
 		}
 		fs.pending[seq] = e
 		cp := *e
@@ -771,6 +883,7 @@ func (t *Tracker) maybeProbeTail(hashKey uint64, fs *flowState, now time.Time) {
 		// loss it should be retried like any other.
 		deadline:    now.Add(t.cfg.GapTTL),
 		speculative: true,
+		owner:       fs.owner,
 	}
 	fs.pending[seq] = e
 	if t.rec != nil {
@@ -917,6 +1030,9 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	deadline := time.Now().Add(t.respTimeout)
 	var rbuf [65536]byte
 	unicastACK := false
+	// The callback of the worker that owns this gap's flow. Resolved once: a
+	// recovered frame belongs in that worker's pipeline and nowhere else.
+	reinject := t.recoverFor(e)
 	for {
 		_ = conn.SetReadDeadline(deadline)
 		nr, _, err := conn.ReadFrom(rbuf[:])
@@ -928,10 +1044,10 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 		// through the listener pipeline (Observe auto-fills the gap and fans it
 		// out downstream), cancel, and return — regardless of whether the ACK
 		// arrived first or not.
-		if t.recoverFn != nil && nr >= minRetransmitFrame && binary.BigEndian.Uint32(rbuf[0:4]) == nackMagic {
+		if reinject != nil && nr >= minRetransmitFrame && binary.BigEndian.Uint32(rbuf[0:4]) == nackMagic {
 			cp := make([]byte, nr)
 			copy(cp, rbuf[:nr])
-			if !t.recoverFn(cp) {
+			if !reinject(cp) {
 				// The pipeline REJECTED the frame — a BRC-131 announce that
 				// fails the block-control gate is the case. Asking again cannot
 				// help: the retry endpoint holds exactly this frame and the gate
@@ -959,10 +1075,27 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 				// timeout escalate to another cache. A non-unicast
 				// (multicast/legacy) ACK keeps the original trust-the-repair
 				// semantics: the data-path Fill closes the gap.
-				if resp.Flags&respFlagUnicastSent != 0 && t.recoverFn != nil {
-					unicastACK = true
-					deadline = time.Now().Add(unicastDrainWindow)
-					continue
+				if resp.Flags&respFlagUnicastSent != 0 {
+					if reinject != nil {
+						unicastACK = true
+						deadline = time.Now().Add(unicastDrainWindow)
+						continue
+					}
+					if resp.Flags&respFlagMulticastSent == 0 {
+						// The repair was sent ONLY as a unicast return this
+						// listener has no way to consume — no re-injection
+						// callback, so the data frame drained above was
+						// discarded. Cancelling here would book a suppression
+						// for a frame that reached no consumer, which is how a
+						// dead recovery path reads as a healthy one. Book it
+						// unrecovered instead: the hole is real.
+						t.abandonGap(e, "no_recover")
+						t.log.Warn("NACK: unicast-only repair with no re-injection callback; gap unrecoverable",
+							"endpoint", endpoint.Addr, "seq_num", e.seqNum, "worker", e.owner)
+						return
+					}
+					// Multicast was also sent: the data path will fill the gap,
+					// so the original trust-the-repair semantics still hold.
 				}
 				t.cancelGap(e)
 				t.log.Debug("NACK: ACK received", "endpoint", endpoint.Addr, "seq_num", e.seqNum, "flags", resp.Flags)
@@ -1001,9 +1134,14 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	t.advanceEndpoint(e, false, 0)
 }
 
-// respFlagUnicastSent mirrors the retry-endpoint ACK flag bit indicating a
-// unicast retransmit was dispatched on the NACK return channel (BRC-126).
-const respFlagUnicastSent byte = 0x02
+// respFlagMulticastSent and respFlagUnicastSent mirror the retry-endpoint ACK
+// flag bits indicating which retransmit paths actually dispatched (BRC-126).
+// Each is set independently, so an ACK naming ONLY the unicast path is the case
+// where a listener that cannot re-inject has genuinely lost the frame.
+const (
+	respFlagMulticastSent byte = 0x01
+	respFlagUnicastSent   byte = 0x02
+)
 
 // minRetransmitFrame is the smallest datagram treated as a unicast data
 // retransmit rather than a (16-byte) control response. A BRC frame header is

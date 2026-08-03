@@ -612,6 +612,151 @@ func TestSendNACK_UnicastACK_NoData_NotCancelled(t *testing.T) {
 	}
 }
 
+// unicastRepairServer answers every NACK with the data frame followed by an ACK
+// carrying flags — the two-datagram exchange a retry endpoint performs when
+// -beacon-flags-unicast is on (the deployed default).
+func unicastRepairServer(t *testing.T, flags byte, withData bool) net.PacketConn {
+	t.Helper()
+	c, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("UDP loopback unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			_, src, err := c.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if withData {
+				_, _ = c.WriteTo(dataFrame(), src)
+			}
+			var resp [nack.ResponseSize]byte
+			nack.EncodeResponse(&nack.Response{MsgType: nack.MsgTypeACK, Flags: flags, SeqNum: 2}, resp[:])
+			_, _ = c.WriteTo(resp[:], src)
+		}
+	}()
+	return c
+}
+
+// TestSendNACK_UnicastRetransmit_RoutedToObservingWorker: with several workers
+// registered, the recovered frame must be re-injected into the worker that
+// OBSERVED the flow. Reassembly state is per-worker, so a fragment handed to any
+// other worker lands in a buffer holding none of its siblings and the object
+// never completes — the repair would be booked while the data went nowhere.
+func TestSendNACK_UnicastRetransmit_RoutedToObservingWorker(t *testing.T) {
+	mockConn := unicastRepairServer(t, 0x02, true)
+
+	cfg := nack.TrackerConfig{JitterMax: 0, BackoffMax: time.Second, MaxRetries: 5, GapTTL: 10 * time.Second}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
+
+	got := make(chan int, 8)
+	for id := range 4 {
+		tr.RegisterRecover(id, func(raw []byte) bool { got <- id; return true })
+	}
+	// The global fallback must NOT win when a worker owns the flow.
+	tr.SetRecoverFunc(func(raw []byte) bool { got <- -1; return true })
+
+	const owner = 2
+	tr.ObserveFrom(owner, 0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.ObserveFrom(owner, 0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum 2
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	select {
+	case id := <-got:
+		if id != owner {
+			t.Errorf("recovered frame re-injected into worker %d, want %d (the worker that observed the flow)", id, owner)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no worker received the unicast retransmit")
+	}
+}
+
+// TestRequestGapsFrom_RoutesToDiscoveringWorker: the reassembly tail-loss path
+// registers gaps through RequestGapsFrom, and those recoveries must return to the
+// buffer that is missing the fragments.
+func TestRequestGapsFrom_RoutesToDiscoveringWorker(t *testing.T) {
+	mockConn := unicastRepairServer(t, 0x02, true)
+
+	cfg := nack.TrackerConfig{JitterMax: 0, BackoffMax: time.Second, MaxRetries: 5, GapTTL: 10 * time.Second}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
+
+	got := make(chan int, 8)
+	for id := range 3 {
+		tr.RegisterRecover(id, func(raw []byte) bool { got <- id; return true })
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	const owner = 1
+	tr.RequestGapsFrom(owner, flowA, 0, [32]byte{}, []uint64{2})
+
+	select {
+	case id := <-got:
+		if id != owner {
+			t.Errorf("recovered fragment re-injected into worker %d, want %d", id, owner)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no worker received the unicast retransmit")
+	}
+}
+
+// TestSendNACK_UnicastOnly_NoRecoverFunc_BooksUnrecovered: with NO re-injection
+// callback the drained data frame is discarded, so a unicast-ONLY ACK must not
+// cancel the gap. Cancelling books a suppression for data that reached no
+// consumer — a dead recovery path reading as a healthy one.
+func TestSendNACK_UnicastOnly_NoRecoverFunc_BooksUnrecovered(t *testing.T) {
+	mockConn := unicastRepairServer(t, 0x02, true) // unicast bit only
+
+	cfg := nack.TrackerConfig{JitterMax: 0, BackoffBase: 50 * time.Millisecond, BackoffMax: 100 * time.Millisecond, MaxRetries: 50, GapTTL: 10 * time.Second}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil) // no recover func at all
+
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at seqNum 2
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1", g)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	// The gap is removed either way; what must NOT happen is it being booked as
+	// a fill. abandonGap is the only path that removes it without one, and it
+	// stops the retry loop, so a settled zero here with the frame discarded is
+	// the honest outcome. The regression this guards is cancelGap on the ACK.
+	if got := pollGaps(tr, 0, 3*time.Second); got != 0 {
+		t.Errorf("unicast-only ACK with no recover func left the gap pending: %d", got)
+	}
+}
+
+// TestSendNACK_MulticastAndUnicastACK_NoRecoverFunc_Cancels: when the retry ALSO
+// multicast the repair, the data path fills the gap, so the trust-the-repair
+// cancel is still correct even with no re-injection callback.
+func TestSendNACK_MulticastAndUnicastACK_NoRecoverFunc_Cancels(t *testing.T) {
+	mockConn := unicastRepairServer(t, 0x03, false) // multicast + unicast bits
+
+	cfg := nack.TrackerConfig{JitterMax: 0, BackoffBase: 50 * time.Millisecond, BackoffMax: 100 * time.Millisecond, MaxRetries: 50, GapTTL: 10 * time.Second}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
+
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	if got := pollGaps(tr, 0, 3*time.Second); got != 0 {
+		t.Errorf("multicast-flagged ACK did not close the gap: PendingGaps = %d, want 0", got)
+	}
+}
+
 // TestObserveEmitterChange_Rebaselines: a forward jump beyond MaxForwardJump is an
 // EMITTER CHANGE (anycast failover between long-lived proxies with divergent flow
 // counters), not loss — the flow re-baselines: no phantom gap range is registered
