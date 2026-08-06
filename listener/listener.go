@@ -443,11 +443,21 @@ func (w *Worker) Run(ctx context.Context) error {
 // (gap tracker, cross-listener dedup, reassembly) are simply absent (nil) on a
 // delivery worker, so processFrame skips them.
 func (w *Worker) RunUnicastIngest(ctx context.Context) error {
-	fd, err := openRawSocket(w.port)
+	return w.RunUnicastIngestOn(ctx, w.port)
+}
+
+// RunUnicastIngestOn is RunUnicastIngest on an explicit port instead of w.port —
+// used for the collapsed-edge LOCAL MIRROR: the co-located proxy unicasts this
+// node's own egress frames to a dedicated loopback port (own-source frames the
+// listener cannot SSM-join), and this worker receives them on that port through
+// the same processFrame path. The port must be listener-exclusive (not the retry
+// cache's port). No multicast join — it is a pure unicast ingest.
+func (w *Worker) RunUnicastIngestOn(ctx context.Context, port int) error {
+	fd, err := openRawSocket(port)
 	if err != nil {
-		return fmt.Errorf("delivery worker %d: open socket: %w", w.id, err)
+		return fmt.Errorf("delivery worker %d: open socket on :%d: %w", w.id, port, err)
 	}
-	return w.serve(ctx, fd, "delivery unicast ingest ready")
+	return w.serve(ctx, fd, "unicast ingest ready")
 }
 
 // serve runs the receive loop on an already-bound socket (Run also pre-joins the
