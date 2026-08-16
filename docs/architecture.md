@@ -37,6 +37,19 @@ Multicast fabric (site-scoped FF05::/16)
               └──▶ NACK gap tracking (shard flows + control-plane flows)
 ```
 
+## Mode (receiver / delivery split)
+
+`-mode` selects the listener's role (flag details in the
+[configuration reference](configuration.md#mode-receiver--delivery-split)):
+
+- **`collapsed`** (default) — monolith: joins fabric `(S,G)`, runs
+  demux/gap/NACK, and fans out to consumers in one process.
+- **`receiver`** — multicast-facing half: joins + gap/NACK, forwards raw
+  frames (envelope-preserving) to the delivery tier (`-delivery-addrs`).
+- **`delivery`** — consumer-facing half: no multicast join, no gap/NACK
+  (the receiver owns those); a unicast-ingest front reads raw frames off
+  the wire and runs only the egress (fan-out) sink.
+
 ## SSM (RFC 4607) mode
 
 When `-source-mode=ssm` the listener joins every multicast group as
@@ -295,8 +308,10 @@ header egress endpoint.
 
 Per BRC-135, the listener stamps the frame with its **own emitter identity**:
 
-- `HashKey = XXH64(listenerIPv6 ∥ 0xFFFE ∥ zeros[32])` — computed once at startup
+- `HashKey = XXH64(listenerIPv6 ∥ 0xFFFA ∥ zeros[32])` — computed once at startup
   from the configured `-iface` primary IPv6 address (see `primaryIPv6` in `main.go`).
+  The group index is `GroupBlockHeader` (0xFFFA), the BRC-135 egress group — not
+  `GroupBlockBroadcast` (0xFFFE), the upstream BRC-131 ingress group.
 - `SeqNum` — a monotonic per-worker counter (`atomic.Uint64`) starting at 1,
   incremented on every emission.
 - `BlockHash` (TxID slot) — copied verbatim from the upstream BRC-131 `ContentID`.
@@ -545,6 +560,10 @@ fabric entirely. This makes E2E tests self-contained and reliable on any Linux
 host without requiring kernel multicast loopback support on the loopback
 interface.
 
-In production the socket receives multicast frames exclusively; the unicast
-receive path is an implementation property of the `[::]` bind address, not an
-intended ingress path.
+Unicast ingest is also an intended production path: delivery mode
+(`-mode delivery`) reads raw frames over unicast from its receiver tier, and
+the collapsed-edge local mirror ingests over unicast
+(`Worker.RunUnicastIngestOn`). Only collapsed and receiver deployments receive
+multicast exclusively; for those, the unicast receive path is an
+implementation property of the `[::]` bind address that the E2E suite
+exploits.

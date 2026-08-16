@@ -89,13 +89,15 @@ make test
 
 The E2E suite (`test/run-e2e.sh`) starts a listener instance, injects frames
 as unicast UDP directly to the listener's bound port, and verifies delivery via
-a `sink-test-frames` UDP sink. Three scenarios are exercised sequentially:
+a `sink-test-frames` UDP sink. Four scenarios are exercised sequentially:
 
 1. **Basic delivery** — all frames forwarded; verified by sink count and
    `bsl_frames_forwarded_total` Prometheus metric.
 2. **Shard filter** — `-shard-include 0` passes only the group-0 frame.
 3. **Strip-header** — on by default, forwards raw payload bytes (the BSV tx);
    `-strip-header=false` forwards the full frame. Sink counts raw datagrams.
+4. **BRC-130 fragmentation** — fragmented payloads are reassembled and
+   delivered.
 
 The suite requires `shard-proxy` checked out at `../shard-proxy`
 (for `send-test-frames`). `make test-e2e` builds all binaries fresh before
@@ -109,7 +111,7 @@ make test-e2e
 
 - [Architecture](docs/architecture.md)
 - [Configuration reference](docs/configuration.md) — every flag, plus a
-  metrics reference covering all 43 `bsl_` series
+  metrics reference covering all 44 `bsl_` series
 - [Unified Logging Plan](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md) — `-log-format json` structured logs, `host.inventory`, `-trace-sampling`, runtime `/loglevel`
 - [Protocol specification](https://github.com/lightwebinc/shard-common/blob/main/docs/protocol.md)
 - [BRC-126 (Retransmission Protocol)](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-126-retransmission-protocol.md)

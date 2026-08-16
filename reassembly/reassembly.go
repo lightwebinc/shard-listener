@@ -148,12 +148,11 @@ type Buffer struct {
 	// fragment it already consumed. That is the retry-endpoint BINARY default
 	// (-beacon-flags-multicast defaults true, -beacon-flags-unicast false) and
 	// what the container harness runs, so it is the default a plain build hits.
-	// It is NOT what the fabric currently runs: the shipped ops posture is
-	// unicast-only (integrated-infra sets beacon_flags_unicast: true /
-	// beacon_flags_multicast: false), and a unicast return reaches only the
-	// listener that asked. So on the live edges this memory is dormant, and
-	// bsl_reassembly_late_fragments_total sitting at zero there is the expected
-	// reading, not a broken hook. It is still the listener's own invariant to
+	// It is NOT the only posture: deployments configured unicast-only
+	// (beacon_flags_unicast: true / beacon_flags_multicast: false) answer only
+	// the requesting listener, so this memory is dormant there and
+	// bsl_reassembly_late_fragments_total at zero is the expected reading.
+	// It is still the listener's own invariant to
 	// hold rather than a mode to configure around: the repair mode is the
 	// RESPONDER's choice, advertised per retry endpoint, so a listener can be
 	// moved onto a multicast-answering cache without any change of its own.

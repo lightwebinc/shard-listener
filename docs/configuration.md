@@ -423,31 +423,17 @@ overflow regardless of TTL.
 
 ## Cross-Listener TxID Deduplication
 
-When multiple listeners process the same multicast fabric (e.g. for redundancy
-behind a downstream load balancer), each will forward the same TxID once to its
-own downstream. Cross-listener dedup arbitrates a single forwarder per TxID
-through a shared Redis backend: the first listener to claim a TxID in Redis
-forwards egress; the others drop the frame.
+Cross-listener TxID dedup is the per-deployment **egress dedup**: HA listener
+siblings sharing a `-deployment-id` arbitrate a single forwarder per TxID
+through a shared backend, keyed per `DEPLOYMENT_ID` (not across all
+listeners). See `-egress-dedup-redis-addr` / `-egress-dedup-prefix` /
+`-egress-dedup-ttl-redis` and `-deployment-id` below. The old
+`-txid-dedup-*` flags remain as aliases — see
+[Deprecated TxID dedup flags](#deprecated-txid-dedup-flags).
 
-Local egress dedup (above) operates on `(groupIdx, subtreeID, SeqNum)` within a
-single listener; cross-listener dedup is keyed on `TxID` across all listeners.
-The two mechanisms are independent and can be combined.
-
-### `-txid-dedup-addr` / `TXID_DEDUP_ADDR` (default: empty)
-
-Redis address (`host:port`) for cross-listener TxID dedup. Empty disables the
-feature entirely; the listener runs without checking Redis.
-
-### `-txid-dedup-prefix` / `TXID_DEDUP_PREFIX` (default: `bsl:txid:`)
-
-Redis key prefix prepended to every `TxID` claim. Useful for namespacing
-multiple independent listener fleets sharing one Redis instance.
-
-### `-txid-dedup-ttl` / `TXID_DEDUP_TTL` (default: `60s`)
-
-TTL for `TxID` dedup Redis entries. Must exceed the maximum propagation delay
-across all listeners (including retransmit jitter) so that a late-arriving
-retransmit on another listener still finds the original claim.
+Local egress dedup (above) operates on `(groupIdx, subtreeID, SeqNum)` within
+a single listener; the per-deployment dedup is keyed on `TxID`. The two
+mechanisms are independent and can be combined.
 
 ---
 
@@ -865,16 +851,16 @@ auto-config) is documented in the BRC-139 spec instead.
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `bsl_gaps_detected_total` | — | Sequence gaps detected (missing frames) |
-| `bsl_gaps_suppressed_total` | — | Gaps cancelled by retransmit fill or ACK response |
-| `bsl_gaps_unrecovered_total` | — | Gaps evicted after retries exhausted or TTL exceeded |
-| `bsl_nacks_dispatched_total` | — | NACK datagrams sent to retry endpoints |
-| `bsl_nacks_throttled_total` | — | Gaps held after a THROTTLED congestion signal |
-| `bsl_nack_flows_refused_total` | — | New per-source flows skipped at the MaxFlows flood-guard cap |
-| `bsl_seq_rebaselines_total` | — | Flows re-baselined on an implausible SeqNum jump (emitter change, e.g. anycast failover) |
-| `bsl_tail_probes_sent_total` | — | speculative NACKs for the next expected SeqNum on an idle flow (BRC-126 tail-loss probe) |
-| `bsl_tail_probes_recovered_total` | — | tail probes that returned a real frame — loss that no successor frame would ever have revealed |
-| `bsl_tail_probes_miss_total` | — | tail probes answered MISS — the flow was genuinely idle, not lossy |
+| `bsl_gaps_detected_total` | `flow`, `source` | Sequence gaps detected (missing frames) |
+| `bsl_gaps_suppressed_total` | `flow`, `source` | Gaps cancelled by retransmit fill or ACK response |
+| `bsl_gaps_unrecovered_total` | `flow`, `source` | Gaps evicted after retries exhausted or TTL exceeded |
+| `bsl_nacks_dispatched_total` | `flow`, `source` | NACK datagrams sent to retry endpoints |
+| `bsl_nacks_throttled_total` | `flow`, `source` | Gaps held after a THROTTLED congestion signal |
+| `bsl_nack_flows_refused_total` | `flow` | New per-source flows skipped at the MaxFlows flood-guard cap |
+| `bsl_seq_rebaselines_total` | `flow`, `source` | Flows re-baselined on an implausible SeqNum jump (emitter change, e.g. anycast failover) |
+| `bsl_tail_probes_sent_total` | `flow`, `source` | speculative NACKs for the next expected SeqNum on an idle flow (BRC-126 tail-loss probe) |
+| `bsl_tail_probes_recovered_total` | `flow`, `source` | tail probes that returned a real frame — loss that no successor frame would ever have revealed |
+| `bsl_tail_probes_miss_total` | `flow`, `source` | tail probes answered MISS — the flow was genuinely idle, not lossy |
 
 ### Reassembly (BRC-130)
 
@@ -897,8 +883,8 @@ auto-config) is documented in the BRC-139 spec instead.
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `bsl_header_forwarded_total` | — | Block headers extracted and forwarded to header egress |
-| `bsl_header_egress_errors_total` | — | Errors sending to header egress downstream |
+| `bsl_header_forwarded_total` | `worker` | Block headers extracted and forwarded to header egress |
+| `bsl_header_egress_errors_total` | `worker` | Errors sending to header egress downstream |
 
 ### Egress / ingress TxID dedup
 
@@ -921,7 +907,7 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_beacon_adverts_received_total` | — | Valid ADVERT beacon datagrams upserted into the endpoint registry |
 | `bsl_beacon_registry_endpoints` | — | Number of endpoints currently in the beacon discovery registry |
 | `bsl_subtree_group_announces_received_total` | — | Valid SubtreeGroupAnnounce datagrams processed (BRC-127) |
-| `bsl_subtree_group_announces_rejected_total` | — | SubtreeGroupAnnounce datagrams rejected before registry update |
+| `bsl_subtree_group_announces_rejected_total` | `reason` | SubtreeGroupAnnounce datagrams rejected before registry update |
 | `bsl_subtree_group_entries` | — | Live (groupID, subtreeID) pairs in the subtree group registry |
 | `bsl_subtree_group_evictions_total` | — | Subtree group registry entries removed by TTL expiry |
 
@@ -930,6 +916,7 @@ auto-config) is documented in the BRC-139 spec instead.
 | Metric | Labels | Meaning |
 |---|---|---|
 | `bsl_uptime_seconds` | — | Seconds elapsed since the listener process started |
+| `bsl_host_info` | `hostname`, `kernel_version`, `cpu_logical`, `mem_bytes`, `rmem_max`, `nic`, `speed_mbps`, `version` | Static host facts (value always 1); join with the `host.inventory` log event |
 
 ---
 

@@ -13,12 +13,12 @@ import (
 )
 
 // notElectedSink models a class router: it refuses every class with an error
-// wrapping egress.ErrNotElected, exactly as sdapool.ClassSink does for a class
-// the consumer did not elect.
+// wrapping egress.ErrNotElected, exactly as a per-class router sink does for
+// a class the consumer did not elect.
 type notElectedSink struct{ recSink }
 
 func (n *notElectedSink) wrap() error {
-	return fmt.Errorf("sdapool: class not elected by consumer: %w", egress.ErrNotElected)
+	return fmt.Errorf("classrouter: class not elected by consumer: %w", egress.ErrNotElected)
 }
 func (n *notElectedSink) Send(raw []byte, f *frame.Frame) error          { return n.wrap() }
 func (n *notElectedSink) SendBeef(raw []byte, bf *frame.BEEFFrame) error { return n.wrap() }
@@ -27,9 +27,9 @@ func (n *notElectedSink) SendHeader(_ []byte, _ *frame.Frame) error      { retur
 // A consumer that did not elect the class must NOT turn the batch into an
 // error. Before this, the worker booked an egress FAILURE and skipped its
 // forwarded counter on every ordinary frame, because a per-class fan-out
-// always has consumers that did not elect a given class. Observed live:
-// bsl_header_forwarded_total stuck at 3 while 359 headers were delivered, and
-// bsl_header_egress_errors_total at 362.
+// always has consumers that did not elect a given class. Symptom:
+// bsl_header_forwarded_total stalls while headers are still delivered, and
+// bsl_header_egress_errors_total counts nearly every frame.
 func TestNotElectedIsNotABatchError(t *testing.T) {
 	if !egress.IsNotElected(fmt.Errorf("wrapped: %w", egress.ErrNotElected)) {
 		t.Fatal("IsNotElected must see through wrapping")
@@ -71,8 +71,8 @@ func TestRealErrorStillSurfaces(t *testing.T) {
 	}
 }
 
-// The same rule applies to the tx path, where the false-error volume was worst
-// (observed live: bsl_egress_errors_total ~= every frame received).
+// The same rule applies to the tx path, where the false-error volume is worst
+// (bsl_egress_errors_total ~= every frame received).
 func TestNotElectedIsNotABatchErrorOnTx(t *testing.T) {
 	unelected := &notElectedSink{}
 	good := &recSink{}

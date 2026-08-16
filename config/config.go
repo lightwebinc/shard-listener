@@ -58,9 +58,9 @@
 //	-subtree-data-verify-merkle SUBTREE_DATA_VERIFY_MERKLE false Optional post-reassembly Merkle root verification (expensive)
 //	-egress-dedup-cap     EGRESS_DEDUP_CAP     0                Egress dedup capacity (0 = disabled)
 //	-egress-dedup-ttl     EGRESS_DEDUP_TTL     2s               Egress dedup TTL (max age of a remembered key)
-//	-txid-dedup-addr      TXID_DEDUP_ADDR                       Redis address for cross-listener TxID dedup (empty = disabled)
-//	-txid-dedup-prefix    TXID_DEDUP_PREFIX    bsl:txid:        Redis key prefix for TxID dedup entries
-//	-txid-dedup-ttl       TXID_DEDUP_TTL       60s              TTL for TxID dedup Redis entries
+//	-txid-dedup-addr      TXID_DEDUP_ADDR                       DEPRECATED: alias for -egress-dedup-redis-addr
+//	-txid-dedup-prefix    TXID_DEDUP_PREFIX                     DEPRECATED: alias for -egress-dedup-prefix
+//	-txid-dedup-ttl       TXID_DEDUP_TTL                        DEPRECATED: alias for -egress-dedup-ttl-redis
 //	-metrics-addr         METRICS_ADDR         :9200            Prometheus / healthz / readyz
 //	-drain-timeout        DRAIN_TIMEOUT        0s               Pre-shutdown drain window
 //	-instance             INSTANCE_ID          hostname         OTel service.instance.id
