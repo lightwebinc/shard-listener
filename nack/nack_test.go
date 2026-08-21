@@ -868,3 +868,81 @@ func TestRebaselineRecoversTransition(t *testing.T) {
 		t.Fatalf("recovery tail = %d, want a small bounded count (~outage/IPG)", g)
 	}
 }
+
+// ── Proxy-restart heuristic vs repairs (the scenario-17 phantom cascade) ─────
+
+// buildFlowTo drives flowA contiguously from 1 to last with a live source,
+// leaving gaps at exactly the given seqNums (skipped on the way up).
+func buildFlowTo(tr *nack.Tracker, last uint64, gaps map[uint64]bool) {
+	src := net.ParseIP("fd10::99")
+	for s := uint64(1); s <= last; s++ {
+		if gaps[s] {
+			continue
+		}
+		tr.Observe(0, [32]byte{}, flowA, s, [32]byte{}, src)
+	}
+}
+
+// TestRepairLowSeqDoesNotResetFlow: a unicast repair (nil source) filling a
+// pending gap at a seqNum below the reset threshold must ONLY fill that gap.
+// Before the fix it fell through to the restart heuristic, which flushed every
+// other pending gap to unrecovered and re-baselined the flow to the repair's
+// seqNum — the phantom-unrecovered cascade scenario 17 measured.
+func TestRepairLowSeqDoesNotResetFlow(t *testing.T) {
+	tr := newTestTracker()
+	buildFlowTo(tr, 150, map[uint64]bool{60: true, 130: true})
+	if g := tr.PendingGaps(); g != 2 {
+		t.Fatalf("setup: PendingGaps = %d, want 2 (60, 130)", g)
+	}
+
+	// Repair for 60 arrives off the NACK channel: no live source.
+	tr.Observe(0, [32]byte{}, flowA, 60, [32]byte{}, nil)
+
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after repair: PendingGaps = %d, want 1 (130 must survive)", g)
+	}
+	// The flow baseline must be untouched: the next wire frame is contiguous
+	// and must register nothing (a reset baseline would read 151 as a jump).
+	tr.Observe(0, [32]byte{}, flowA, 151, [32]byte{}, net.ParseIP("fd10::99"))
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after next wire frame: PendingGaps = %d, want 1 (no phantom gaps)", g)
+	}
+}
+
+// TestLateReinjectLowSeqDoesNotReset: a repair arriving AFTER its gap was
+// abandoned (nothing pending) is history replayed, not a restarted proxy —
+// it must be ignored entirely.
+func TestLateReinjectLowSeqDoesNotReset(t *testing.T) {
+	tr := newTestTracker()
+	buildFlowTo(tr, 150, nil)
+
+	tr.Observe(0, [32]byte{}, flowA, 60, [32]byte{}, nil) // late repair, nothing pending
+
+	tr.Observe(0, [32]byte{}, flowA, 151, [32]byte{}, net.ParseIP("fd10::99"))
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("PendingGaps = %d, want 0 (late reinject must not reset the baseline)", g)
+	}
+}
+
+// TestWireLowSeqStillResetsFlow: the restart heuristic itself is load-bearing —
+// a LIVE frame rolling back below the threshold on an established flow still
+// resets the flow (pending flushed, baseline moved).
+func TestWireLowSeqStillResetsFlow(t *testing.T) {
+	tr := newTestTracker()
+	src := net.ParseIP("fd10::99")
+	buildFlowTo(tr, 150, map[uint64]bool{130: true})
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1", g)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 5, [32]byte{}, src) // restarted proxy, live wire frame
+
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("after restart: PendingGaps = %d, want 0 (flushed)", g)
+	}
+	// Tracking resumes from the restarted stream: 6 is contiguous, no gap.
+	tr.Observe(0, [32]byte{}, flowA, 6, [32]byte{}, src)
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("after restart+1: PendingGaps = %d, want 0", g)
+	}
+}

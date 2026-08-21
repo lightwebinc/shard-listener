@@ -474,7 +474,17 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 	if e, found := fs.pending[seqNum]; found {
 		delete(fs.pending, seqNum)
 		t.bookFill(fs, e)
-		// Fall through: update lastSeqNum if this advances the stream.
+		// A repair that does not advance the stream is now fully handled. It
+		// must NOT fall through to step 4: a repaired early-flow seqNum (≤ the
+		// reset threshold) otherwise reads as a proxy restart, flushing every
+		// other pending gap to unrecovered and re-baselining the flow to the
+		// repair's seqNum — from where the next wire frame's "jump" triggers
+		// the emitter-change path and NACKs a tail of already-received frames.
+		if seqNum <= fs.lastSeqNum {
+			return
+		}
+		// A filled PROBE can sit beyond lastSeqNum; fall through so steps 5/6
+		// advance the stream.
 	}
 
 	if fs.lastSeqNum == 0 {
@@ -492,7 +502,12 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		if threshold == 0 {
 			threshold = 100
 		}
-		if seqNum <= threshold && fs.lastSeqNum > threshold {
+		// Only a LIVE wire frame can signal a proxy restart. A recovered frame
+		// re-injected off the unicast NACK channel carries no source (see
+		// Worker.Reinject) — a late repair of an early-flow seqNum, e.g. one
+		// arriving after its gap was abandoned, is history replayed, not a
+		// restarted proxy, and must not reset the flow.
+		if source != nil && seqNum <= threshold && fs.lastSeqNum > threshold {
 			// Proxy restarted: evict any pending gaps (unrecoverable now) and
 			// reset the flow counter.
 			for _, e := range fs.pending {
