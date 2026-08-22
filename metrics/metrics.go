@@ -99,6 +99,7 @@ type Recorder struct {
 	flowsRefused        metric.Int64Counter // new flows skipped at the MaxFlows flood-guard cap
 	seqRebaselines      metric.Int64Counter // flows re-baselined on an implausible SeqNum jump (emitter change)
 	nacksDispatched     metric.Int64Counter
+	nackSendErrors      metric.Int64Counter // WriteTo failed: the walk tier was never asked
 	nacksThrottled      metric.Int64Counter // held after a THROTTLED congestion signal
 	nacksUnrecovered    metric.Int64Counter // retries exhausted or TTL exceeded
 
@@ -361,6 +362,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.nacksDispatched, err = meter.Int64Counter("bsl_nacks_dispatched_total",
 		metric.WithDescription("NACK datagrams sent to retry endpoints")); err != nil {
+		return nil, err
+	}
+	if r.nackSendErrors, err = meter.Int64Counter("bsl_nack_send_errors_total",
+		metric.WithDescription("NACK datagrams that failed to send (WriteTo error) — that walk tier was never asked")); err != nil {
 		return nil, err
 	}
 	if r.nacksThrottled, err = meter.Int64Counter("bsl_nacks_throttled_total",
@@ -662,6 +667,15 @@ func (r *Recorder) GapSuppressed(flow, source string) {
 func (r *Recorder) NACKDispatched(flow, source string) {
 	r.nacksDispatched.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
+}
+
+// NACKSendError records a NACK datagram whose WriteTo failed — the tier it
+// targeted was never asked, which is invisible to the walk (a timeout and an
+// unsendable packet look identical downstream). endpoint labels the target so
+// a systematically unreachable tier stands out from a transient error.
+func (r *Recorder) NACKSendError(endpoint string) {
+	r.nackSendErrors.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("endpoint", endpoint)))
 }
 
 // NACKThrottled records a gap parked after a THROTTLED congestion signal.

@@ -1022,7 +1022,21 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 		EndSeq:    e.seqNum,
 		SubtreeID: e.subtreeID,
 	}, buf[:])
-	_, _ = conn.WriteTo(buf[:], addr)
+	if _, werr := conn.WriteTo(buf[:], addr); werr != nil {
+		// A failed send is NOT a dispatched NACK: the tier was never asked.
+		// Swallowing this is how a firewall EPERM on every remote endpoint
+		// stayed invisible for the repair plane's entire life — dispatched
+		// counted 3 per gap while 2 of 3 datagrams died in the sender's own
+		// output hook, and the only surviving tier shared fate with the loss.
+		// Count + log, then advance exactly like a timeout so the walk still
+		// fails over toward tiers that might send.
+		if t.rec != nil {
+			t.rec.NACKSendError(endpoint.Addr)
+		}
+		t.log.Warn("NACK send failed", "endpoint", endpoint.Addr, "err", werr)
+		t.advanceEndpoint(e, false, len(snap))
+		return
+	}
 
 	if t.rec != nil {
 		t.rec.NACKDispatched(flowLabel(e.groupIdx), srcStr(e.source))

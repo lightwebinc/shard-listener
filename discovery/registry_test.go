@@ -91,12 +91,14 @@ func TestRegistry_Seed(t *testing.T) {
 	if len(snap) != 2 {
 		t.Fatalf("Snapshot len = %d, want 2", len(snap))
 	}
-	for _, e := range snap {
+	// Preference encodes list position (first = highest) so the snapshot's
+	// unstable sort cannot scramble the seeded order.
+	for i, e := range snap {
 		if e.Tier != 0xFF {
 			t.Errorf("seeded Tier = %d, want 0xFF", e.Tier)
 		}
-		if e.Preference != 0 {
-			t.Errorf("seeded Preference = %d, want 0", e.Preference)
+		if want := uint8(255 - i); e.Preference != want {
+			t.Errorf("seeded Preference[%d] = %d, want %d", i, e.Preference, want)
 		}
 	}
 }
@@ -162,7 +164,7 @@ func TestRegistry_SnapshotSorting(t *testing.T) {
 		{0, 100},
 		{1, 150},
 		{2, 50},
-		{0xFF, 0},
+		{0xFF, 255}, // seed preference = 255 - position, still trailing at Tier 0xFF
 	}
 	for i, want := range expected {
 		if snap[i].Tier != want.tier || snap[i].Preference != want.pref {
@@ -225,6 +227,35 @@ func TestRegistry_SeedFallbackOnly(t *testing.T) {
 	for _, e := range snap {
 		if e.Tier != 0xFF {
 			t.Errorf("seed Tier = %d, want 0xFF", e.Tier)
+		}
+	}
+}
+
+// TestRegistry_SeedOrderIsDeterministic: seeds share Tier 0xFF and the snapshot
+// sort is not stable, so equal-preference seeds came back in unspecified order —
+// silently undoing the caller's demoteSelf contract (own retry LAST). Position
+// now encodes preference; the snapshot must reproduce the seeded order exactly,
+// every rebuild.
+func TestRegistry_SeedOrderIsDeterministic(t *testing.T) {
+	// 40 entries: enough that an unstable sort over equal keys actually
+	// permutes (small slices can pass by accident via insertion sort).
+	var want []string
+	for i := 0; i < 39; i++ {
+		want = append(want, fmt.Sprintf("[fd00::%x]:9300", i+1))
+	}
+	want = append(want, "[fd00::self]:9300") // demoted-last position must survive
+	for round := 0; round < 50; round++ {
+		r := NewRegistry()
+		r.Seed(want)
+		snap := r.Snapshot()
+		if len(snap) != len(want) {
+			t.Fatalf("round %d: snapshot len = %d, want %d", round, len(snap), len(want))
+		}
+		for i, e := range snap {
+			if e.Addr != want[i] {
+				t.Fatalf("round %d: snapshot[%d] = %s, want %s — seeded order not preserved (demoteSelf undone)",
+					round, i, e.Addr, want[i])
+			}
 		}
 	}
 }

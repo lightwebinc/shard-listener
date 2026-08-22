@@ -82,18 +82,29 @@ func (r *Registry) Evict() {
 	}
 }
 
-// Seed loads static endpoint addresses at Tier=0xFF, Preference=0 (lowest priority).
+// Seed loads static endpoint addresses at Tier=0xFF (lowest priority).
 // These are only used when no beacon-discovered endpoints exist at lower tiers.
+//
+// Preference encodes LIST POSITION (first = highest) rather than a flat 0:
+// Snapshot's sort orders by (Tier, Preference) and is not stable, so seeds
+// with identical keys came back in unspecified order — silently undoing
+// demoteSelf's contract that this node's own retry is tried LAST. With a flat
+// preference the walk could spend its first attempt on the one cache that
+// shares fate with the loss it is repairing.
 func (r *Registry) Seed(addrs []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.seeds = make([]*EndpointEntry, 0, len(addrs))
 	for i, addr := range addrs {
+		pref := 255 - i
+		if pref < 0 {
+			pref = 0 // >255 seeds: tail order unspecified, never a real roster
+		}
 		r.seeds = append(r.seeds, &EndpointEntry{
 			Addr:       addr,
 			Tier:       0xFF,
-			Preference: 0,
+			Preference: uint8(pref),
 			InstanceID: uint32(0xFFFFF000 + i),                      // synthetic IDs
 			Expires:    time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC), // never expire
 		})
