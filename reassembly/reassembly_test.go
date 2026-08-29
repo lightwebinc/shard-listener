@@ -25,17 +25,30 @@ func buildFragFrame(txID [32]byte, origLen uint32, idx, total uint16, data []byt
 	}
 }
 
-// txIDOf returns the SHA256d (TxID) of payload, as used for hash verification.
+// txIDOf returns raw SHA256d over the payload bytes. This is NOT the canonical
+// TxID for an EF payload — TestReassembly_EFPayload_VerifyAccepts uses it to
+// prove the two differ. Use canonicalID for a payload that must verify.
 func txIDOf(payload []byte) [32]byte {
 	first := sha256.Sum256(payload)
 	return sha256.Sum256(first[:])
 }
 
+// canonicalID returns the id the reassembly verify gate derives: objfmt.TxID
+// over a payload that must be exactly one transaction.
+func canonicalID(t *testing.T, payload []byte) [32]byte {
+	t.Helper()
+	id, err := objfmt.TxID(payload)
+	if err != nil {
+		t.Fatalf("objfmt.TxID: %v", err)
+	}
+	return id
+}
+
 // TestReassembly_SingleFragment verifies a single-fragment frame completes
 // immediately and delivers the exact payload bytes.
 func TestReassembly_SingleFragment(t *testing.T) {
-	payload := []byte("single-fragment-payload")
-	txID := txIDOf(payload)
+	payload := buildEFPayloadR(t, 100)
+	txID := canonicalID(t, payload)
 
 	var got []byte
 	var gotFrame *frame.Frame
@@ -63,8 +76,8 @@ func TestReassembly_SingleFragment(t *testing.T) {
 
 // TestReassembly_MultiFragment verifies in-order delivery of K fragments.
 func TestReassembly_MultiFragment(t *testing.T) {
-	payload := bytes.Repeat([]byte("abcdefgh"), 50) // 400 bytes
-	txID := txIDOf(payload)
+	payload := buildEFPayloadR(t, 320)
+	txID := canonicalID(t, payload)
 	const K = 4
 	fragSize := len(payload) / K
 
@@ -91,8 +104,8 @@ func TestReassembly_MultiFragment(t *testing.T) {
 // TestReassembly_OutOfOrder verifies correct reassembly when fragments arrive
 // in reverse order.
 func TestReassembly_OutOfOrder(t *testing.T) {
-	payload := bytes.Repeat([]byte("XYZW"), 100) // 400 bytes
-	txID := txIDOf(payload)
+	payload := buildEFPayloadR(t, 320)
+	txID := canonicalID(t, payload)
 	const K = 4
 	fragSize := len(payload) / K
 
@@ -116,8 +129,8 @@ func TestReassembly_OutOfOrder(t *testing.T) {
 
 // TestReassembly_Duplicate verifies that duplicate fragments are ignored.
 func TestReassembly_Duplicate(t *testing.T) {
-	payload := []byte("two-fragment-payload-here!!")
-	txID := txIDOf(payload)
+	payload := buildEFPayloadR(t, 100)
+	txID := canonicalID(t, payload)
 	half := len(payload) / 2
 
 	calls := 0

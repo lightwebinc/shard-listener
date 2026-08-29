@@ -36,18 +36,32 @@ import (
 	"github.com/lightwebinc/shard-common/objfmt"
 )
 
-// payloadTxID derives the canonical TxID for a reassembled V2 tx payload:
-// SHA256d over the raw bytes for a BRC-12 payload, objfmt.TxID (standard
-// serialization, EF extras excluded) for a BRC-30 EF payload — the same id
-// producers stamp and consumers dedup on. ok=false when an EF-marked payload
-// does not walk as a transaction (structurally invalid).
-func payloadTxID(p []byte) (id [32]byte, ok bool) {
-	if objfmt.IsEF(p) {
-		id, err := objfmt.TxID(p)
-		return id, err == nil
+// payloadTxID derives the canonical TxID of a reassembled V2 transaction payload and
+// reports whether the payload is exactly one well-formed transaction.
+//
+// This is deliberately the same derivation and the same bound the ingress
+// proxy applies (forwarder.Forwarder.SetVerifyPayloadHash): objfmt.TxID —
+// SHA256d over the standard serialization, EF extras excluded — for both raw
+// and Extended Format payloads, over a payload that must be exactly one
+// transaction. For an honest payload the result is unchanged; what changes is
+// that a payload which is not a single transaction (unwalkable, truncated, or
+// a valid transaction followed by trailing bytes) no longer verifies. TxID
+// walks the transaction and ignores whatever follows it, so without the length
+// bound "honest tx ‖ junk" would verify against the honest id and carry the
+// tail downstream.
+//
+// oneTx=false means the payload is not a single transaction; only when it is
+// true is id meaningful.
+func payloadTxID(p []byte) (id [32]byte, oneTx bool) {
+	sz, err := objfmt.TxSize(p)
+	if err != nil || sz != len(p) {
+		return [32]byte{}, false
 	}
-	first := sha256.Sum256(p)
-	return sha256.Sum256(first[:]), true
+	id, err = objfmt.TxID(p)
+	if err != nil {
+		return [32]byte{}, false
+	}
+	return id, true
 }
 
 const (
@@ -507,8 +521,8 @@ func (b *Buffer) complete(s *slot) {
 		// serialization, EF extras excluded) for BRC-30 EF payloads —
 		// hashing the raw EF bytes would reject every honest EF payload.
 		if b.verifyHash {
-			computed, ok := payloadTxID(payload)
-			if !ok || computed != s.txID {
+			computed, oneTx := payloadTxID(payload)
+			if !oneTx || computed != s.txID {
 				if b.onHashMismatch != nil {
 					b.onHashMismatch()
 				}

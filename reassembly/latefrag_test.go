@@ -1,7 +1,6 @@
 package reassembly
 
 import (
-	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -16,9 +15,8 @@ import (
 // onIncomplete NACK for fragments the listener already had — repair feeding
 // repair.
 func TestReassembly_LateCopyDoesNotReopenCompletedSlot(t *testing.T) {
-	payload := []byte("large-object-payload-split-across-two-fragments!!")
-	first := sha256.Sum256(payload)
-	txID := sha256.Sum256(first[:])
+	payload := buildEFPayloadR(t, 120)
+	txID := canonicalID(t, payload)
 	half := len(payload) / 2
 	frags := [][]byte{payload[:half], payload[half:]}
 
@@ -68,9 +66,8 @@ func TestReassembly_LateCopyDoesNotReopenCompletedSlot(t *testing.T) {
 // not a permanent block: past the completion TTL the same key reassembles again,
 // which is what lets a genuinely re-sent object through.
 func TestReassembly_CompletionMemoryExpires(t *testing.T) {
-	payload := []byte("short-object-two-fragments")
-	first := sha256.Sum256(payload)
-	txID := sha256.Sum256(first[:])
+	payload := buildEFPayloadR(t, 100)
+	txID := canonicalID(t, payload)
 	half := len(payload) / 2
 	frags := [][]byte{payload[:half], payload[half:]}
 

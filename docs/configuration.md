@@ -645,14 +645,38 @@ Enable per-frame debug logging (decode errors, forwarded frames, gap events).
 ### `-verify-payload-hash` / `VERIFY_PAYLOAD_HASH` (default: `false`)
  
 When `true`, verify that the TxID field in BRC-124/BRC-128 frames matches the
-canonical transaction id of the payload: SHA256d of the payload bytes for a
-BRC-12 raw payload, `objfmt.TxID` (SHA256d over the standard serialization,
-EF extras excluded) for a BRC-30 Extended Format payload. This is the same id
-producers stamp and consumers dedup on, so honest EF lanes verify cleanly. An
-EF-marked payload that does not walk as a transaction is treated as invalid.
-Frames with mismatched TxIDs are dropped before egress and gap tracking, and
-`bsl_frames_invalid_payload_total` is incremented. BRC-12 legacy frames are
-forwarded verbatim regardless of this setting.
+canonical transaction id of its payload: `objfmt.TxID` — SHA256d over the
+standard serialization, EF extras excluded — for both raw and Extended Format
+payloads. This is the same id producers stamp and consumers dedup on, so honest
+EF lanes verify cleanly; hashing the raw EF bytes instead would drop every
+honest EF frame.
+
+**This is deliberately the same check the ingress proxy applies**
+(`shard-proxy -verify-payload-hash`). Two conditions fail, both before egress
+and gap tracking:
+
+| Condition | Counter |
+|-----------|---------|
+| Payload is not exactly one transaction (unwalkable, truncated, or trailing bytes) | `bsl_frames_dropped_total{reason="payload_not_one_tx"}` |
+| Payload walks, but its canonical TxID ≠ the frame's TxID | `bsl_frames_invalid_payload_total` |
+
+The length bound matters because `objfmt.TxID` walks the transaction and
+ignores whatever follows it: without it, a payload of "honest transaction ‖
+junk" verifies against the honest id and carries the tail downstream.
+
+BRC-12 (V1) legacy frames are forwarded verbatim regardless of this setting.
+BRC-130 reassembled payloads run the identical check on completion.
+
+> **Behaviour change.** Verification previously accepted *any* payload whose
+> raw SHA256d matched the frame's TxID, so a non-transaction payload could
+> verify. It now requires the payload to be exactly one well-formed
+> transaction. Honest traffic is unaffected — for a payload that really is one
+> transaction the derived id is identical — but a synthetic load generator that
+> stamps `SHA256d(arbitrary bytes)` will be dropped when this flag is on.
+
+There is no listener equivalent of the proxy's `-allow-stamped-ingress`: every
+frame a listener receives was stamped by a proxy, so stamping carries no
+admission signal here.
 
 ### `-require-block-pow` / `REQUIRE_BLOCK_POW` (default: `true`)
 

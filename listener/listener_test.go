@@ -397,6 +397,21 @@ func TestProcessFrame_VerifyEnabled_RejectsCorrupted(t *testing.T) {
 	}
 }
 
+// buildRawTx returns a minimal standard (non-EF, BRC-12) transaction: the
+// raw-payload counterpart to buildEFPayload.
+func buildRawTx() []byte {
+	b := []byte{0x01, 0x00, 0x00, 0x00} // version
+	b = append(b, 0x01)                 // input count
+	b = append(b, make([]byte, 32)...)  // prev txid
+	b = append(b, 0xFF, 0xFF, 0xFF, 0xFF)
+	b = append(b, 0x00)                   // unlocking script length
+	b = append(b, 0xFF, 0xFF, 0xFF, 0xFF) // sequence
+	b = append(b, 0x01)                   // output count
+	b = append(b, make([]byte, 8)...)     // value
+	b = append(b, 0x00)                   // locking script length
+	return append(b, 0, 0, 0, 0)          // locktime
+}
+
 func TestProcessFrame_VerifyEnabled_AcceptsValid(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
 	defer cleanup()
@@ -404,8 +419,11 @@ func TestProcessFrame_VerifyEnabled_AcceptsValid(t *testing.T) {
 	w := newWorker(t, addr, filt)
 	w.SetVerifyPayloadHash(true)
 
-	payload := []byte("the-real-payload")
-	txid := sha256d(payload)
+	payload := buildRawTx()
+	txid, err := objfmt.TxID(payload)
+	if err != nil {
+		t.Fatalf("objfmt.TxID: %v", err)
+	}
 	raw := buildBRC124Frame(t, txid, payload)
 	w.processFrame(raw)
 
@@ -416,6 +434,56 @@ func TestProcessFrame_VerifyEnabled_AcceptsValid(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("verify-enabled: valid frame must forward")
+	}
+}
+
+// TestProcessFrame_VerifyEnabled_RejectsNonTransaction pins the alignment with
+// the ingress proxy: verification requires the payload to be exactly one
+// transaction, so a payload that merely hashes to its stamped TxID no longer
+// passes. Before the alignment, raw SHA256d over arbitrary bytes verified.
+func TestProcessFrame_VerifyEnabled_RejectsNonTransaction(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetVerifyPayloadHash(true)
+
+	payload := []byte("not-a-transaction")
+	raw := buildBRC124Frame(t, sha256d(payload), payload)
+	w.processFrame(raw)
+
+	select {
+	case <-ch:
+		t.Fatal("a payload that is not a transaction must be dropped")
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestProcessFrame_VerifyEnabled_RejectsTrailingBytes closes the same gap the
+// proxy closes: objfmt.TxID walks the transaction and ignores what follows, so
+// without a length bound "honest tx ‖ junk" verifies against the honest id.
+func TestProcessFrame_VerifyEnabled_RejectsTrailingBytes(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+	filt := filter.New(nil, nil, nil, nil)
+	w := newWorker(t, addr, filt)
+	w.SetVerifyPayloadHash(true)
+
+	tx := buildEFPayload(t, 100)
+	txid, err := objfmt.TxID(tx)
+	if err != nil {
+		t.Fatalf("objfmt.TxID: %v", err)
+	}
+	padded := append(append([]byte(nil), tx...), 0xFF, 0xFF, 0xFF)
+	if got, err := objfmt.TxID(padded); err != nil || got != txid {
+		t.Fatalf("fixture assumption broken: padded id %x != %x (err %v)", got, txid, err)
+	}
+	w.processFrame(buildBRC124Frame(t, txid, padded))
+
+	select {
+	case <-ch:
+		t.Fatal("payload must be exactly one transaction — trailing bytes must be dropped")
+	case <-time.After(150 * time.Millisecond):
 	}
 }
 

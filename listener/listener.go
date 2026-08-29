@@ -21,7 +21,6 @@ package listener
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -284,18 +283,32 @@ func (w *Worker) SetVerifyPayloadHash(v bool) {
 	w.verifyPayloadHash = v
 }
 
-// payloadTxID derives the canonical TxID for a V2 tx payload: SHA256d over
-// the raw bytes for a BRC-12 payload, objfmt.TxID (standard serialization,
-// EF extras excluded) for a BRC-30 EF payload — the same id producers stamp
-// (proxy bare-tx push path, subtx-gen) and consumers dedup on. ok=false when
-// an EF-marked payload does not walk as a transaction (structurally invalid).
-func payloadTxID(p []byte) (id [32]byte, ok bool) {
-	if objfmt.IsEF(p) {
-		id, err := objfmt.TxID(p)
-		return id, err == nil
+// payloadTxID derives the canonical TxID of a V2 transaction payload and
+// reports whether the payload is exactly one well-formed transaction.
+//
+// This is deliberately the same derivation and the same bound the ingress
+// proxy applies (forwarder.Forwarder.SetVerifyPayloadHash): objfmt.TxID —
+// SHA256d over the standard serialization, EF extras excluded — for both raw
+// and Extended Format payloads, over a payload that must be exactly one
+// transaction. For an honest payload the result is unchanged; what changes is
+// that a payload which is not a single transaction (unwalkable, truncated, or
+// a valid transaction followed by trailing bytes) no longer verifies. TxID
+// walks the transaction and ignores whatever follows it, so without the length
+// bound "honest tx ‖ junk" would verify against the honest id and carry the
+// tail downstream.
+//
+// oneTx=false means the payload is not a single transaction; only when it is
+// true is id meaningful.
+func payloadTxID(p []byte) (id [32]byte, oneTx bool) {
+	sz, err := objfmt.TxSize(p)
+	if err != nil || sz != len(p) {
+		return [32]byte{}, false
 	}
-	first := sha256.Sum256(p)
-	return sha256.Sum256(first[:]), true
+	id, err = objfmt.TxID(p)
+	if err != nil {
+		return [32]byte{}, false
+	}
+	return id, true
 }
 
 // SetBEEF wires the BRC-148 BEEF object plane: the plane-aware derivation
@@ -668,8 +681,21 @@ func (w *Worker) processFrame(raw []byte) bool {
 	// bytes here instead would drop 100% of honest EF frames. When
 	// disabled, this branch is skipped entirely.
 	if w.verifyPayloadHash && f.Version == frame.FrameVerV2 {
-		computed, ok := payloadTxID(f.Payload)
-		if !ok || computed != f.TxID {
+		computed, oneTx := payloadTxID(f.Payload)
+		if !oneTx {
+			if w.rec != nil {
+				w.rec.FrameDropped(w.id, "payload_not_one_tx")
+			}
+			if w.debug {
+				w.log.Debug("payload is not exactly one transaction",
+					"txid_prefix", fmt.Sprintf("%x", f.TxID[:8]),
+					"payload_len", len(f.Payload),
+					"ef", objfmt.IsEF(f.Payload),
+				)
+			}
+			return true
+		}
+		if computed != f.TxID {
 			if w.rec != nil {
 				w.rec.FrameInvalidPayload(w.id)
 			}
@@ -679,7 +705,6 @@ func (w *Worker) processFrame(raw []byte) bool {
 					"computed_prefix", fmt.Sprintf("%x", computed[:8]),
 					"payload_len", len(f.Payload),
 					"ef", objfmt.IsEF(f.Payload),
-					"walkable", ok,
 				)
 			}
 			return true
