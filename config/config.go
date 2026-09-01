@@ -134,6 +134,7 @@ type Config struct {
 	EgressProto    string // "udp" or "tcp"
 	StripHeader    bool
 	RetryEndpoints []string // host:port list for NACK dispatch
+	RetryTee       string   // co-resident retry-endpoint tee-ingest host:port ("" = off)
 
 	// Sharding
 	ShardBits      uint
@@ -389,6 +390,8 @@ func Load() (*Config, error) {
 		"IPv6 multicast hop limit for header egress datagrams (IPV6_MULTICAST_HOPS)")
 	retryFlag := flag.String("retry-endpoints", envStr("RETRY_ENDPOINTS", ""),
 		"comma-separated host:port of multicast-retry caching nodes")
+	flag.StringVar(&c.RetryTee, "retry-tee", envStr("RETRY_TEE", ""),
+		"host:port of a co-resident retry-endpoint's tee ingest (its -tee-listen, e.g. [::1]:9002): mirror every received data frame there over loopback, wrapped in a teewire envelope that preserves the original fabric source, so the cache learns frames this node did NOT originate without a multicast join of its own (the proxy's -retry-tee covers own-origin frames); empty = off")
 	flag.DurationVar(&c.NACKJitterMax, "nack-jitter-max", envDuration("NACK_JITTER_MAX", 200*time.Millisecond),
 		"max random hold-off before NACK dispatch (NORM suppression window)")
 	flag.DurationVar(&c.NACKBackoffBase, "nack-backoff-base", envDuration("NACK_BACKOFF_BASE", 500*time.Millisecond),

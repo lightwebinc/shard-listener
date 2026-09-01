@@ -330,6 +330,35 @@ Comma-separated `host:port` list of multicast retry caching nodes to send NACK
 datagrams to. Empty disables NACK dispatch (gaps are still detected and
 counted). Example: `[2001:db8::1]:9300,[2001:db8::2]:9300`.
 
+### `-retry-tee` / `RETRY_TEE` (default: empty = off)
+
+`host:port` of a **co-resident** retry-endpoint's tee ingest (its
+`-tee-listen`, conventionally `[::1]:9002`). When set, every fabric-received
+data frame is mirrored there over loopback UDP, wrapped in a
+`shard-common/teewire` envelope carrying the original datagram source — so the
+co-resident cache learns frames this node did **not** originate without a
+multicast join of its own (`retry-endpoint -mc-join-enabled=false`, the
+collapsed-node co-bind end-state). The proxy's `-retry-tee` covers own-origin
+frames; together the two mirrors are the cache's complete feed.
+
+Scope of the mirror (deliberate, all four matter for cache correctness):
+
+- **Raw wire bytes, pre-dedup, pre-reassembly** — the cache must hold exactly
+  what a NACK asks for; fragments and bundles are cached as wire frames.
+- **Data frames only** (fabric magic, FrameVer `0x01–0x09` except `0x07`):
+  control datagrams would only book decode-error drops at the cache, and
+  BRC-135 header frames are outside the primary NACK path.
+- **Never from `Reinject`** — a NACK-recovered frame came *from* a retry cache
+  and is not re-mirrored.
+- **Never from the local-mirror ingest** (`-local-mirror-port`) — those are
+  own-origin frames the proxy's tee already mirrors.
+
+Failure posture: dial errors **fail startup closed** (a tee-only cache
+depending on this feed must not silently lose it), but per-frame write errors
+are counted (`bsl_retry_tee_errors_total`) and never retried — a missed mirror
+only narrows repair to the other endpoints a listener walks on MISS.
+Mirrored frames are counted in `bsl_retry_tee_frames_total`.
+
 ### `-nack-jitter-max` / `NACK_JITTER_MAX` (default: `200ms`)
 
 Maximum random hold-off before the first NACK is dispatched (NORM suppression

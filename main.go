@@ -596,6 +596,15 @@ func run() error {
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
 		w.SetBEEF(beefEngine, beefTopicSet, beefVersionSet, cfg.BEEFVerifyContent)
 		w.SetRebucketRelay(cfg.RebucketRelay)
+		// Receive-side retry tee: fail closed on error — when configured, a
+		// co-resident tee-only retry cache may depend on this feed for every
+		// remote-origin frame, and starting without it would silently strand
+		// cross-node NACK repair.
+		if cfg.RetryTee != "" {
+			if err := w.SetRetryTee(cfg.RetryTee); err != nil {
+				return fmt.Errorf("worker %d: %w", i, err)
+			}
+		}
 		if !delivery && cfg.RequireBlockPoW {
 			w.SetBlockPoW(true, cfg.MinPoWBits)
 		}

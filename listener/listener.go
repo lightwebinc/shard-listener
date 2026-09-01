@@ -91,6 +91,7 @@ type Worker struct {
 	debug             bool
 	verifyPayloadHash bool
 	senderACL         *filter.SenderACL     // nil = accept every source
+	retryTee          *retryTeeSender       // nil = receive-side retry tee disabled
 	dedupSet          *dedup.Set            // nil = dedup disabled
 	txDedup           *txdedup.Store        // nil = cross-listener TxID dedup disabled
 	reassemBuf        *reassembly.Buffer    // nil = BRC-130 disabled
@@ -444,7 +445,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		w.joinMu.Unlock()
 	}
 
-	return w.serve(ctx, fd, "listener worker ready")
+	return w.serve(ctx, fd, "listener worker ready", true)
 }
 
 // RunUnicastIngest is the delivery-mode receive loop (P3b): it binds the same
@@ -456,7 +457,11 @@ func (w *Worker) Run(ctx context.Context) error {
 // (gap tracker, cross-listener dedup, reassembly) are simply absent (nil) on a
 // delivery worker, so processFrame skips them.
 func (w *Worker) RunUnicastIngest(ctx context.Context) error {
-	return w.RunUnicastIngestOn(ctx, w.port)
+	fd, err := openRawSocket(w.port)
+	if err != nil {
+		return fmt.Errorf("delivery worker %d: open socket on :%d: %w", w.id, w.port, err)
+	}
+	return w.serve(ctx, fd, "unicast ingest ready", true)
 }
 
 // RunUnicastIngestOn is RunUnicastIngest on an explicit port instead of w.port —
@@ -465,19 +470,26 @@ func (w *Worker) RunUnicastIngest(ctx context.Context) error {
 // listener cannot SSM-join), and this worker receives them on that port through
 // the same processFrame path. The port must be listener-exclusive (not the retry
 // cache's port). No multicast join — it is a pure unicast ingest.
+//
+// This path never feeds the receive-side retry tee: mirror frames are this
+// node's OWN egress, and the co-located proxy's -retry-tee already mirrors
+// exactly those into the retry cache. Teeing them again here would only
+// duplicate stores under a loopback source label.
 func (w *Worker) RunUnicastIngestOn(ctx context.Context, port int) error {
 	fd, err := openRawSocket(port)
 	if err != nil {
 		return fmt.Errorf("delivery worker %d: open socket on :%d: %w", w.id, port, err)
 	}
-	return w.serve(ctx, fd, "unicast ingest ready")
+	return w.serve(ctx, fd, "unicast ingest ready", false)
 }
 
 // serve runs the receive loop on an already-bound socket (Run also pre-joins the
 // multicast groups first): mark the worker ready, arm SO_RCVTIMEO + the ctx-close
 // fast path, then read each datagram into processFrame. Shared by Run (multicast)
-// and RunUnicastIngest (delivery unicast ingest).
-func (w *Worker) serve(ctx context.Context, fd int, readyMsg string) error {
+// and RunUnicastIngest (delivery unicast ingest). tee gates the receive-side
+// retry tee for this loop: true for fabric-facing ingest, false for the local
+// mirror (own-origin frames the proxy's own tee already covers).
+func (w *Worker) serve(ctx context.Context, fd int, readyMsg string, tee bool) error {
 	if w.rec != nil {
 		w.rec.WorkerReady()
 		defer w.rec.WorkerDone()
@@ -537,6 +549,13 @@ func (w *Worker) serve(ctx context.Context, fd int, readyMsg string) error {
 					}
 					continue
 				}
+			}
+			// Mirror the raw wire bytes to the co-resident retry cache BEFORE
+			// local processing: what the cache must hold is exactly what a NACK
+			// will ask for — the datagram as received, pre-dedup and
+			// pre-reassembly (fragments and bundles are cached as wire frames).
+			if tee && w.retryTee != nil {
+				w.teeToRetry(buf[:n], from)
 			}
 			w.procMu.Lock()
 			w.curSource = src

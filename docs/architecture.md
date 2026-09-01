@@ -109,7 +109,35 @@ SO_REUSEPORT load balancing applies to unicast UDP only. The E2E test suite
 exploits this property by injecting frames as unicast to `[::]:listen-port`,
 allowing multiple worker sockets to be tested in isolation.
 
-## BRC-124/BRC-128 frame format (92 bytes)
+## Receive-side retry tee (`-retry-tee`)
+
+When configured, the serve loop mirrors every received **data** frame (fabric
+magic, FrameVer `0x01–0x09` except the BRC-135 `0x07` header lane) to a
+co-resident retry-endpoint's tee-ingest socket over loopback UDP, wrapped in a
+`shard-common/teewire` envelope carrying the original datagram source. This is
+the receive-side counterpart of the proxy's `-retry-tee` (which mirrors only
+locally-originated egress): together the two feeds let a co-resident retry
+cache run **without any multicast join of its own**
+(`retry-endpoint -mc-join-enabled=false`), freeing the shared wildcard data
+port on a collapsed node.
+
+Placement in the loop is deliberate and load-bearing:
+
+- **In `serve`, on the raw wire bytes** — before dedup, reassembly, and
+  decoalescing, so the cache holds exactly the datagrams a NACK will name
+  (fragments and bundles are cached as wire frames, not as their reassembled
+  or re-encoded forms).
+- **After the sender ACL** — filtered senders are not cached.
+- **Not on `Reinject`** — a NACK-recovered frame came *from* a retry cache;
+  re-mirroring it would re-store what was just served.
+- **Not on the local-mirror ingest** (`RunUnicastIngestOn`) — mirror frames
+  are this node's own egress, which the proxy's tee already covers.
+
+The mirror is lossy by design: one connected-socket `Write` per eligible
+frame, errors counted (`bsl_retry_tee_errors_total`) and logged once, never
+retried, never blocking the receive path. Enabling it costs one extra syscall
+per received frame — acceptable at edge listener rates; the proxy's batched
+tee remains the model if a Mpps-class receive path ever needs one.
 
 The canonical 92-byte header layout is specified in
 [BRC-124](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-124-frame-format.md)

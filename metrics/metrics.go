@@ -67,6 +67,8 @@ type Recorder struct {
 	promFramesTxDeduped      *promclient.CounterVec // worker
 	promEgressErrors         *promclient.CounterVec // worker
 	promMCEgressErrors       *promclient.CounterVec // worker
+	promRetryTeeFrames       *promclient.CounterVec // worker
+	promRetryTeeErrors       *promclient.CounterVec // worker
 
 	// BRC-130 reassembly counters — cold path (only fires on > MTU frames).
 	frameReassemblyStarted      metric.Int64Counter
@@ -256,11 +258,19 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		Name: "bsl_mc_egress_errors_total",
 		Help: "Errors sending to multicast egress",
 	}, []string{"worker"})
+	r.promRetryTeeFrames = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_retry_tee_frames_total",
+		Help: "Received data frames mirrored to the co-resident retry-endpoint tee ingest (-retry-tee)",
+	}, []string{"worker"})
+	r.promRetryTeeErrors = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_retry_tee_errors_total",
+		Help: "Retry-tee mirror writes that failed (frame NOT cached locally; repair for it falls to other endpoints). Never retried — the mirror is deliberately lossy.",
+	}, []string{"worker"})
 	for _, c := range []promclient.Collector{
 		r.promFramesReceived, r.promFramesDropped, r.promFramesForwarded,
 		r.promFramesInvalidPayload, r.promFramesDeduped, r.promFramesTxDeduped,
 		r.promEgressErrors, r.promMCEgressErrors, r.promBundlesRebucketed,
-		r.promRebucketUnguarded,
+		r.promRebucketUnguarded, r.promRetryTeeFrames, r.promRetryTeeErrors,
 	} {
 		if regErr := reg.Register(c); regErr != nil {
 			return nil, fmt.Errorf("metrics: register hot-path counter: %w", regErr)
@@ -510,6 +520,18 @@ func (r *Recorder) FrameDropped(workerID int, reason string) {
 // FrameForwarded records a successfully forwarded frame.
 func (r *Recorder) FrameForwarded(workerID int, proto string) {
 	r.promFramesForwarded.WithLabelValues(strconv.Itoa(workerID), proto).Inc()
+}
+
+// RetryTeeFrame records one received data frame mirrored to the co-resident
+// retry-endpoint tee ingest.
+func (r *Recorder) RetryTeeFrame(workerID int) {
+	r.promRetryTeeFrames.WithLabelValues(strconv.Itoa(workerID)).Inc()
+}
+
+// RetryTeeError records a failed retry-tee mirror write. The frame is NOT in
+// the local cache; a NACK for it will MISS here and escalate.
+func (r *Recorder) RetryTeeError(workerID int) {
+	r.promRetryTeeErrors.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
 
 // BundleRebucketed records one BRC-142 bundle re-bucketed to the local ShardBits
