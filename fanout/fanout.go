@@ -77,7 +77,30 @@ type Consumer struct {
 	// BEEFVersions is the consumer's accepted BEEF encoding capability set
 	// (payload version words, uint32 LE). Empty/nil admits all encodings.
 	BEEFVersions map[uint32]struct{}
+
+	// BEEFObs, when non-nil, is told about every BEEF frame this consumer's own
+	// elections EXCLUDED at fan-out — a topic it did not elect, or an encoding
+	// it does not accept. A pure measurement seam: it never changes what is
+	// delivered. Without it a mis-specified profile (a topic name that matches
+	// nothing, a version word the publisher never emits) is indistinguishable
+	// from loss — the consumer simply receives nothing, and every counter
+	// upstream of the election says the frames arrived.
+	BEEFObs BEEFObserver
 }
+
+// BEEFObserver measures BEEF frames a consumer's elections filtered out.
+// ObserveBEEFFiltered is called on the single-threaded worker hot path once per
+// excluded frame, so implementations must be cheap and non-blocking. reason is
+// one of [FilterTopic] or [FilterVersion]; wire is the datagram byte length.
+type BEEFObserver interface {
+	ObserveBEEFFiltered(reason string, wire int)
+}
+
+// Filter reasons reported through [BEEFObserver].
+const (
+	FilterTopic   = "topic"   // TopicID not in the consumer's elected set
+	FilterVersion = "version" // BEEF version word not in the consumer's accepted set
+)
 
 // IngressObserver measures a consumer's own tunnel-bound ingress — the frames
 // the fan-out matches as the consumer's own traffic (returning on the fabric)
@@ -202,15 +225,18 @@ func (s *Sink) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 	deliver := func(c *Consumer) {
 		if len(c.TopicSet) > 0 {
 			if _, ok := c.TopicSet[bf.TopicID]; !ok {
+				if c.BEEFObs != nil {
+					c.BEEFObs.ObserveBEEFFiltered(FilterTopic, len(raw))
+				}
 				return
 			}
 		}
 		if len(c.BEEFVersions) > 0 {
 			w, ok := objfmt.BEEFVersionWord(bf.Payload)
-			if !ok {
-				return
-			}
-			if _, accepted := c.BEEFVersions[w]; !accepted {
+			if _, accepted := c.BEEFVersions[w]; !ok || !accepted {
+				if c.BEEFObs != nil {
+					c.BEEFObs.ObserveBEEFFiltered(FilterVersion, len(raw))
+				}
 				return
 			}
 		}

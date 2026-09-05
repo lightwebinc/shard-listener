@@ -49,17 +49,30 @@ func TestSendBeef_TopicAndVersionElection(t *testing.T) {
 	other := &recSink{}
 	agg := &recSink{}
 	wrongVer := &recSink{}
+	otherObs, wrongObs, electsObs := &filterRec{}, &filterRec{}, &filterRec{}
 
 	s.Apply([]*fanout.Consumer{
-		{ID: "elects", Sink: elects, TopicSet: map[[32]byte]struct{}{tid: {}}},
-		{ID: "other", Sink: other, TopicSet: map[[32]byte]struct{}{objfmt.TopicID("tm_other"): {}}},
+		{ID: "elects", Sink: elects, TopicSet: map[[32]byte]struct{}{tid: {}}, BEEFObs: electsObs},
+		{ID: "other", Sink: other, TopicSet: map[[32]byte]struct{}{objfmt.TopicID("tm_other"): {}}, BEEFObs: otherObs},
 		{ID: "agg", Sink: agg}, // no topic filter, no version filter
-		{ID: "wrongver", Sink: wrongVer, BEEFVersions: map[uint32]struct{}{objfmt.BEEFMarkerV2: {}}},
+		{ID: "wrongver", Sink: wrongVer, BEEFVersions: map[uint32]struct{}{objfmt.BEEFMarkerV2: {}}, BEEFObs: wrongObs},
 	})
 
 	raw, bf := beefFrameFor(t, topic, beefV1Obj)
 	if err := s.SendBeef(raw, bf); err != nil {
 		t.Fatalf("SendBeef: %v", err)
+	}
+
+	// The observer sees exactly what each consumer's OWN election excluded,
+	// with the reason and the wire size — and nothing for a delivered frame.
+	if otherObs.n != 1 || otherObs.reason != fanout.FilterTopic || otherObs.wire != len(raw) {
+		t.Errorf("topic-filtered observer: %+v, want 1×%s of %d bytes", *otherObs, fanout.FilterTopic, len(raw))
+	}
+	if wrongObs.n != 1 || wrongObs.reason != fanout.FilterVersion {
+		t.Errorf("version-filtered observer: %+v, want 1×%s", *wrongObs, fanout.FilterVersion)
+	}
+	if electsObs.n != 0 {
+		t.Errorf("electing consumer's observer fired %d times for a delivered frame", electsObs.n)
 	}
 
 	if elects.beef != 1 {
@@ -137,4 +150,16 @@ func TestSendBeef_OwnTrafficExclusion(t *testing.T) {
 	if otherC.beef != 1 {
 		t.Errorf("other consumer got %d, want 1", otherC.beef)
 	}
+}
+
+// filterRec records the last BEEF filter observation for a consumer.
+type filterRec struct {
+	n      int
+	reason string
+	wire   int
+}
+
+func (f *filterRec) ObserveBEEFFiltered(reason string, wire int) {
+	f.n++
+	f.reason, f.wire = reason, wire
 }

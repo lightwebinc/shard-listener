@@ -907,6 +907,8 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_gaps_detected_total` | `flow`, `source` | Sequence gaps detected (missing frames) |
 | `bsl_gaps_suppressed_total` | `flow`, `source` | Gaps cancelled by retransmit fill or ACK response |
 | `bsl_gaps_unrecovered_total` | `flow`, `source` | Gaps evicted after retries exhausted or TTL exceeded |
+| `bsl_gaps_abandoned_total` | `flow`, `source`, `reason` | The same events, with the why: `ttl`, `retries`, `restart` (proxy restart evicted the flow's gaps), `rejected` (a repair the pipeline refused), `no_recover` (unicast-only repair with no re-injection path) |
+| `bsl_gaps_late_filled_total` | `flow`, `source` | Frames that arrived for a gap after it was abandoned — a multicast retransmit that outran the NACK deadline. A flow's real loss is `unrecovered − late_filled`; an abandoned seqNum is remembered for two minutes for this |
 | `bsl_nacks_dispatched_total` | `flow`, `source` | NACK datagrams sent to retry endpoints |
 | `bsl_nacks_throttled_total` | `flow`, `source` | Gaps held after a THROTTLED congestion signal |
 | `bsl_nack_flows_refused_total` | `flow` | New per-source flows skipped at the MaxFlows flood-guard cap |

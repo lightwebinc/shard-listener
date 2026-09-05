@@ -551,6 +551,10 @@ of a **consumer table**:
   (and surfaced to the optional `IngressObserver` so a downstream build can
   meter the upstream volume). Zero `OwnIngressIP` (the default) keeps full
   delivery.
+- **BEEF election (BRC-148)** — a `TopicSet` / `BEEFVersions` on the entry
+  filters `SendBeef` per consumer; a frame the consumer's own election excludes
+  is surfaced to the optional `BEEFObserver` with the reason (`topic` or
+  `version`) so a mis-specified profile reads as filtered, not as loss.
 
 `fanout.Sink.Apply(consumers)` atomically swaps the table and rebuilds the index;
 this is the open end of an external control-plane contract (join-set union +

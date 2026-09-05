@@ -104,6 +104,8 @@ type Recorder struct {
 	nackSendErrors      metric.Int64Counter // WriteTo failed: the walk tier was never asked
 	nacksThrottled      metric.Int64Counter // held after a THROTTLED congestion signal
 	nacksUnrecovered    metric.Int64Counter // retries exhausted or TTL exceeded
+	gapsAbandoned       metric.Int64Counter // same events, by reason
+	gapsLateFilled      metric.Int64Counter // an abandoned gap's frame arrived after all
 
 	// BRC-127 subtree group announce counters
 	subtreeGroupAnnouncesReceived metric.Int64Counter
@@ -384,6 +386,14 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.nacksUnrecovered, err = meter.Int64Counter("bsl_gaps_unrecovered_total",
 		metric.WithDescription("Gaps evicted after retries exhausted or TTL exceeded")); err != nil {
+		return nil, err
+	}
+	if r.gapsAbandoned, err = meter.Int64Counter("bsl_gaps_abandoned_total",
+		metric.WithDescription("Gaps given up on, by reason (ttl, retries, restart, rejected, no_recover); the same events bsl_gaps_unrecovered_total counts, with the why")); err != nil {
+		return nil, err
+	}
+	if r.gapsLateFilled, err = meter.Int64Counter("bsl_gaps_late_filled_total",
+		metric.WithDescription("Frames that arrived for a gap AFTER it was abandoned (a multicast retransmit outran the NACK deadline) — subtract from unrecovered to read real loss")); err != nil {
 		return nil, err
 	}
 
@@ -715,6 +725,23 @@ func (r *Recorder) GapUnrecovered(flow, source string) {
 		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 
+// GapAbandoned records WHY a gap was given up on. It accompanies
+// GapUnrecovered (same event, one more label) rather than replacing it, so
+// dashboards and alerts keyed on the existing series keep working.
+func (r *Recorder) GapAbandoned(flow, source, reason string) {
+	r.gapsAbandoned.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source), attribute.String("reason", reason)))
+}
+
+// GapLateFilled records a frame arriving for a gap that had already been
+// abandoned: the hole was booked unrecovered and then closed by the data path
+// (typically a multicast retransmit served past the NACK deadline). Real loss
+// on a flow is unrecovered minus late-filled.
+func (r *Recorder) GapLateFilled(flow, source string) {
+	r.gapsLateFilled.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
+}
+
 // SubtreeGroupAnnounceReceived records a valid SubtreeGroupAnnounce datagram processed.
 func (r *Recorder) SubtreeGroupAnnounceReceived() {
 	r.subtreeGroupAnnouncesReceived.Add(context.Background(), 1)
@@ -846,10 +873,17 @@ func (r *Recorder) Shutdown(ctx context.Context) {
 	}
 }
 
+// PromHandler serves the Prometheus exposition of every counter this recorder
+// owns — what Serve mounts at /metrics, exposed so a composing build (or a
+// test) can read the counters back without a listening socket.
+func (r *Recorder) PromHandler() http.Handler {
+	return promhttp.HandlerFor(r.promReg, promhttp.HandlerOpts{})
+}
+
 // Serve starts the HTTP metrics server on addr.
 func (r *Recorder) Serve(addr string, done <-chan struct{}) {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(r.promReg, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", r.PromHandler())
 	mux.HandleFunc("/healthz", r.handleHealthz)
 	mux.HandleFunc("/readyz", r.handleReadyz)
 	if r.levelVar != nil {

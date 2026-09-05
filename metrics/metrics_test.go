@@ -59,6 +59,8 @@ func TestRecorder_AllCountersSafeToCall(t *testing.T) {
 	r.GapSuppressed("brc124", "srcA")
 	r.NACKDispatched("brc124", "srcA")
 	r.GapUnrecovered("brc124", "srcA")
+	r.GapAbandoned("brc124", "srcA", "ttl")
+	r.GapLateFilled("brc124", "srcA")
 	r.SubtreeGroupAnnounceReceived()
 	r.SubtreeGroupAnnounceRejected("decode_error")
 	r.SubtreeGroupEvicted(3, 10)
@@ -75,6 +77,8 @@ func TestSourceLabelExposed(t *testing.T) {
 	r := newRecorder(t)
 	r.GapDetected("brc124", "fd00:5::7")
 	r.GapUnrecovered("brc124", "fd00:5::7")
+	r.GapAbandoned("brc124", "fd00:5::7", "retries")
+	r.GapLateFilled("brc124", "fd00:5::7")
 
 	srv := httptest.NewServer(promhttp.HandlerFor(r.promReg, promhttp.HandlerOpts{}))
 	defer srv.Close()
@@ -89,6 +93,8 @@ func TestSourceLabelExposed(t *testing.T) {
 	for _, want := range []string{
 		`bsl_gaps_detected_total`,
 		`bsl_gaps_unrecovered_total`,
+		`bsl_gaps_abandoned_total{flow="brc124",otel_scope_name="shard-listener",otel_scope_schema_url="",otel_scope_version="",reason="retries",source="fd00:5::7"} 1`,
+		`bsl_gaps_late_filled_total{flow="brc124",otel_scope_name="shard-listener",otel_scope_schema_url="",otel_scope_version="",source="fd00:5::7"} 1`,
 		`source="fd00:5::7"`,
 	} {
 		if !strings.Contains(out, want) {

@@ -127,6 +127,12 @@ type flowState struct {
 	source     net.IP               // multicast source address (for per-source loss attribution)
 	pending    map[uint64]*gapEntry // keyed by missing seqNum
 	lastSeen   time.Time
+	// abandoned remembers seqNums booked unrecovered, for a bounded window, so
+	// a frame that turns up afterwards (a multicast retransmit that outran the
+	// NACK deadline) is booked as a LATE FILL instead of leaving the flow
+	// reading as lossy when nothing was lost. Bounded by abandonedTTL and
+	// abandonedMax, purged by the sweep.
+	abandoned map[uint64]time.Time
 	// ewmaIPG is a smoothed inter-arrival estimate (per OBSERVED frame) used to judge
 	// whether a seq jump is plausible for the elapsed silence — the emitter-change
 	// discriminator that works at any traffic rate. 0 until two frames seen.
@@ -470,6 +476,11 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		fs.source = source
 	}
 
+	// A frame for a gap already given up on: the hole closed after all. Book
+	// it so unrecovered minus late-filled reads as real loss, then fall through
+	// — it is an old seqNum and step 4 treats it as the retransmit it is.
+	t.noteLateFill(fs, seqNum)
+
 	// Step 3: auto-fill — close any pending gap whose seqNum matches.
 	if e, found := fs.pending[seqNum]; found {
 		delete(fs.pending, seqNum)
@@ -510,10 +521,10 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		if source != nil && seqNum <= threshold && fs.lastSeqNum > threshold {
 			// Proxy restarted: evict any pending gaps (unrecoverable now) and
 			// reset the flow counter.
-			for _, e := range fs.pending {
-				_ = e // gaps from previous proxy lifetime; drop silently
-				if t.rec != nil {
-					t.rec.GapUnrecovered(fs.flowType, srcStr(fs.source))
+			for seq, e := range fs.pending {
+				// gaps from the previous proxy lifetime: unrecoverable now
+				if !e.speculative {
+					t.bookAbandon(fs, seq, fs.source, "restart")
 				}
 			}
 			fs.pending = make(map[uint64]*gapEntry)
@@ -748,7 +759,9 @@ func (t *Tracker) Fill(hashKey, seqNum uint64) {
 		if e, found := fs.pending[seqNum]; found {
 			delete(fs.pending, seqNum)
 			t.bookFill(fs, e)
+			return
 		}
+		t.noteLateFill(fs, seqNum)
 	}
 }
 
@@ -784,6 +797,11 @@ func (t *Tracker) sweepOnce(now time.Time) {
 	}
 
 	for hk, fs := range t.flows {
+		for seq, at := range fs.abandoned {
+			if now.Sub(at) > abandonedTTL {
+				delete(fs.abandoned, seq)
+			}
+		}
 		for seq, e := range fs.pending {
 			if now.After(e.deadline) {
 				delete(fs.pending, seq)
@@ -792,8 +810,8 @@ func (t *Tracker) sweepOnce(now time.Time) {
 				// every quiet flow and make the repair-ratio alerts unusable.
 				if e.speculative {
 					t.retireProbe(fs, seq)
-				} else if t.rec != nil {
-					t.rec.GapUnrecovered(fs.flowType, srcStr(e.source))
+				} else {
+					t.bookAbandon(fs, seq, e.source, "ttl")
 				}
 				t.log.Debug("gap evicted (TTL)",
 					"hash_key", hk,
@@ -806,8 +824,8 @@ func (t *Tracker) sweepOnce(now time.Time) {
 				delete(fs.pending, seq)
 				if e.speculative {
 					t.retireProbe(fs, seq)
-				} else if t.rec != nil {
-					t.rec.GapUnrecovered(fs.flowType, srcStr(e.source))
+				} else {
+					t.bookAbandon(fs, seq, e.source, "retries")
 				}
 				t.log.Debug("gap evicted (retries)",
 					"hash_key", hk,
@@ -1286,28 +1304,65 @@ func (t *Tracker) ActiveFlows() int {
 }
 
 // cancelGap removes a gap entry after receiving an ACK.
+// abandonedTTL bounds how long an abandoned seqNum is remembered for late-fill
+// accounting; abandonedMax bounds the memory per flow under a NACK storm.
+const (
+	abandonedTTL = 2 * time.Minute
+	abandonedMax = 4096
+)
+
+// bookAbandon records that a real (non-speculative) gap was given up on: the
+// unrecovered counter (unchanged), the reason, and the seqNum for late-fill
+// detection. Caller holds t.mu.
+func (t *Tracker) bookAbandon(fs *flowState, seq uint64, src net.IP, reason string) {
+	if fs.abandoned == nil {
+		fs.abandoned = make(map[uint64]time.Time)
+	}
+	if len(fs.abandoned) < abandonedMax {
+		fs.abandoned[seq] = time.Now()
+	}
+	if t.rec != nil {
+		t.rec.GapUnrecovered(fs.flowType, srcStr(src))
+		t.rec.GapAbandoned(fs.flowType, srcStr(src), reason)
+	}
+}
+
+// noteLateFill books a frame that arrived for an already-abandoned gap and
+// forgets the seqNum. Caller holds t.mu. Reports whether it was one.
+func (t *Tracker) noteLateFill(fs *flowState, seq uint64) bool {
+	if fs.abandoned == nil {
+		return false
+	}
+	if _, ok := fs.abandoned[seq]; !ok {
+		return false
+	}
+	delete(fs.abandoned, seq)
+	if t.rec != nil {
+		t.rec.GapLateFilled(fs.flowType, srcStr(fs.source))
+	}
+	return true
+}
+
 // abandonGap removes a gap that can never be filled, WITHOUT booking a fill.
 // cancelGap is the success path (it calls bookFill and counts a suppression);
 // this is the failure path, so the gap is counted unrecovered instead.
 func (t *Tracker) abandonGap(e *gapEntry, reason string) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	fs, ok := t.flows[e.hashKey]
-	if ok {
-		delete(fs.pending, e.seqNum)
-		if fs.probing == e.seqNum {
-			fs.probing = 0
-		}
+	if !ok {
+		return
 	}
-	t.mu.Unlock()
-	if ok && t.rec != nil {
-		// A speculative tail probe that comes back rejected was never an
-		// observed loss, so it is retired silently — booking it would
-		// manufacture phantom loss on an idle flow.
-		if !e.speculative {
-			t.rec.GapUnrecovered(fs.flowType, srcStr(fs.source))
-		}
+	delete(fs.pending, e.seqNum)
+	if fs.probing == e.seqNum {
+		fs.probing = 0
 	}
-	_ = reason
+	// A speculative tail probe that comes back rejected was never an
+	// observed loss, so it is retired silently — booking it would
+	// manufacture phantom loss on an idle flow.
+	if !e.speculative {
+		t.bookAbandon(fs, e.seqNum, fs.source, reason)
+	}
 }
 
 func (t *Tracker) cancelGap(e *gapEntry) {
