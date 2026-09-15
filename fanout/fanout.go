@@ -70,9 +70,25 @@ type Consumer struct {
 	IngressObs    IngressObserver
 
 	// TopicSet is the consumer's elected BRC-148 overlay topics (TopicID =
-	// SHA-256 of the topic name). Empty/nil admits every topic on the
-	// consumer's elected groups (aggregator mode, per the spec).
+	// SHA-256 of the topic name). An EMPTY set delivers NOTHING on the object
+	// plane: a consumer that has elected no topic has subscribed to no topic,
+	// and the safe reading of silence is to send nothing.
+	//
+	// This used to mean the opposite, "admit every topic", described as the
+	// spec's aggregator posture. BRC-149 defines no such rule, and the
+	// consequence was a billable trap: provisioning elects LANES and topics
+	// are joined afterwards, so every consumer was an all-plane aggregator,
+	// billed for the whole plane, for the window between the two. "No
+	// subscription yet" and "send me everything" must not be the same wire
+	// state. The aggregator posture is still available, but it is now the
+	// explicit opt-in below.
 	TopicSet map[[32]byte]struct{}
+
+	// AllTopics makes the consumer an aggregator: every topic on its elected
+	// groups, whatever TopicSet says. It is deliberately a separate field
+	// rather than an encoding of emptiness, so that asking for the whole
+	// plane is always something a consumer DID, never something it omitted.
+	AllTopics bool
 
 	// BEEFVersions is the consumer's accepted BEEF encoding capability set
 	// (payload version words, uint32 LE). Empty/nil admits all encodings.
@@ -223,7 +239,10 @@ func (s *Sink) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 
 	var firstErr error
 	deliver := func(c *Consumer) {
-		if len(c.TopicSet) > 0 {
+		// An empty election matches nothing. See Consumer.TopicSet: this is
+		// the whole point of the change, so an unsubscribed consumer receives
+		// and is billed for nothing rather than for everything.
+		if !c.AllTopics {
 			if _, ok := c.TopicSet[bf.TopicID]; !ok {
 				if c.BEEFObs != nil {
 					c.BEEFObs.ObserveBEEFFiltered(FilterTopic, len(raw))

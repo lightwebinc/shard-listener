@@ -54,8 +54,8 @@ func TestSendBeef_TopicAndVersionElection(t *testing.T) {
 	s.Apply([]*fanout.Consumer{
 		{ID: "elects", Sink: elects, TopicSet: map[[32]byte]struct{}{tid: {}}, BEEFObs: electsObs},
 		{ID: "other", Sink: other, TopicSet: map[[32]byte]struct{}{objfmt.TopicID("tm_other"): {}}, BEEFObs: otherObs},
-		{ID: "agg", Sink: agg}, // no topic filter, no version filter
-		{ID: "wrongver", Sink: wrongVer, BEEFVersions: map[uint32]struct{}{objfmt.BEEFMarkerV2: {}}, BEEFObs: wrongObs},
+		{ID: "agg", Sink: agg, AllTopics: true}, // explicit aggregator; no version filter
+		{ID: "wrongver", Sink: wrongVer, AllTopics: true, BEEFVersions: map[uint32]struct{}{objfmt.BEEFMarkerV2: {}}, BEEFObs: wrongObs},
 	})
 
 	raw, bf := beefFrameFor(t, topic, beefV1Obj)
@@ -82,7 +82,7 @@ func TestSendBeef_TopicAndVersionElection(t *testing.T) {
 		t.Errorf("non-electing consumer got %d, want 0 (topic filter)", other.beef)
 	}
 	if agg.beef != 1 {
-		t.Errorf("aggregator got %d, want 1 (absent filters admit all)", agg.beef)
+		t.Errorf("explicit aggregator got %d, want 1 (AllTopics admits every topic)", agg.beef)
 	}
 	if wrongVer.beef != 0 {
 		t.Errorf("v2-only consumer got %d, want 0 (version filter)", wrongVer.beef)
@@ -100,8 +100,8 @@ func TestSendBeef_ShardRouting(t *testing.T) {
 	onGroup := &recSink{}
 	offGroup := &recSink{}
 	s.Apply([]*fanout.Consumer{
-		{ID: "on", Sink: onGroup, Shards: []uint32{group}},
-		{ID: "off", Sink: offGroup, Shards: []uint32{group ^ 0x1}}, // sibling band group
+		{ID: "on", Sink: onGroup, Shards: []uint32{group}, AllTopics: true},
+		{ID: "off", Sink: offGroup, Shards: []uint32{group ^ 0x1}, AllTopics: true}, // sibling band group
 	})
 
 	raw, bf := beefFrameFor(t, topic, beefV1Obj)
@@ -134,8 +134,8 @@ func TestSendBeef_OwnTrafficExclusion(t *testing.T) {
 	obs := &countObs{}
 	otherC := &recSink{}
 	s.Apply([]*fanout.Consumer{
-		{ID: "own", Sink: own, OwnIngressIP: ownIP, IngressObs: obs},
-		{ID: "other", Sink: otherC},
+		{ID: "own", Sink: own, OwnIngressIP: ownIP, IngressObs: obs, AllTopics: true},
+		{ID: "other", Sink: otherC, AllTopics: true},
 	})
 
 	if err := s.SendBeef(raw, bf); err != nil {
@@ -162,4 +162,40 @@ type filterRec struct {
 func (f *filterRec) ObserveBEEFFiltered(reason string, wire int) {
 	f.n++
 	f.reason, f.wire = reason, wire
+}
+
+// TestSendBeef_EmptyElectionDeliversNothing pins the 2026-09-15 ruling. An
+// empty topic election used to mean "every topic on the plane", which made a
+// billable trap out of the provisioning flow: a tunnel request elects LANES
+// and topics are joined afterwards, so between the two every consumer was an
+// all-plane aggregator and was billed for the whole plane without having asked
+// for anything. "No subscription yet" and "send me everything" must not be the
+// same wire state, and the safe reading of silence is to send nothing.
+func TestSendBeef_EmptyElectionDeliversNothing(t *testing.T) {
+	s, _ := beefSinkFixture(t)
+	unsubscribed, unsubObs := &recSink{}, &filterRec{}
+	aggregator := &recSink{}
+
+	s.Apply([]*fanout.Consumer{
+		// Provisioned with a BEEF lane, no topics joined yet: the exact shape
+		// the provisioning flow produces before the first subscription.
+		{ID: "unsubscribed", Sink: unsubscribed, BEEFObs: unsubObs},
+		// The same shape, but having explicitly asked for the whole plane.
+		{ID: "aggregator", Sink: aggregator, AllTopics: true},
+	})
+
+	raw, bf := beefFrameFor(t, "tm_anything", beefV1Obj)
+	if err := s.SendBeef(raw, bf); err != nil {
+		t.Fatalf("SendBeef: %v", err)
+	}
+
+	if unsubscribed.beef != 0 {
+		t.Errorf("a consumer that elected NO topic received %d objects: it would be billed for a plane it never subscribed to", unsubscribed.beef)
+	}
+	if unsubObs.n != 1 || unsubObs.reason != fanout.FilterTopic {
+		t.Errorf("unsubscribed consumer's observer = %+v, want 1×%s so the non-delivery reads as FILTERED, not as loss", *unsubObs, fanout.FilterTopic)
+	}
+	if aggregator.beef != 1 {
+		t.Errorf("explicit aggregator got %d, want 1: asking for the whole plane must still work", aggregator.beef)
+	}
 }
