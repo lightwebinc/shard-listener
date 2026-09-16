@@ -18,14 +18,14 @@ BSV senders
    ▼
 shard-proxy
    │ BRC-124/BRC-128 frames → FF05::B:<shard>      (data plane)
-   │ BRC-131/BRC-134 frames → FF0E::B:FFFE          (GroupBlockBroadcast, always global)
+   │ BRC-131/BRC-134 frames → FF05::B:FFFE          (GroupBlockBroadcast, at the configured -scope)
    │ BRC-132 frames         → FF05::B:FFFB          (GroupSubtreeDataAnnounce)
    │ BRC-127 datagrams      → FF05::B:FFFC          (GroupSubtreeGroupAnnounce)
    ▼
 Multicast fabric (site-scoped FF05::/16)
    │
    ├── FF05::B:<shard>   BRC-124/BRC-128 transaction frames
-   ├── FF0E::B:FFFE      BRC-131 block control + BRC-134 anchor (always joined; global scope)
+   ├── FF05::B:FFFE      BRC-131 block control + BRC-134 anchor (always joined; configured -scope)
    ├── FF05::B:FFFB      BRC-132 subtree data (when -subtree-data-enabled)
    ├── FF05::B:FFFC      BRC-127 subtree group announcements (when -subtree-groups set)
    └── FF05::B:FFFD      BRC-126 ADVERT beacon
@@ -310,8 +310,11 @@ Control-group indices, canonical addresses, and the virtual flow indices
 (0xFFF8/0xFFF9) are specified in
 [BRC-129](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-129-multicast-addressing.md).
 
-The listener always joins `GroupBlockBroadcast` (0xFFFE, always global scope)
-and `GroupBeacon` (0xFFFD). It joins `GroupSubtreeDataAnnounce` (0xFFFB) only
+The listener always joins `GroupBlockBroadcast` (0xFFFE) and `GroupBeacon`
+(0xFFFD). Every control-group address, `GroupBlockBroadcast` included, is
+derived from the configured `-scope` (`FF05::B:FFFE` at site scope); BRC-129
+names global scope as the inter-domain deployment posture, not a per-group
+override. It joins `GroupSubtreeDataAnnounce` (0xFFFB) only
 when `-subtree-data-enabled=true`, and `GroupSubtreeGroupAnnounce` (0xFFFC)
 when `-subtree-groups` is configured. `GroupBlockHeader` (0xFFFA) is
 egress-only (see block header egress below).
@@ -324,7 +327,7 @@ received on this group are dispatched to `processBlockFrame`:
 1. Calls `frame.DecodeBlock` to validate and extract block fields.
 2. Bypasses the shard/subtree filter (block frames carry no TxID; filtering would be meaningless).
 3. Forwards the raw frame via `egress.Sender.SendBlock` to the configured downstream.
-4. Calls `nack.Tracker.Observe(uint32(GroupBlockBroadcast), zeroSubtreeID, bf.HashKey, bf.SeqNum, bf.ContentID)`
+4. Calls `nack.Tracker.Observe(uint32(GroupBlockBroadcast), zeroSubtreeID, bf.HashKey, bf.SeqNum, bf.ContentID, source)`
    for gap tracking on the block control flow.
 
 **Block header egress (BRC-135):** when `-header-egress-enabled=true`, `processBlockFrame`
@@ -364,7 +367,7 @@ BRC-132 frames on this group are dispatched to `processSubtreeDataFrame`:
 1. Calls `frame.DecodeSubtreeData` to validate and extract subtree fields.
 2. Bypasses the shard/subtree filter.
 3. Forwards the raw frame via `egress.Sender.SendSubtreeData` to the configured downstream.
-4. Calls `nack.Tracker.Observe(uint32(GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID)`
+4. Calls `nack.Tracker.Observe(uint32(GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID, source)`
    for gap tracking. Each distinct `SubtreeID` is sequenced independently.
 
 The listener forwards the raw payload without parsing. `MsgType` `0x01` = hashes-only
@@ -552,8 +555,12 @@ of a **consumer table**:
   meter the upstream volume). Zero `OwnIngressIP` (the default) keeps full
   delivery.
 - **BEEF election (BRC-148)** — a `TopicSet` / `BEEFVersions` on the entry
-  filters `SendBeef` per consumer; a frame the consumer's own election excludes
-  is surfaced to the optional `BEEFObserver` with the reason (`topic` or
+  filters `SendBeef` per consumer. An **empty `TopicSet` delivers nothing** on
+  the object plane (no election is no subscription); the aggregator posture —
+  every topic on the consumer's elected groups — is the explicit `AllTopics`
+  opt-in, never an encoding of emptiness. An empty `BEEFVersions` admits all
+  encodings. A frame the consumer's own election excludes is surfaced to the
+  optional `BEEFObserver` (`Consumer.BEEFObs`) with the reason (`topic` or
   `version`) so a mis-specified profile reads as filtered, not as loss.
 
 `fanout.Sink.Apply(consumers)` atomically swaps the table and rebuilds the index;

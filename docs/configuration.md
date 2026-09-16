@@ -375,13 +375,16 @@ Cap on exponential backoff between successive NACK retries for the same gap.
 
 ### `-nack-max-retries` / `NACK_MAX_RETRIES` (default: `5`)
 
-Maximum NACK attempts per gap. After this is exceeded the gap is declared
-unrecoverable and evicted (`bsl_gaps_unrecovered_total` incremented).
+Maximum **failed recovery rounds** per gap — a response timeout, a send
+error, or a MISS from the deepest endpoint in the registry. Once reached the
+gap is declared unrecoverable and evicted (`bsl_gaps_unrecovered_total` and
+`bsl_gaps_abandoned_total{reason="retries"}` incremented).
 
-> **Multi-endpoint deployments:** each MISS response advances to the next
-> endpoint, consuming one retry. With beacon discovery enabled and 3 retry
-> endpoints (3 beacon + 3 static seeds = 6 registry entries), set
-> `NACK_MAX_RETRIES=8` to ensure all entries are tried before eviction.
+> **Tier escalation is free:** a MISS with endpoints still to try advances to
+> the next registry entry immediately — it consumes no round and applies no
+> backoff, and a clean escalation resets the failed-round counter. The budget
+> therefore does not need to be sized to the registry length; only consecutive
+> failed rounds count.
 
 ### `-nack-gap-ttl` / `NACK_GAP_TTL` (default: `10m`)
 
@@ -672,7 +675,7 @@ Number of SO_REUSEPORT receive worker goroutines.
 Enable per-frame debug logging (decode errors, forwarded frames, gap events).
 
 ### `-verify-payload-hash` / `VERIFY_PAYLOAD_HASH` (default: `false`)
- 
+
 When `true`, verify that the TxID field in BRC-124/BRC-128 frames matches the
 canonical transaction id of its payload: `objfmt.TxID` — SHA256d over the
 standard serialization, EF extras excluded — for both raw and Extended Format
@@ -899,6 +902,8 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_frames_tx_deduped_total` | `worker` | Frames suppressed by Redis TxID claim (cross-listener dedup) |
 | `bsl_egress_errors_total` | `worker` | Errors sending to downstream |
 | `bsl_mc_egress_errors_total` | `worker` | Errors sending to multicast egress |
+| `bsl_retry_tee_frames_total` | `worker` | Received data frames mirrored to the co-resident retry-endpoint tee ingest (`-retry-tee`) |
+| `bsl_retry_tee_errors_total` | `worker` | Retry-tee mirror writes that failed (frame not cached locally; repair for it falls to other endpoints). Never retried — the mirror is deliberately lossy |
 
 ### Gap recovery (BRC-126)
 
@@ -910,6 +915,7 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_gaps_abandoned_total` | `flow`, `source`, `reason` | The same events, with the why: `ttl`, `retries`, `restart` (proxy restart evicted the flow's gaps), `rejected` (a repair the pipeline refused), `no_recover` (unicast-only repair with no re-injection path) |
 | `bsl_gaps_late_filled_total` | `flow`, `source` | Frames that arrived for a gap after it was abandoned — a multicast retransmit that outran the NACK deadline. A flow's real loss is `unrecovered − late_filled`; an abandoned seqNum is remembered for two minutes for this |
 | `bsl_nacks_dispatched_total` | `flow`, `source` | NACK datagrams sent to retry endpoints |
+| `bsl_nack_send_errors_total` | `endpoint` | NACK datagrams that failed to send (`WriteTo` error) — that walk tier was never asked |
 | `bsl_nacks_throttled_total` | `flow`, `source` | Gaps held after a THROTTLED congestion signal |
 | `bsl_nack_flows_refused_total` | `flow` | New per-source flows skipped at the MaxFlows flood-guard cap |
 | `bsl_seq_rebaselines_total` | `flow`, `source` | Flows re-baselined on an implausible SeqNum jump (emitter change, e.g. anycast failover) |

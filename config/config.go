@@ -5,67 +5,115 @@
 //
 // # Environment variable mapping
 //
-//	Flag                  Env var              Default          Description
-//	-iface                MULTICAST_IF         eth0             NIC for multicast joins and NACK send
-//	-listen-port          LISTEN_PORT          9001             UDP port for incoming multicast frames
-//	-mode                 LISTENER_MODE        collapsed        Role split (P3b): collapsed | receiver | delivery
-//	-shard-bits           SHARD_BITS           2                Must match proxy (1–12)
-//	-scope                MC_SCOPE             site             Multicast scope
-//	-mc-group-id          MC_GROUP_ID          0x000B           IANA group-id (default Bitcoin = 0x000B)
-//	-local-source         LOCAL_SOURCE                          Co-located proxy BIND_SOURCE excluded from (S,G) joins
-//	-shard-include        SHARD_INCLUDE                         Comma-separated shard indices/ranges (empty=all)
-//	-subtree-include      SUBTREE_INCLUDE                       Hex subtree IDs to allow (empty=all)
-//	-subtree-exclude      SUBTREE_EXCLUDE                       Hex subtree IDs to drop (empty=none)
-//	-egress-addr          EGRESS_ADDR          127.0.0.1:9100   Downstream unicast host:port
-//	-delivery-addrs       DELIVERY_ADDRS                        receiver mode: comma-separated delivery host:port fan-out set (empty=use -egress-addr)
-//	-egress-proto         EGRESS_PROTO         udp              udp | tcp
-//	-strip-header         STRIP_HEADER         true             Send payload-only (drop frame header)
-//	-mc-egress-enabled    MC_EGRESS_ENABLED    false            Enable multicast egress
-//	-mc-egress-iface      MC_EGRESS_IFACE      (=iface)         Output NIC for multicast send
-//	-mc-egress-port       MC_EGRESS_PORT       (=listen-port)   Egress group UDP port
-//	-mc-egress-scope      MC_EGRESS_SCOPE      (=scope)         Multicast scope for egress groups
-//	-mc-egress-group-id   MC_EGRESS_GROUP_ID   (=mc-group-id)   IANA group-id for egress groups
-//	-mc-egress-hoplimit   MC_EGRESS_HOPLIMIT   1                IPV6_MULTICAST_HOPS
-//	-header-egress-enabled       HEADER_EGRESS_ENABLED       false            Enable unicast block header retransmission
-//	-header-egress-addr          HEADER_EGRESS_ADDR          127.0.0.1:9101   Downstream unicast host:port for headers
-//	-header-egress-proto         HEADER_EGRESS_PROTO         udp              udp | tcp
-//	-header-mc-egress-enabled    HEADER_MC_EGRESS_ENABLED    false            Enable multicast block header retransmission
-//	-header-mc-egress-iface      HEADER_MC_EGRESS_IFACE      (=iface)         Output NIC for multicast header send
-//	-header-mc-egress-port       HEADER_MC_EGRESS_PORT       (=listen-port)   Egress group UDP port for headers
-//	-header-mc-egress-scope      HEADER_MC_EGRESS_SCOPE      (=scope)         Multicast scope for header egress
-//	-header-mc-egress-group-id   HEADER_MC_EGRESS_GROUP_ID   (=mc-group-id)   IANA group-id for header egress
-//	-header-mc-egress-hoplimit   HEADER_MC_EGRESS_HOPLIMIT   1                IPV6_MULTICAST_HOPS for headers
-//	-retry-endpoints      RETRY_ENDPOINTS                       Comma-separated host:port retry nodes
-//	-nack-jitter-max      NACK_JITTER_MAX      200ms            Max NACK suppression jitter
-//	-nack-backoff-base    NACK_BACKOFF_BASE    500ms            Base retry backoff (doubles per failed round)
-//	-nack-backoff-max     NACK_BACKOFF_MAX      5s               Cap on exponential backoff per gap
-//	-nack-max-retries     NACK_MAX_RETRIES      5                Max failed recovery rounds per gap
-//	-nack-gap-ttl         NACK_GAP_TTL         10m              Max gap state lifetime
-//	-nack-max-flows       NACK_MAX_FLOWS       100000           Cap on tracked per-source flows (0 = unbounded)
-//	-nack-max-forward-jump NACK_MAX_FORWARD_JUMP 4096           Forward SeqNum jump beyond which a flow re-baselines
-//	-beacon-enabled       BEACON_ENABLED       true             Enable ADVERT beacon listener
-//	-beacon-port          BEACON_PORT          9300             UDP port for beacon reception
-//	-beacon-scope         BEACON_SCOPE         site             Multicast scope for beacon groups
-//	-subtree-groups       SUBTREE_GROUPS                        Comma-separated 32-char hex GroupIDs to subscribe
-//	-subtree-group-default-ttl SUBTREE_GROUP_DEFAULT_TTL 900s  Default TTL for group announcements
-//	-announce-scope       ANNOUNCE_SCOPE       site             Multicast scope(s) for announcement group joins
-//	-sender-include       SENDER_INCLUDE                        IPv6/IPv4 addresses/CIDRs of trusted senders (announcements + data frames)
-//	-sender-exclude       SENDER_EXCLUDE                        IPv6/IPv4 addresses/CIDRs to reject (checked before include)
-//	-workers              NUM_WORKERS          NumCPU           Receive goroutine count
-//	-debug                DEBUG                false            Per-frame logging
-//	-verify-payload-hash  VERIFY_PAYLOAD_HASH  false            Verify canonical TxID on V2 frames (EF-aware); drop on mismatch
-//	-subtree-data-enabled SUBTREE_DATA_ENABLED false            Enable BRC-132 subtree data reception (join 0xFFFB group)
-//	-subtree-data-verify-merkle SUBTREE_DATA_VERIFY_MERKLE false Optional post-reassembly Merkle root verification (expensive)
-//	-egress-dedup-cap     EGRESS_DEDUP_CAP     0                Egress dedup capacity (0 = disabled)
-//	-egress-dedup-ttl     EGRESS_DEDUP_TTL     2s               Egress dedup TTL (max age of a remembered key)
-//	-txid-dedup-addr      TXID_DEDUP_ADDR                       DEPRECATED: alias for -egress-dedup-redis-addr
-//	-txid-dedup-prefix    TXID_DEDUP_PREFIX                     DEPRECATED: alias for -egress-dedup-prefix
-//	-txid-dedup-ttl       TXID_DEDUP_TTL                        DEPRECATED: alias for -egress-dedup-ttl-redis
-//	-metrics-addr         METRICS_ADDR         :9200            Prometheus / healthz / readyz
-//	-drain-timeout        DRAIN_TIMEOUT        0s               Pre-shutdown drain window
-//	-instance             INSTANCE_ID          hostname         OTel service.instance.id
-//	-otlp-endpoint        OTLP_ENDPOINT                         OTLP gRPC push (empty=disabled)
-//	-otlp-interval        OTLP_INTERVAL        30s              OTLP metric export interval
+//	Flag                               Env var                            Default          Description
+//	-iface                             MULTICAST_IF                       eth0             NIC for multicast joins and NACK send
+//	-listen-port                       LISTEN_PORT                        9001             UDP port for incoming multicast frames
+//	-mode                              LISTENER_MODE                      collapsed        Role split: collapsed | receiver | delivery
+//	-shard-bits                        SHARD_BITS                         2                Must match proxy (1–12)
+//	-scope                             MC_SCOPE                           site             Multicast scope
+//	-mc-group-id                       MC_GROUP_ID                        0x000B           IANA group-id (default Bitcoin = 0x000B)
+//	-source-mode                       SOURCE_MODE                        asm              Multicast addressing model: asm | ssm
+//	-ssm-bootstrap-beacon              SSM_BOOTSTRAP_BEACON                                CSV of retry-endpoint sources for the beacon (S,G) join
+//	-ssm-bootstrap-manifest            SSM_BOOTSTRAP_MANIFEST                              CSV of shard-manifest sources for the manifest/block-broadcast (S,G) join
+//	-ssm-bootstrap-subtree-announce    SSM_BOOTSTRAP_SUBTREE_ANNOUNCE                      CSV of subtree-announce emitter sources
+//	-ssm-publishers-static             SSM_PUBLISHERS_STATIC                               Lab/CI: CSV of data-plane publisher sources
+//	-ssm-bootstrap-refresh             SSM_BOOTSTRAP_REFRESH              30s              DNS re-resolve interval for SSM bootstrap entries
+//	-local-source                      LOCAL_SOURCE                                        Co-located proxy BIND_SOURCE excluded from (S,G) joins
+//	-shard-include                     SHARD_INCLUDE                                       Comma-separated shard indices/ranges (empty=all)
+//	-subtree-include                   SUBTREE_INCLUDE                                     Hex subtree IDs to allow (empty=all)
+//	-subtree-exclude                   SUBTREE_EXCLUDE                                     Hex subtree IDs to drop (empty=none)
+//	-egress-addr                       EGRESS_ADDR                        127.0.0.1:9100   Downstream unicast host:port
+//	-delivery-addrs                    DELIVERY_ADDRS                                      receiver mode: comma-separated delivery host:port fan-out set (empty=use -egress-addr)
+//	-egress-proto                      EGRESS_PROTO                       udp              udp | tcp
+//	-strip-header                      STRIP_HEADER                       true             Send payload-only (drop frame header)
+//	-mc-egress-enabled                 MC_EGRESS_ENABLED                  false            Enable multicast egress
+//	-mc-egress-iface                   MC_EGRESS_IFACE                    (=iface)         Output NIC for multicast send
+//	-mc-egress-port                    MC_EGRESS_PORT                     (=listen-port)   Egress group UDP port
+//	-mc-egress-scope                   MC_EGRESS_SCOPE                    (=scope)         Multicast scope for egress groups
+//	-mc-egress-group-id                MC_EGRESS_GROUP_ID                 (=mc-group-id)   IANA group-id for egress groups
+//	-mc-egress-hoplimit                MC_EGRESS_HOPLIMIT                 1                IPV6_MULTICAST_HOPS
+//	-header-egress-enabled             HEADER_EGRESS_ENABLED              false            Enable unicast block header retransmission (BRC-135)
+//	-header-egress-addr                HEADER_EGRESS_ADDR                 127.0.0.1:9101   Downstream unicast host:port for headers
+//	-header-egress-proto               HEADER_EGRESS_PROTO                udp              udp | tcp
+//	-header-mc-egress-enabled          HEADER_MC_EGRESS_ENABLED           false            Enable multicast block header retransmission
+//	-header-mc-egress-iface            HEADER_MC_EGRESS_IFACE             (=iface)         Output NIC for multicast header send
+//	-header-mc-egress-port             HEADER_MC_EGRESS_PORT              (=listen-port)   Egress group UDP port for headers
+//	-header-mc-egress-scope            HEADER_MC_EGRESS_SCOPE             (=scope)         Multicast scope for header egress
+//	-header-mc-egress-group-id         HEADER_MC_EGRESS_GROUP_ID          (=mc-group-id)   IANA group-id for header egress
+//	-header-mc-egress-hoplimit         HEADER_MC_EGRESS_HOPLIMIT          1                IPV6_MULTICAST_HOPS for headers
+//	-retry-endpoints                   RETRY_ENDPOINTS                                     Comma-separated host:port retry nodes
+//	-retry-tee                         RETRY_TEE                                           Co-resident retry-endpoint tee ingest host:port (empty=off)
+//	-nack-jitter-max                   NACK_JITTER_MAX                    200ms            Max NACK suppression jitter
+//	-nack-backoff-base                 NACK_BACKOFF_BASE                  500ms            Base retry backoff (doubles per failed round)
+//	-nack-backoff-max                  NACK_BACKOFF_MAX                   5s               Cap on exponential backoff per gap
+//	-nack-max-retries                  NACK_MAX_RETRIES                   5                Max failed recovery rounds per gap (tier hops are free)
+//	-nack-gap-ttl                      NACK_GAP_TTL                       10m              Max gap state lifetime
+//	-nack-tail-probe                   NACK_TAIL_PROBE                    true             Speculative NACK of the next SeqNum on an idle flow
+//	-nack-tail-probe-idle-factor       NACK_TAIL_PROBE_IDLE_FACTOR        4.0              Idle multiple of smoothed inter-arrival before probing
+//	-nack-tail-probe-min-idle          NACK_TAIL_PROBE_MIN_IDLE           500ms            Floor on the tail-probe idle threshold
+//	-nack-tail-probe-max-misses        NACK_TAIL_PROBE_MAX_MISSES         3                Stop probing after this many consecutive MISS answers
+//	-nack-max-flows                    NACK_MAX_FLOWS                     100000           Cap on tracked per-source flows (0 = unbounded)
+//	-nack-max-forward-jump             NACK_MAX_FORWARD_JUMP              4096             Forward SeqNum jump beyond which a flow re-baselines
+//	-beacon-enabled                    BEACON_ENABLED                     true             Enable ADVERT beacon listener
+//	-beacon-port                       BEACON_PORT                        9300             UDP port for beacon reception
+//	-beacon-scope                      BEACON_SCOPE                       site             Multicast scope for beacon groups
+//	-manifest-consumer-enabled         MANIFEST_CONSUMER_ENABLED          false            Opt-in BRC-139 manifest consumer
+//	-manifest-bootstrap                MANIFEST_BOOTSTRAP                 optional         optional | required (refuse data-plane bind until quorum)
+//	-pilot-quorum                      PILOT_QUORUM                       2                Min distinct authoritative announcers for adoption
+//	-pilot-hysteresis                  PILOT_HYSTERESIS                   0                Hold time before adoption (0 ⇒ 2 × AnnounceInterval)
+//	-shard-include-from-manifest       SHARD_INCLUDE_FROM_MANIFEST        false            Effective subscription = union(-shard-include, pilot_groups)
+//	-live-resharding                   LIVE_RESHARDING                    false            Opt-in BRC-139 bridging mode (default: restart on adopt)
+//	-bridging-window                   BRIDGING_WINDOW                    0                Local floor on bridging duration (0 ⇒ pilot TransitionEpoch)
+//	-subtree-groups                    SUBTREE_GROUPS                                      Comma-separated 32-char hex GroupIDs to subscribe (BRC-127)
+//	-subtree-group-default-ttl         SUBTREE_GROUP_DEFAULT_TTL          900s             Default TTL for group announcements
+//	-announce-scope                    ANNOUNCE_SCOPE                     site             Multicast scope(s) for announcement group joins
+//	-sender-include                    SENDER_INCLUDE                                      IPv6/IPv4 addresses/CIDRs of trusted senders (announcements + data frames)
+//	-sender-exclude                    SENDER_EXCLUDE                                      IPv6/IPv4 addresses/CIDRs to reject (checked before include)
+//	-workers                           NUM_WORKERS                        NumCPU           Receive goroutine count
+//	-debug                             DEBUG                              false            Per-frame logging (deprecated alias for -log-level=debug)
+//	-log-format                        LOG_FORMAT                         text             text | json
+//	-log-level                         LOG_LEVEL                          info             debug | info | warn | error
+//	-trace-sampling                    TRACE_SAMPLING                     0                Head sampling ratio 0..1 (0 = tracing off)
+//	-verify-payload-hash               VERIFY_PAYLOAD_HASH                false            Verify canonical TxID on V2 frames (EF-aware); drop on mismatch
+//	-require-block-pow                 REQUIRE_BLOCK_POW                  true             Gate BRC-131 announces on header PoW; correlate BRC-133 coinbase
+//	-min-pow-bits                      MIN_POW_BITS                       0                PoW difficulty floor (compact nBits); 0 = self-consistency only
+//	-subtree-data-enabled              SUBTREE_DATA_ENABLED               false            Enable BRC-132 subtree data reception (join 0xFFFB group)
+//	-subtree-data-verify-merkle        SUBTREE_DATA_VERIFY_MERKLE         false            Optional post-reassembly Merkle root verification (expensive)
+//	-egress-dedup-cap                  EGRESS_DEDUP_CAP                   0                Egress dedup capacity (0 = disabled)
+//	-egress-dedup-ttl                  EGRESS_DEDUP_TTL                   2s               Egress dedup TTL (max age of a remembered key)
+//	-txid-dedup-addr                   TXID_DEDUP_ADDR                                     DEPRECATED: alias for -egress-dedup-redis-addr
+//	-txid-dedup-prefix                 TXID_DEDUP_PREFIX                                   DEPRECATED: alias for -egress-dedup-prefix
+//	-txid-dedup-ttl                    TXID_DEDUP_TTL                                      DEPRECATED: alias for -egress-dedup-ttl-redis
+//	-deployment-id                     DEPLOYMENT_ID                      hostname         Per-deployment dedup identifier (HA siblings share it)
+//	-node-id                           NODE_ID                            hostname         Informational identifier for metrics labels
+//	-egress-dedup-backend              EGRESS_DEDUP_BACKEND               (inferred)       redis | aerospike | memory | none
+//	-egress-dedup-redis-addr           EGRESS_DEDUP_REDIS_ADDR                             Redis-protocol address for per-deployment egress TxID dedup
+//	-egress-dedup-aerospike-hosts      EGRESS_DEDUP_AEROSPIKE_HOSTS                        Aerospike seed nodes (comma-separated host:port)
+//	-egress-dedup-aerospike-namespace  EGRESS_DEDUP_AEROSPIKE_NAMESPACE   cache            Aerospike namespace for egress dedup
+//	-egress-dedup-aerospike-set        EGRESS_DEDUP_AEROSPIKE_SET         bsl-egr          Aerospike set for egress dedup
+//	-egress-dedup-prefix               EGRESS_DEDUP_PREFIX                bsl:egr:         Key prefix; deployment-id is appended
+//	-egress-dedup-ttl-redis            EGRESS_DEDUP_TTL_REDIS             60s              TTL for egress-dedup backend entries
+//	-egress-dedup-local-cap            EGRESS_DEDUP_LOCAL_CAP             1048576          Tier-1 local LRU capacity (0 = disable feature)
+//	-ingress-set-backend               INGRESS_SET_BACKEND                (inferred)       redis | aerospike | memory | none
+//	-ingress-set-redis-addr            INGRESS_SET_REDIS_ADDR                              Courtesy SETNX into the local proxy's ingress namespace (empty = disabled)
+//	-ingress-set-aerospike-hosts       INGRESS_SET_AEROSPIKE_HOSTS                         Aerospike seed nodes for the ingress mark
+//	-ingress-set-aerospike-namespace   INGRESS_SET_AEROSPIKE_NAMESPACE    cache            Aerospike namespace for the ingress mark
+//	-ingress-set-aerospike-set         INGRESS_SET_AEROSPIKE_SET          bsp-tx           Aerospike set for the ingress mark
+//	-ingress-set-prefix                INGRESS_SET_PREFIX                 bsp:tx:          MUST match the local proxy's -txid-dedup-prefix
+//	-ingress-set-ttl                   INGRESS_SET_TTL                    10m              SHOULD match the local proxy's -txid-dedup-ttl
+//	-ingress-set-local-cap             INGRESS_SET_LOCAL_CAP              1048576          Tier-1 LRU capacity for the ingress mark
+//	-beef-topics                       BEEF_TOPICS                                         BRC-148 topics to elect (names or 64-hex TopicIDs)
+//	-beef-groups                       BEEF_GROUPS                                         Plane-relative BRC-148 group indices to join (aggregator)
+//	-beef-shard-bits                   BEEF_SHARD_BITS                    0                BEEF plane shard-bit width (0 = single group); must match proxy
+//	-beef-max-object-bytes             BEEF_MAX_OBJECT_BYTES              1048576          Per-object reassembly bound for OrigFrameVer 0x09
+//	-beef-versions                     BEEF_VERSIONS                                       Accepted encodings: beef | beefv2 | atomic (empty = all)
+//	-beef-verify-content               BEEF_VERIFY_CONTENT                false            Verify ContentID == SHA-256d(object) before fan-out
+//	-rebucket-relay                    REBUCKET_RELAY                     false            Mark this listener an intentional BRC-142 re-bucket relay
+//	-metrics-addr                      METRICS_ADDR                       :9200            Prometheus / healthz / readyz / loglevel
+//	-drain-timeout                     DRAIN_TIMEOUT                      0s               Pre-shutdown drain window
+//	-instance                          INSTANCE_ID                        hostname         OTel service.instance.id
+//	-otlp-endpoint                     OTLP_ENDPOINT                                       OTLP gRPC push (empty=disabled)
+//	-otlp-interval                     OTLP_INTERVAL                      30s              OTLP metric export interval
 package config
 
 import (
@@ -256,10 +304,10 @@ type Config struct {
 	EgressDedupCap    int           // 0 = disabled
 	EgressDedupTTL    time.Duration // max age of a remembered key
 
-	// Block-control gate (opt-in). Inter-domain BRC-131 announces reach the
-	// listener by multicast without passing our proxy, so the listener
-	// independently validates before fan-out: PoW on the announce, and
-	// coinbase↔block correlation on BRC-133. Off by default.
+	// Block-control gate (default ON; -require-block-pow=false disables it).
+	// Inter-domain BRC-131 announces reach the listener by multicast without
+	// passing our proxy, so the listener independently validates before
+	// fan-out: PoW on the announce, and coinbase↔block correlation on BRC-133.
 	RequireBlockPoW bool
 	MinPoWBits      uint32 // PoW difficulty floor (compact nBits); 0 = self-consistency only
 

@@ -748,7 +748,7 @@ func primaryIPv6(iface *net.Interface) (out [16]byte, ok bool) {
 
 // buildGroups returns the multicast group addresses this instance should join.
 // If ShardInclude is set, only those groups are joined; otherwise all groups.
-// The block control group (FF0E::B:FFFE) is always appended so block
+// The block control group (FF0X::B:FFFE at the configured scope) is always appended so block
 // announcements are received regardless of shard filtering.
 func buildGroups(cfg *config.Config, engine *shard.Engine, beefJoinIdx []uint32) ([]*net.UDPAddr, error) {
 	var indices []uint32

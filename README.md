@@ -17,8 +17,8 @@ sequence tracking with BRC-126 beacon-discovered retry endpoints and
 tier-based escalation.
 
 ```
-FF05::<shard>:9001  ──multicast──►  shard-listener  ──UDP/TCP──►  downstream :9100
-[Control Groups]    ──multicast──►  (BRC-127 SubtreeGroupAnnounce) └─multicast►  FF02::<shard>
+FF05::B:<shard>:9001 ──multicast──►  shard-listener  ──UDP/TCP──►  downstream :9100
+[Control Groups]    ──multicast──►  (BRC-127 SubtreeGroupAnnounce) └─multicast►  FF02::B:<shard>
                                            │  shard + subtree filter
                                      gap detected
                                            │
@@ -112,11 +112,10 @@ make test-e2e
 
 - [Architecture](docs/architecture.md)
 - [Configuration reference](docs/configuration.md) — every flag, plus a
-  metrics reference covering all 44 `bsl_` series
+  metrics reference covering all 49 `bsl_` series
 - [Unified Logging Plan](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md) — `-log-format json` structured logs, `host.inventory`, `-trace-sampling`, runtime `/loglevel`
 - [Protocol specification](https://github.com/lightwebinc/shard-common/blob/main/docs/protocol.md)
 - [BRC-126 (Retransmission Protocol)](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-126-retransmission-protocol.md)
-- [NACK Retransmission Flow](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/nack-retransmission-flow.md)
 
 ## Dependencies
 

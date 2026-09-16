@@ -23,7 +23,7 @@ type EndpointEntry struct {
 type Registry struct {
 	mu      sync.Mutex
 	entries map[uint32]*EndpointEntry // keyed by InstanceID
-	seeds   []*EndpointEntry          // static seeds (Tier=0xFF, Preference=0)
+	seeds   []*EndpointEntry          // static seeds (Tier=0xFF, Preference=255-i by list position)
 
 	// snapshot is the copy-on-write sorted slice; rebuilt on mutation.
 	snapshot []*EndpointEntry
