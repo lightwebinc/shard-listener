@@ -58,6 +58,7 @@
 //	-beacon-port                       BEACON_PORT                        9300             UDP port for beacon reception
 //	-beacon-scope                      BEACON_SCOPE                       site             Multicast scope for beacon groups
 //	-manifest-consumer-enabled         MANIFEST_CONSUMER_ENABLED          false            Opt-in BRC-139 manifest consumer
+//	-manifest-beacon-port              MANIFEST_BEACON_PORT               9001             UDP port on the beacon group carrying BRC-139 manifests (mirrors the proxy)
 //	-manifest-bootstrap                MANIFEST_BOOTSTRAP                 optional         optional | required (refuse data-plane bind until quorum)
 //	-pilot-quorum                      PILOT_QUORUM                       2                Min distinct authoritative announcers for adoption
 //	-pilot-hysteresis                  PILOT_HYSTERESIS                   0                Hold time before adoption (0 ⇒ 2 × AnnounceInterval)
@@ -262,7 +263,15 @@ type Config struct {
 	// opt-in. When AutoConfigEnabled is false, the listener does not
 	// decode manifests off the beacon socket and the other fields are
 	// ignored.
-	AutoConfigEnabled        bool
+	AutoConfigEnabled bool
+	// AutoConfigBeaconPort is the UDP port on the beacon group that carries
+	// BRC-139 manifests. It is NOT BeaconPort: shard-manifest announces to
+	// the beacon GROUP on its own -port (default 9001) while retry-endpoint
+	// ADVERTs arrive on 9300, so a listener bound only to BeaconPort never
+	// sees a manifest. Mirrors the proxy's -manifest-beacon-port exactly.
+	// Equal to BeaconPort ⇒ one socket carries both (the demux is on
+	// MsgType, so that is safe).
+	AutoConfigBeaconPort     int
 	AutoConfigBootstrap      string        // "optional" (default) | "required"
 	AutoConfigPilotQuorum    int           // default 2
 	AutoConfigHysteresis     time.Duration // 0 ⇒ 2 × AnnounceInterval (per BRC-139)
@@ -470,6 +479,8 @@ func Load() (*Config, error) {
 		"multicast scope for beacon group joins: link | site | org | global")
 	flag.BoolVar(&c.AutoConfigEnabled, "manifest-consumer-enabled", envBool("MANIFEST_CONSUMER_ENABLED", false),
 		"opt-in BRC-139 manifest consumer for auto-shard-config (off by default)")
+	flag.IntVar(&c.AutoConfigBeaconPort, "manifest-beacon-port", envInt("MANIFEST_BEACON_PORT", 9001),
+		"UDP port on which the listener joins the beacon group to receive BRC-139 manifests; distinct from -beacon-port (ADVERTs), equal values share one socket")
 	flag.StringVar(&c.AutoConfigBootstrap, "manifest-bootstrap", envStr("MANIFEST_BOOTSTRAP", "optional"),
 		"manifest bootstrap behavior: 'optional' (default) | 'required' (refuse data-plane bind until quorum)")
 	flag.IntVar(&c.AutoConfigPilotQuorum, "pilot-quorum", envInt("PILOT_QUORUM", 2),
@@ -950,6 +961,9 @@ func Load() (*Config, error) {
 	}
 	if c.AutoConfigPilotQuorum < 1 {
 		return nil, fmt.Errorf("pilot-quorum must be >= 1, got %d", c.AutoConfigPilotQuorum)
+	}
+	if c.AutoConfigBeaconPort < 1 || c.AutoConfigBeaconPort > 65535 {
+		return nil, fmt.Errorf("manifest-beacon-port must be in [1, 65535], got %d", c.AutoConfigBeaconPort)
 	}
 	if c.AutoConfigEnabled && c.AutoConfigLiveResharding && c.EgressDedupCap == 0 {
 		return nil, fmt.Errorf("live-resharding requires egress-dedup-cap > 0 (dedup absorbs bridging-window duplicates)")

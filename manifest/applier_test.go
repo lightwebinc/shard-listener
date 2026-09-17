@@ -21,9 +21,12 @@ func mustAddr(s string) netip.Addr {
 
 func authoritativePilotManifest(instanceID uint32, shardBits uint8, groups []uint16) *frame.ShardManifest {
 	m := &frame.ShardManifest{
-		Flags:            frame.ShardManifestFlagAuthoritative | frame.ShardManifestFlagGroupsValid | frame.ShardManifestFlagPilotOnly,
-		InstanceID:       instanceID,
-		Epoch:            1746800000,
+		Flags:      frame.ShardManifestFlagAuthoritative | frame.ShardManifestFlagGroupsValid | frame.ShardManifestFlagPilotOnly,
+		InstanceID: instanceID,
+		// Registry expiry is Epoch + TTL (BRC-139), so a fixture dated
+		// in the past is born expired. These appliers run on the wall
+		// clock, so the manifest has to be stamped now.
+		Epoch:            uint32(time.Now().Unix()), //nolint:gosec // wraps in 2106
 		AnnounceInterval: 300,
 		ShardBits:        shardBits,
 		RoleHint:         frame.RoleHintManifestOnly,

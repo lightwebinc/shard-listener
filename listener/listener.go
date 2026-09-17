@@ -55,11 +55,21 @@ const (
 	// socketRecvBuf is the UDP receive buffer requested on each worker socket.
 	socketRecvBuf = 64 * 1024 * 1024 // 64 MiB
 
-	// rebucketMaxBytes caps a re-bucketed bundle datagram (BRC-142 §Re-bucketing).
-	// Re-bucketed children are delivered whole only to bundle-capable consumers, so
-	// the public-internet MTU baseline (1500) is the safe size; edge-decoalesced
-	// delivery splits them regardless of this cap.
-	rebucketMaxBytes = 1500
+	// rebucketPathMTU is the public-internet MTU baseline a re-bucketed bundle
+	// must fit on the wire. Re-bucketed children are delivered whole only to
+	// bundle-capable consumers, so this is the safe size; edge-decoalesced
+	// delivery splits them regardless.
+	rebucketPathMTU = 1500
+
+	// ipv6UDPHeaderSize is what an emitted datagram costs beyond its payload:
+	// a 40-byte IPv6 header plus an 8-byte UDP header.
+	ipv6UDPHeaderSize = 40 + 8
+
+	// rebucketMaxBytes is the budget handed to the re-coalescer, which bounds
+	// the bundle BODY. The header cost is subtracted here so the emitted
+	// DATAGRAM respects the path MTU: passing the MTU straight through would
+	// put a 1548-byte datagram on a 1500-byte path (BRC-142 §Re-bucketing).
+	rebucketMaxBytes = rebucketPathMTU - ipv6UDPHeaderSize
 )
 
 // Worker is a single multicast receive goroutine.

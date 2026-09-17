@@ -31,6 +31,14 @@ type BeaconListener struct {
 	Rec      *metrics.Recorder // nil = no metrics
 	Debug    bool
 
+	// SourcesByPort overrides Sources for one group port. The ADVERT port
+	// and the BRC-139 manifest port sit on the SAME beacon group address but
+	// are published by different senders (retry endpoints vs shard-manifest
+	// announcers), so under SSM each needs its own (S,G) roster — one shared
+	// list would filter the other sender out entirely. Ports absent from the
+	// map fall back to Sources.
+	SourcesByPort map[int][]netip.Addr
+
 	// ManifestRegistry, when non-nil, receives every BRC-139
 	// ShardManifest datagram (MsgType 0x40) decoded off the beacon
 	// socket. ADVERTs (MsgType 0x20) continue to flow into Registry.
@@ -68,7 +76,8 @@ func (bl *BeaconListener) Start(ctx context.Context) error {
 // helper); when non-empty it is SSM (one MCAST_JOIN_SOURCE_GROUP per
 // source via netjoin).
 func (bl *BeaconListener) openGroupConn(grp *net.UDPAddr) (*net.UDPConn, error) {
-	if len(bl.Sources) == 0 {
+	srcs := bl.sourcesFor(grp)
+	if len(srcs) == 0 {
 		return net.ListenMulticastUDP("udp6", bl.Iface, grp)
 	}
 	// SSM path: open a regular UDP6 socket bound to the wildcard on
@@ -95,16 +104,26 @@ func (bl *BeaconListener) openGroupConn(grp *net.UDPAddr) (*net.UDPConn, error) 
 	}
 	var joinErr error
 	if cerr := raw.Control(func(fd uintptr) {
-		joinErr = netjoin.Join(int(fd), bl.Iface.Index, ga, bl.Sources)
+		joinErr = netjoin.Join(int(fd), bl.Iface.Index, ga, srcs)
 	}); cerr != nil {
 		_ = uc.Close()
 		return nil, fmt.Errorf("ssm listen: Control: %w", cerr)
 	}
 	if joinErr != nil {
 		_ = uc.Close()
-		return nil, fmt.Errorf("ssm join (%d sources): %w", len(bl.Sources), joinErr)
+		return nil, fmt.Errorf("ssm join (%d sources): %w", len(srcs), joinErr)
 	}
 	return uc, nil
+}
+
+// sourcesFor returns the SSM source roster to join grp with: the per-port
+// override when one is configured for grp.Port, else the shared Sources. An
+// empty result selects the ASM path.
+func (bl *BeaconListener) sourcesFor(grp *net.UDPAddr) []netip.Addr {
+	if srcs, ok := bl.SourcesByPort[grp.Port]; ok {
+		return srcs
+	}
+	return bl.Sources
 }
 
 func (bl *BeaconListener) listenGroup(ctx context.Context, grp *net.UDPAddr) error {

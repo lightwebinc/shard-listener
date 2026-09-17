@@ -152,6 +152,7 @@ type Buffer struct {
 	onHashMismatch   func() // metrics hook (SHA256d mismatch, V2)
 	onMerkleMismatch func() // metrics hook (Merkle root mismatch, V5)
 	onLateFragment   func() // metrics hook (fragment for an already-completed object)
+	onBadFragment    func() // metrics hook (fragment whose length breaks the BRC-130 offset grid)
 	maxObject        int    // general declared-length cap (DefaultMaxObjectBytes)
 	maxObjectV9      int    // BRC-148 plane cap (-beef-max-object-bytes); 0 = use general
 	// done remembers slot keys that COMPLETED recently, mapped to the instant
@@ -205,8 +206,14 @@ type slot struct {
 	seqNum         uint64 // from the first fragment received
 	origPayloadLen uint32
 	fragTotal      uint16
-	received       uint16   // count of distinct fragments received
-	frags          [][]byte // indexed by FragIndex; nil = not yet received
+	// fragSize is the uniform non-final fragment length implied by the
+	// fragments seen so far (0 = not yet known). BRC-130 carries no offset
+	// field: a fragment's place in the payload is FragIndex × fragSize, so
+	// every fragment must agree on one fragSize or the concatenation lands
+	// bytes at the wrong offsets. See checkFragLen.
+	fragSize int
+	received uint16   // count of distinct fragments received
+	frags    [][]byte // indexed by FragIndex; nil = not yet received
 	// fragSeq holds each received fragment's own SeqNum, indexed by FragIndex
 	// (0 = not received). Without it an incomplete slot knows WHICH FragIndex is
 	// missing but has no way back to the SeqNum a NACK must name — the slot's
@@ -317,6 +324,13 @@ func (b *Buffer) SetMerkleMismatchHook(fn func()) { b.onMerkleMismatch = fn }
 // from the fragments simply never arriving.
 func (b *Buffer) SetLateFragmentHook(fn func()) { b.onLateFragment = fn }
 
+// SetBadFragmentHook sets a metrics hook called once per object dropped
+// because a fragment's data length is inconsistent with the object's
+// OrigPayloadLen and FragTotal. Non-zero means some sender or path is
+// producing fragments that cannot be reassembled at the offsets BRC-130
+// implies — corruption, a mis-sized fragmenter, or injection.
+func (b *Buffer) SetBadFragmentHook(fn func()) { b.onBadFragment = fn }
+
 // SetBlockCallback registers the callback invoked on successful V4 (BRC-131)
 // reassembly. If nil, completed V4 slots are silently discarded.
 func (b *Buffer) SetBlockCallback(cb BlockCallback) { b.onCompleteBlock = cb }
@@ -416,6 +430,24 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 		return // duplicate
 	}
 
+	// Length/offset validation. Fragments are concatenated in index order,
+	// which is only the BRC-130 placement (offset = FragIndex × fragSize)
+	// when every non-final fragment is exactly fragSize and the final one is
+	// the remainder. Without this check a short interior fragment produces a
+	// payload of the wrong length whose bytes past the short fragment are all
+	// shifted — and with -verify-payload-hash off (the default) nothing
+	// downstream would notice before delivery. The object is dropped, not the
+	// fragment: the slot's contents are no longer trustworthy as a set.
+	fragSize, ok := checkFragLen(s, ff)
+	if !ok {
+		b.removeSlot(s.key)
+		if b.onBadFragment != nil {
+			b.onBadFragment()
+		}
+		return
+	}
+	s.fragSize = fragSize
+
 	// Store a copy of the fragment data (the source buffer is reused by the
 	// receive loop between calls).
 	cp := make([]byte, len(ff.FragData))
@@ -430,6 +462,53 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 
 	// All fragments arrived — reassemble.
 	b.complete(s)
+}
+
+// checkFragLen validates one fragment's data length against the object's
+// declared OrigPayloadLen and FragTotal, and returns the uniform non-final
+// fragment size the object must use.
+//
+// BRC-130 carries no per-fragment offset: the K-th fragment sits at
+// K × fragSize, so an object of OrigPayloadLen bytes in FragTotal fragments
+// has exactly one legal shape — FragTotal−1 fragments of fragSize bytes each,
+// then a final fragment holding the rest (at least one byte). Each arriving
+// fragment implies a fragSize, and every fragment of one object must imply
+// the same one; together that makes the concatenated length exactly
+// OrigPayloadLen with every fragment at its declared offset. The check is
+// order-independent: a final fragment implies
+// fragSize = (OrigPayloadLen − len) / (FragTotal − 1), which must divide
+// exactly.
+func checkFragLen(s *slot, ff *frame.FragFrame) (fragSize int, ok bool) {
+	n := len(ff.FragData)
+	total := int(s.fragTotal)
+	objLen := int(s.origPayloadLen)
+	if n <= 0 {
+		return 0, false
+	}
+
+	switch {
+	case total == 1:
+		if n != objLen {
+			return 0, false
+		}
+		fragSize = n
+	case int(ff.FragIndex) == total-1: // final fragment: n is the remainder
+		rem := objLen - n
+		if rem <= 0 || rem%(total-1) != 0 {
+			return 0, false
+		}
+		fragSize = rem / (total - 1)
+	default: // interior fragment: n is fragSize itself
+		fragSize = n
+		// The final fragment must still have at least one byte left to carry.
+		if objLen <= fragSize*(total-1) {
+			return 0, false
+		}
+	}
+	if s.fragSize != 0 && s.fragSize != fragSize {
+		return 0, false
+	}
+	return fragSize, true
 }
 
 // complete assembles the payload, dispatches the appropriate callback based on

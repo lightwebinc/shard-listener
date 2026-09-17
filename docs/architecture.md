@@ -264,6 +264,14 @@ endpoints into the `discovery.Registry` on each received ADVERT. The registry
 is sorted by **(Tier ASC, Preference DESC)**; beacon-discovered entries sort
 before static seeds (seeds use Tier=0xFF).
 
+The same goroutine carries BRC-139 manifests, but on a **second port of the
+same group**: shard-manifest announces on UDP 9001 while ADVERTs arrive on
+9300, so with `-manifest-consumer-enabled` the listener opens both
+(`-beacon-port` and `-manifest-beacon-port`) and demuxes on the MsgType byte.
+Under SSM each port joins its own source roster — `-ssm-bootstrap-beacon` for
+ADVERTs, `-ssm-bootstrap-manifest` for manifests — because the two are
+published by different hosts.
+
 Endpoints are evicted automatically after 3 × BeaconInterval without a refresh.
 The NACK tracker holds a snapshot of the registry at dispatch time, so evictions
 take effect at the next gap sweep without locking.

@@ -508,8 +508,9 @@ used by the retry endpoints.
 ## Auto-Shard-Config (BRC-139)
 
 The listener can consume BRC-139 ShardManifest announcements off the same
-beacon group, applying the normative consumer profile (Authoritative
-quorum, hysteresis, ±1 ShardBits shift bound, manual-pin precedence).
+beacon **group** — on its own **port** (`-manifest-beacon-port`, see below) —
+applying the normative consumer profile (Authoritative quorum, hysteresis,
+±1 ShardBits shift bound, manual-pin precedence).
 Default off; opt-in via `-manifest-consumer-enabled`. See the
 [Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#automatic-shard-configuration)
 for the system-level design.
@@ -520,6 +521,28 @@ Master switch. When false, the beacon listener drops any
 `MsgType=0x40` (ShardManifest) datagram it sees and behavior matches
 today exactly. When true, manifests are decoded, upserted into a
 `shard-common/manifest.Registry`, and evaluated on a 1 s tick.
+
+### `-manifest-beacon-port` / `MANIFEST_BEACON_PORT` (default: `9001`)
+
+UDP port on the beacon group that carries BRC-139 manifests. It is **not**
+`-beacon-port`: the beacon group carries two conversations on two ports —
+retry-endpoint ADVERTs on `-beacon-port` (9300) and shard-manifest
+announcements on the announcer's `-port` (9001). When the manifest consumer is
+enabled the listener opens a second socket on this port and joins the same
+group; set it to the announcers' `-port`, and mirror the proxy's
+`-manifest-beacon-port`, or no manifest is ever seen and quorum is never
+reached however many announcers run.
+
+Setting it equal to `-beacon-port` is supported and opens a single socket:
+the receive loop demuxes ADVERT from manifest on the MsgType byte.
+
+Under `-source-mode ssm` this port joins the sources from
+`-ssm-bootstrap-manifest` (the announcers), while `-beacon-port` keeps the
+`-ssm-bootstrap-beacon` sources (the retry endpoints) — the two publishers are
+different hosts, so one shared (S,G) roster would filter one of them out.
+
+> **Firewall:** the input chain must accept UDP on this port from `ff00::/8`
+> on the fabric interface, exactly as for `-beacon-port`.
 
 ### `-manifest-bootstrap` / `MANIFEST_BOOTSTRAP` (default: `optional`)
 
@@ -932,6 +955,7 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_reassembly_abandoned_total` | — | BRC-130 reassembly slots evicted before completion (TTL expired or buffer full) |
 | `bsl_reassembly_hash_mismatch_total` | — | Completed reassemblies dropped because SHA256d(payload) != TxID |
 | `bsl_reassembly_late_fragments_total` | — | Fragments dropped because their object already completed (multicast repair copies); a rate approaching bsl_reassembly_completed_total means repair is serving the group far more than the losses justify |
+| `bsl_reassembly_bad_fragment_total` | — | Objects dropped because a fragment's data length is inconsistent with `OrigPayloadLen`/`FragTotal` — it cannot sit at the offset BRC-130 implies (`FragIndex × fragSize`). Non-zero means a sender or path is emitting fragments that cannot be reassembled: corruption, a mis-sized fragmenter, or injection |
 
 ### Bundles (BRC-142)
 

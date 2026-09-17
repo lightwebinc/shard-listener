@@ -76,6 +76,7 @@ type Recorder struct {
 	frameReassemblyAbandoned    metric.Int64Counter
 	frameReassemblyHashMismatch metric.Int64Counter
 	frameReassemblyLateFragment metric.Int64Counter
+	frameReassemblyBadFragment  metric.Int64Counter
 	txDedupErrors               metric.Int64Counter // Redis errors during TxID claim
 
 	// Egress / ingress TxID dedup outcomes (txidset.Store callbacks)
@@ -298,6 +299,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.frameReassemblyLateFragment, err = meter.Int64Counter("bsl_reassembly_late_fragments_total",
 		metric.WithDescription("Fragments dropped because their object already completed (multicast repair copies); a rate approaching bsl_reassembly_completed_total means repair is serving the group far more than the losses justify")); err != nil {
+		return nil, err
+	}
+	if r.frameReassemblyBadFragment, err = meter.Int64Counter("bsl_reassembly_bad_fragment_total",
+		metric.WithDescription("Objects dropped because a fragment's data length is inconsistent with OrigPayloadLen/FragTotal (the BRC-130 offset grid); non-zero means some sender or path emits fragments that cannot be reassembled")); err != nil {
 		return nil, err
 	}
 	if r.txDedupErrors, err = meter.Int64Counter("bsl_txid_dedup_errors_total",
@@ -590,6 +595,13 @@ func (r *Recorder) ReassemblyHashMismatch() {
 // already completed — a multicast repair copy answering someone else's loss.
 func (r *Recorder) ReassemblyLateFragment() {
 	r.frameReassemblyLateFragment.Add(context.Background(), 1)
+}
+
+// ReassemblyBadFragment records an object dropped because one of its
+// fragments had a data length inconsistent with the object's OrigPayloadLen
+// and FragTotal — the fragment cannot be placed at the offset BRC-130 implies.
+func (r *Recorder) ReassemblyBadFragment() {
+	r.frameReassemblyBadFragment.Add(context.Background(), 1)
 }
 
 // FrameDeduped records a BRC-124/BRC-128 retransmit suppressed before egress

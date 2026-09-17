@@ -231,9 +231,6 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("ssm bootstrap: %w", err)
 		}
-		// Silence unused-warnings when none of the control-group lists
-		// are configured; the per-listener wiring below uses each list.
-		_ = manifestSrcs
 	}
 
 	if tracker != nil {
@@ -297,10 +294,9 @@ func run() error {
 			beaconScopePrefix = 0xFF05
 		}
 		beaconIP := shard.GroupAddr(beaconScopePrefix, cfg.MCGroupID, shard.GroupBeacon)
-		beaconGrp := &net.UDPAddr{IP: beaconIP, Port: cfg.BeaconPort}
 		bl := &discovery.BeaconListener{
 			Registry: reg,
-			Groups:   []*net.UDPAddr{beaconGrp},
+			Groups:   beaconGroups(cfg, beaconIP),
 			Iface:    cfg.Iface,
 			Sources:  beaconSrcs,
 			Rec:      rec,
@@ -308,12 +304,19 @@ func run() error {
 		}
 		if cfg.AutoConfigEnabled {
 			bl.ManifestRegistry = manifestReg
+			// The manifest port is published by shard-manifest announcers,
+			// not by the retry endpoints that publish ADVERTs, so under SSM
+			// it joins its own (S,G) roster (-ssm-bootstrap-manifest).
+			if len(manifestSrcs) > 0 && cfg.AutoConfigBeaconPort != cfg.BeaconPort {
+				bl.SourcesByPort = map[int][]netip.Addr{cfg.AutoConfigBeaconPort: manifestSrcs}
+			}
 			slog.Info("manifest consumer enabled",
 				"bootstrap", cfg.AutoConfigBootstrap,
 				"quorum", cfg.AutoConfigPilotQuorum,
 				"hysteresis", cfg.AutoConfigHysteresis,
 				"auto_join", cfg.AutoJoinFromManifest,
-				"live_resharding", cfg.AutoConfigLiveResharding)
+				"live_resharding", cfg.AutoConfigLiveResharding,
+				"manifest_beacon_port", cfg.AutoConfigBeaconPort)
 		}
 		wg.Add(1)
 		go func() {
@@ -322,7 +325,8 @@ func run() error {
 				slog.Error("beacon listener error", "err", err)
 			}
 		}()
-		slog.Info("beacon listener started", "group", beaconIP, "port", cfg.BeaconPort)
+		slog.Info("beacon listener started", "group", beaconIP, "ports", len(bl.Groups),
+			"beacon_port", cfg.BeaconPort)
 	}
 
 	// Start the manifest evaluator/applier when auto-config is enabled (receiver-side).
@@ -346,10 +350,12 @@ func run() error {
 				OnShardBitsChange: func(prev, next uint8) {
 					slog.Warn("auto-config adopted new ShardBits (restart mode)",
 						"prev", prev, "next", next,
-						"action", "flipping /readyz to 503; orchestrator will roll the pod")
+						"action", "logged only; this process keeps running at the old ShardBits until an operator or orchestrator restarts it with -shard-bits updated")
 					// Restart-mode is the default. Live-resharding
 					// hooks land in a follow-up pass that observes
-					// cfg.AutoConfigLiveResharding here.
+					// cfg.AutoConfigLiveResharding here. Nothing here
+					// touches /readyz: the adoption is observability
+					// until the restart happens.
 				},
 				OnDomainShardBitsChange: func(domain, prev, next uint8) {
 					// BEEF plane width changed (re-shards the band's group
@@ -647,6 +653,7 @@ func run() error {
 			}
 			buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)
 			buf.SetLateFragmentHook(rec.ReassemblyLateFragment)
+			buf.SetBadFragmentHook(rec.ReassemblyBadFragment)
 			buf.SetBlockCallback(wLocal.DeliverReassembledBlock)
 			buf.SetSubtreeDataCallback(wLocal.DeliverReassembledSubtreeData)
 			buf.SetBEEFCallback(wLocal.DeliverReassembledBeef)
@@ -936,6 +943,25 @@ func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint
 		}
 	}
 	return gs, beaconSrcs, manifestSrcs, subAnnSrcs, nil
+}
+
+// beaconGroups returns the beacon-group sockets the listener opens: the
+// ADVERT port always, plus the BRC-139 manifest port when the manifest
+// consumer is enabled and that port differs.
+//
+// Both sit on the SAME beacon group address; only the UDP port differs
+// (shard-manifest announces on its own -port, default 9001, while
+// retry-endpoint ADVERTs arrive on -beacon-port, default 9300). A listener
+// bound to the ADVERT port alone therefore never sees a manifest at stock
+// defaults, which is what this second entry fixes. The receive loop demuxes
+// on the MsgType byte, so one socket serving both ports' traffic — the case
+// where an operator sets them equal — needs no special handling.
+func beaconGroups(cfg *config.Config, beaconIP net.IP) []*net.UDPAddr {
+	groups := []*net.UDPAddr{{IP: beaconIP, Port: cfg.BeaconPort}}
+	if cfg.AutoConfigEnabled && cfg.AutoConfigBeaconPort != cfg.BeaconPort {
+		groups = append(groups, &net.UDPAddr{IP: beaconIP, Port: cfg.AutoConfigBeaconPort})
+	}
+	return groups
 }
 
 // inStaticInclude reports whether the given shard index is in the
