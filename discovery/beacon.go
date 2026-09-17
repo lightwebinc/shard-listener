@@ -23,6 +23,11 @@ import (
 // against the supplied source list (typically the retry-endpoint pods'
 // IPv6 from sources.bootstrap.beacon). When Sources is empty the
 // listener uses the stdlib ASM path (net.ListenMulticastUDP).
+//
+// Groups entries that share a UDP port share ONE socket, with a join per
+// address on it. Two wildcard binds on the same port collide, and the
+// BRC-126/129 transition config — the any-source FF0x beacon group and the
+// source-specific FF3x one, both on -beacon-port — is exactly such a pair.
 type BeaconListener struct {
 	Registry *Registry
 	Groups   []*net.UDPAddr    // beacon group addresses to join
@@ -54,11 +59,11 @@ func (bl *BeaconListener) Start(ctx context.Context) error {
 	// Start eviction goroutine
 	go bl.evictLoop(ctx)
 
-	errCh := make(chan error, len(bl.Groups))
-	for _, grp := range bl.Groups {
-		grp := grp
+	buckets := bucketByPort(bl.Groups)
+	errCh := make(chan error, len(buckets))
+	for _, grps := range buckets {
 		go func() {
-			errCh <- bl.listenGroup(ctx, grp)
+			errCh <- bl.listenGroup(ctx, grps)
 		}()
 	}
 
@@ -71,47 +76,76 @@ func (bl *BeaconListener) Start(ctx context.Context) error {
 	}
 }
 
-// openGroupConn opens a UDP6 listener on grp.Port and joins grp. When
-// bl.Sources is empty the join is ASM (IPV6_JOIN_GROUP via the stdlib
-// helper); when non-empty it is SSM (one MCAST_JOIN_SOURCE_GROUP per
-// source via netjoin).
-func (bl *BeaconListener) openGroupConn(grp *net.UDPAddr) (*net.UDPConn, error) {
-	srcs := bl.sourcesFor(grp)
-	if len(srcs) == 0 {
-		return net.ListenMulticastUDP("udp6", bl.Iface, grp)
+// bucketByPort groups the configured beacon addresses by UDP port,
+// preserving first-seen port order and the address order within a port.
+// One bucket becomes one socket: a second wildcard bind on a port already
+// held fails, so the FF0x/FF3x pair the BRC-126/129 transition puts on
+// -beacon-port has to be two joins on one socket, not two sockets.
+func bucketByPort(groups []*net.UDPAddr) [][]*net.UDPAddr {
+	idx := make(map[int]int, len(groups))
+	buckets := make([][]*net.UDPAddr, 0, len(groups))
+	for _, grp := range groups {
+		i, seen := idx[grp.Port]
+		if !seen {
+			i = len(buckets)
+			idx[grp.Port] = i
+			buckets = append(buckets, nil)
+		}
+		buckets[i] = append(buckets[i], grp)
 	}
-	// SSM path: open a regular UDP6 socket bound to the wildcard on
-	// grp.Port (so we receive datagrams sent to the group address) and
-	// add the (S,G) filters via netjoin.
-	pc, err := net.ListenPacket("udp6", fmt.Sprintf("[::]:%d", grp.Port))
+	return buckets
+}
+
+// openGroupConn opens one UDP6 listener on the bucket's shared port and
+// joins every address in it. A single ASM address keeps the stdlib path
+// (net.ListenMulticastUDP: bind + IPV6_JOIN_GROUP, byte-for-byte what
+// earlier releases did). Everything else — any SSM roster, or more than
+// one address on the port, which is what -control-group-compat=both
+// produces — binds the wildcard once and adds each membership via netjoin
+// (MCAST_JOIN_SOURCE_GROUP per source under SSM, IPV6_JOIN_GROUP under
+// ASM).
+func (bl *BeaconListener) openGroupConn(grps []*net.UDPAddr) (*net.UDPConn, error) {
+	if len(grps) == 0 {
+		return nil, fmt.Errorf("beacon listen: empty group bucket")
+	}
+	port := grps[0].Port
+	srcs := bl.sourcesFor(grps[0])
+	if len(srcs) == 0 && len(grps) == 1 {
+		return net.ListenMulticastUDP("udp6", bl.Iface, grps[0])
+	}
+	// Bind the wildcard on the shared port (so we receive datagrams sent
+	// to any joined group address) and add the memberships explicitly.
+	pc, err := net.ListenPacket("udp6", fmt.Sprintf("[::]:%d", port))
 	if err != nil {
-		return nil, fmt.Errorf("ssm listen %d: %w", grp.Port, err)
+		return nil, fmt.Errorf("beacon listen %d: %w", port, err)
 	}
 	uc, ok := pc.(*net.UDPConn)
 	if !ok {
 		_ = pc.Close()
-		return nil, fmt.Errorf("ssm listen: unexpected conn type %T", pc)
-	}
-	ga, ok := netip.AddrFromSlice(grp.IP.To16())
-	if !ok {
-		_ = uc.Close()
-		return nil, fmt.Errorf("ssm listen: bad group address %s", grp.IP)
+		return nil, fmt.Errorf("beacon listen: unexpected conn type %T", pc)
 	}
 	raw, err := uc.SyscallConn()
 	if err != nil {
 		_ = uc.Close()
-		return nil, fmt.Errorf("ssm listen: SyscallConn: %w", err)
+		return nil, fmt.Errorf("beacon listen: SyscallConn: %w", err)
 	}
-	var joinErr error
-	if cerr := raw.Control(func(fd uintptr) {
-		joinErr = netjoin.Join(int(fd), bl.Iface.Index, ga, srcs)
-	}); cerr != nil {
-		_ = uc.Close()
-		return nil, fmt.Errorf("ssm listen: Control: %w", cerr)
-	}
-	if joinErr != nil {
-		_ = uc.Close()
-		return nil, fmt.Errorf("ssm join (%d sources): %w", len(srcs), joinErr)
+	for _, grp := range grps {
+		ga, ok := netip.AddrFromSlice(grp.IP.To16())
+		if !ok {
+			_ = uc.Close()
+			return nil, fmt.Errorf("beacon listen: bad group address %s", grp.IP)
+		}
+		var joinErr error
+		if cerr := raw.Control(func(fd uintptr) {
+			joinErr = netjoin.Join(int(fd), bl.Iface.Index, ga, srcs)
+		}); cerr != nil {
+			_ = uc.Close()
+			return nil, fmt.Errorf("beacon listen: Control: %w", cerr)
+		}
+		if joinErr != nil {
+			_ = uc.Close()
+			return nil, fmt.Errorf("beacon join %s (%d sources): %w", grp.IP, len(srcs), joinErr)
+		}
 	}
 	return uc, nil
 }
@@ -126,12 +160,18 @@ func (bl *BeaconListener) sourcesFor(grp *net.UDPAddr) []netip.Addr {
 	return bl.Sources
 }
 
-func (bl *BeaconListener) listenGroup(ctx context.Context, grp *net.UDPAddr) error {
-	conn, err := bl.openGroupConn(grp)
+// listenGroup services one socket: the bucket of beacon addresses that
+// share a UDP port. grp is the bucket's first address and is used only to
+// label logs — a datagram arriving on a socket joined to both the FF0x and
+// FF3x forms of the same group cannot be attributed to one of them without
+// IPV6_RECVPKTINFO, and nothing downstream needs that attribution.
+func (bl *BeaconListener) listenGroup(ctx context.Context, grps []*net.UDPAddr) error {
+	conn, err := bl.openGroupConn(grps)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
+	grp := grps[0]
 
 	// Set a read buffer size
 	_ = conn.SetReadBuffer(1 << 16) // 64 KiB

@@ -492,16 +492,95 @@ UDP port for receiving ADVERT beacon datagrams. Must match the
 Multicast scope for the beacon group join. Must match the `-beacon-scope`
 used by the retry endpoints.
 
-| Value | Prefix | Reach |
-|--------|--------|---------------------------------------------------|
-| `link` | `FF02` | Same L2 segment only |
-| `site` | `FF05` | Site-local; crosses routers within a site |
-| `org` | `FF08` | Organisation-wide |
-| `global` | `FF0E` | Internet-wide |
+The prefix also depends on `-source-mode`: per BRC-126 §Beacon Scopes and
+BRC-129 §Source Mode and Address Range, the control-plane groups take the
+source-specific `FF3x` form under SSM. `-control-group-compat` (below)
+selects which form this listener joins.
+
+| Value | ASM prefix | SSM prefix | Reach |
+|--------|-----------|------------|--------------------------------------|
+| `link` | `FF02` | — | Same L2 segment only |
+| `site` | `FF05` | `FF35` | Site-local; crosses routers within a site |
+| `org` | `FF08` | — | Organisation-wide |
+| `global` | `FF0E` | `FF3E` | Internet-wide |
+
+BRC-129 tables an SSM control group at site and global scope only, so
+`link` and `org` are ASM-only. With `-control-group-compat derived` — an
+explicit request for the conformant address — combining either with
+`-source-mode ssm` is a startup error rather than a silent fall back to
+`FF0x`. With `asm-only` or `both` they keep working exactly as today (`both`
+simply has no second form to add), so a binary upgrade at default settings
+can never fail to start.
+
+At site scope the beacon group is therefore `FF05::B:FFFD` under ASM and
+`FF35::B:FFFD` under SSM; at global scope, `FF0E::B:FFFD` and `FF3E::B:FFFD`.
 
 > **Firewall:** the listener's nftables input chain must accept UDP traffic on
 > `beacon-port` from the beacon multicast prefix (`ff00::/8`) on the fabric
 > interface. The `listener-infra` Ansible role already includes this rule.
+> `ff00::/8` covers both `FF0x` and `FF3x`, so the rule needs no change — but
+> any deployment that narrowed it to the ASM block (`ff05::/16`,
+> `ff0e::/16`) must widen it to the matching SSM block (`ff35::/16`,
+> `ff3e::/16`) before moving off `-control-group-compat asm-only`. The same
+> applies to anything else keyed on the group prefix rather than on
+> `ff00::/8`: multicast routes, PIM/smcroute group ranges and MLD snooping
+> filters.
+
+### `-control-group-compat` / `CONTROL_GROUP_COMPAT` (default: `both`)
+
+Which multicast prefix the control-plane groups this listener joins are
+derived from:
+
+- index `0xFFFD` — BRC-126 ADVERT beacons on `-beacon-port` and BRC-139
+  manifests on `-manifest-beacon-port`, which share that group address;
+- index `0xFFFC` — BRC-127 subtree group announcements, joined at
+  `-announce-scope` (see that flag: on this group the proxy was already
+  conformant, so the join was simply mismatched under SSM rather than
+  needing a transition).
+
+| Value | Joins |
+|-------|-------|
+| `asm-only` | Always the any-source `FF0x` form, ignoring `-source-mode`. Pre-fix behaviour. |
+| `both` (default) | Both the `FF0x` form and the `-source-mode`-derived form, where one exists. |
+| `derived` | The `-source-mode`-derived form only: `FF3x` under `-source-mode ssm`. BRC-126/129 conformant. |
+
+Under `-source-mode asm` all three collapse to the same single `FF0x`
+prefix, so the flag does nothing in an ASM deployment.
+
+**This is a flag day.** Releases before this one always derived the
+any-source prefix here, even under `-source-mode ssm` — while the data plane
+in the same process derived `FF3x` correctly. A listener joined to
+`FF35::B:FFFD` hears nothing from a retry endpoint still advertising into
+`FF05::B:FFFD`, and a beacon that lands on the wrong group raises no error
+anywhere: the symptom is that ADVERTs and manifests simply never arrive, the
+endpoint registry stays empty and the manifest consumer never reaches pilot
+quorum.
+
+The default is `both` precisely so that upgrading listeners is safe on its
+own: a listener that joins both groups hears un-upgraded and upgraded
+senders alike. Entries that share a UDP port share one socket, so `both`
+costs an extra membership per port, not an extra socket.
+
+**Rollout order** — the senders are `retry-endpoint` (ADVERT) and
+`shard-manifest` (manifest); the other receiver is `shard-proxy`:
+
+1. Roll every **receiver** (shard-listener, shard-proxy). Default `both`; no
+   config change needed.
+2. Roll every **sender** (retry-endpoint, shard-manifest). Their default is
+   `asm-only`, so the wire does not move.
+3. One converge sets the **senders** to `derived`. Traffic moves to `FF3x`,
+   which every receiver from step 1 already joined.
+4. After a soak, one converge sets the **receivers** to `derived` to drop
+   the legacy join.
+
+Setting a sender to `derived` before step 1 has covered every receiver is
+the one ordering that silently strands a peer.
+
+Note that under `-source-mode ssm` a fabric's multicast routes and PIM/
+smcroute group ranges are usually derived from the source mode too, and so
+cover `ff35::/16` and `ff3e::/16` but not `ff05::/16`. The legacy leg of
+`both` therefore reaches only same-segment peers on such a fabric — which is
+all it reached before this fix as well.
 
 ---
 
@@ -542,7 +621,8 @@ Under `-source-mode ssm` this port joins the sources from
 different hosts, so one shared (S,G) roster would filter one of them out.
 
 > **Firewall:** the input chain must accept UDP on this port from `ff00::/8`
-> on the fabric interface, exactly as for `-beacon-port`.
+> on the fabric interface, exactly as for `-beacon-port`. `-control-group-compat`
+> changes the group address, not the port, so no port rule changes with it.
 
 ### `-manifest-bootstrap` / `MANIFEST_BOOTSTRAP` (default: `optional`)
 
@@ -615,16 +695,29 @@ from the registry and will no longer pass the filter.
 
 ### `-announce-scope` / `ANNOUNCE_SCOPE` (default: `site`)
 
-Multicast scope(s) for the announcement group join. Comma-separated if
-joining multiple scopes. Must match the scope used by the proxy's
-multicast egress for the control-plane group.
+Multicast scope(s) for the BRC-127 announcement group join (control-plane
+index `0xFFFC`). Comma-separated if joining multiple scopes. Must match the
+scope used by the proxy's multicast egress for the control-plane group.
 
-| Value | Prefix | Reach |
-|--------|--------|---------------------------------------------------|
-| `link` | `FF02` | Same L2 segment only |
-| `site` | `FF05` | Site-local; crosses routers within a site |
-| `org` | `FF08` | Organisation-wide |
-| `global` | `FF0E` | Internet-wide |
+| Value | ASM prefix | SSM prefix | Reach |
+|--------|-----------|------------|--------------------------------------|
+| `link` | `FF02` | — | Same L2 segment only |
+| `site` | `FF05` | `FF35` | Site-local; crosses routers within a site |
+| `org` | `FF08` | — | Organisation-wide |
+| `global` | `FF0E` | `FF3E` | Internet-wide |
+
+As for the beacon group, the prefix depends on `-source-mode` and on
+`-control-group-compat`: `0xFFFC` is a control-plane group and BRC-129's
+prefix rule covers it. `link` and `org` have no SSM control group, so
+combining either with `-source-mode ssm` and `-control-group-compat derived`
+is a startup error; `asm-only` and `both` keep working as today.
+
+Unlike the beacon, this side was the **only** non-conformant one: the proxy
+already emits announcements via its `-source-mode`-derived prefix, so a
+listener that joined `FF05::B:FFFC` on an SSM fabric never saw an
+announcement at all. There is no flag day here, only a mismatch to close —
+the default (`both`) closes it without assuming which prefix a given proxy
+uses.
 
 ### `-sender-include` / `SENDER_INCLUDE`
 

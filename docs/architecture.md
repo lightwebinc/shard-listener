@@ -22,13 +22,13 @@ shard-proxy
    │ BRC-132 frames         → FF05::B:FFFB          (GroupSubtreeDataAnnounce)
    │ BRC-127 datagrams      → FF05::B:FFFC          (GroupSubtreeGroupAnnounce)
    ▼
-Multicast fabric (site-scoped FF05::/16)
+Multicast fabric (site-scoped FF05::/16 under ASM, FF35::/16 under SSM)
    │
    ├── FF05::B:<shard>   BRC-124/BRC-128 transaction frames
    ├── FF05::B:FFFE      BRC-131 block control + BRC-134 anchor (always joined; configured -scope)
    ├── FF05::B:FFFB      BRC-132 subtree data (when -subtree-data-enabled)
-   ├── FF05::B:FFFC      BRC-127 subtree group announcements (when -subtree-groups set)
-   └── FF05::B:FFFD      BRC-126 ADVERT beacon
+   ├── FF05::B:FFFC      BRC-127 subtree group announcements (when -subtree-groups set; FF35 under SSM)
+   └── FF05::B:FFFD      BRC-126 ADVERT beacon + BRC-139 manifest (own port)
        │
        └── shard-listener
               ├──▶ unicast UDP/TCP → downstream consumers
@@ -256,8 +256,20 @@ listener can instead recover frames over the **unicast NACK return channel**:
 ## Beacon discovery
 
 Retry endpoints multicast 56-byte ADVERT datagrams to the beacon group
-(`ff05::B:FFFD` for site scope, UDP port 9300 by default). Each ADVERT
-carries the endpoint's NACKAddr (unicast IPv6), tier, preference, and flags.
+(`ff05::B:FFFD` for site scope under ASM, `ff35::B:FFFD` under SSM; UDP port
+9300 by default). Each ADVERT carries the endpoint's NACKAddr (unicast
+IPv6), tier, preference, and flags.
+
+The group address is a function of the source mode as well as the scope, per
+BRC-126 §Beacon Scopes and BRC-129 §Source Mode and Address Range: under SSM
+the control-plane groups take the source-specific `FF3x` prefix, exactly as
+the data-plane shard groups do. Which form this listener joins is selected
+by `-control-group-compat`, whose default (`both`) joins the any-source and
+the source-specific form together so a listener upgraded ahead of the retry
+endpoints keeps hearing them. See
+[configuration.md](./configuration.md#-control-group-compat--control_group_compat-default-both)
+for the rollout order; moving a sender to the source-specific group before
+every receiver has joined it stops discovery silently.
 
 The `discovery.BeaconListener` goroutine joins the beacon group and upserts
 endpoints into the `discovery.Registry` on each received ADVERT. The registry

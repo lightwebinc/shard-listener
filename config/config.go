@@ -57,6 +57,7 @@
 //	-beacon-enabled                    BEACON_ENABLED                     true             Enable ADVERT beacon listener
 //	-beacon-port                       BEACON_PORT                        9300             UDP port for beacon reception
 //	-beacon-scope                      BEACON_SCOPE                       site             Multicast scope for beacon groups
+//	-control-group-compat              CONTROL_GROUP_COMPAT               both             Control-group (0xFFFD/0xFFFC) prefix: asm-only | both | derived (BRC-126/129 flag day)
 //	-manifest-consumer-enabled         MANIFEST_CONSUMER_ENABLED          false            Opt-in BRC-139 manifest consumer
 //	-manifest-beacon-port              MANIFEST_BEACON_PORT               9001             UDP port on the beacon group carrying BRC-139 manifests (mirrors the proxy)
 //	-manifest-bootstrap                MANIFEST_BOOTSTRAP                 optional         optional | required (refuse data-plane bind until quorum)
@@ -258,6 +259,14 @@ type Config struct {
 	BeaconEnabled bool
 	BeaconPort    int
 	BeaconScope   string // multicast scope for beacon group joins
+
+	// ControlGroupCompat selects which multicast prefix the control-plane
+	// groups this listener joins are derived from: the 0xFFFD beacon group
+	// (BRC-126 ADVERTs + BRC-139 manifests) and the 0xFFFC BRC-127 subtree
+	// group announce group. "asm-only" | "both" | "derived"; see
+	// controlgroup.go for the rollout order. Receivers default to "both"
+	// so an upgraded listener still hears an un-upgraded sender.
+	ControlGroupCompat string
 
 	// Auto-shard-config (BRC-139 manifest consumer). All fields are
 	// opt-in. When AutoConfigEnabled is false, the listener does not
@@ -477,6 +486,12 @@ func Load() (*Config, error) {
 		"UDP port for receiving ADVERT beacons")
 	flag.StringVar(&c.BeaconScope, "beacon-scope", envStr("BEACON_SCOPE", "site"),
 		"multicast scope for beacon group joins: link | site | org | global")
+	flag.StringVar(&c.ControlGroupCompat, "control-group-compat", envStr("CONTROL_GROUP_COMPAT", ControlGroupBoth),
+		"prefix for the BRC-129 control groups this listener joins (0xFFFD beacon + manifest, 0xFFFC subtree group announce): "+
+			"'asm-only' = always the any-source FF0x form; "+
+			"'both' (default, receiver-safe) = join FF0x and the -source-mode-derived FF3x; "+
+			"'derived' = BRC-126/129 conformant, FF3x under -source-mode=ssm. "+
+			"Upgrade receivers to 'both' before moving any sender to 'derived'")
 	flag.BoolVar(&c.AutoConfigEnabled, "manifest-consumer-enabled", envBool("MANIFEST_CONSUMER_ENABLED", false),
 		"opt-in BRC-139 manifest consumer for auto-shard-config (off by default)")
 	flag.IntVar(&c.AutoConfigBeaconPort, "manifest-beacon-port", envInt("MANIFEST_BEACON_PORT", 9001),
@@ -702,6 +717,25 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid source-mode %q (asm|ssm)", c.SourceMode)
 	}
 
+	// Control-plane group prefix (BRC-126 §Beacon Scopes / BRC-129 §Source
+	// Mode and Address Range). See config/controlgroup.go for the flag-day
+	// rollout order; the receiver default is "both" so upgrading this
+	// binary alone can never strand an un-upgraded sender.
+	c.ControlGroupCompat = strings.ToLower(strings.TrimSpace(c.ControlGroupCompat))
+	switch c.ControlGroupCompat {
+	case ControlGroupASMOnly, ControlGroupBoth, ControlGroupDerived:
+	default:
+		return nil, fmt.Errorf("invalid -control-group-compat %q (%s)",
+			c.ControlGroupCompat, strings.Join(ControlGroupCompatValues, "|"))
+	}
+	if c.BeaconEnabled {
+		// Fail closed at load rather than silently falling back to FF05
+		// the way the beacon socket used to.
+		if _, err := c.BeaconGroupPrefixes(); err != nil {
+			return nil, fmt.Errorf("beacon group: %w", err)
+		}
+	}
+
 	c.SSMBootstrapBeacon = splitCSV(*ssmBootstrapBeacon)
 	c.SSMBootstrapManifest = splitCSV(*ssmBootstrapManifest)
 	c.SSMBootstrapSubtreeAnn = splitCSV(*ssmBootstrapSubtreeAnn)
@@ -879,6 +913,13 @@ func Load() (*Config, error) {
 	}
 	if len(c.AnnounceScopes) == 0 {
 		c.AnnounceScopes = []string{"site"}
+	}
+	// The BRC-127 announce group (0xFFFC) is control-plane too, so it takes
+	// the same prefix derivation as the beacon. Fail closed at load.
+	for _, scopeName := range c.AnnounceScopes {
+		if _, err := c.AnnounceGroupPrefixes(scopeName); err != nil {
+			return nil, fmt.Errorf("subtree group announce: %w", err)
+		}
 	}
 
 	// Parse sender include/exclude CIDRs.

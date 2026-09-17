@@ -247,11 +247,25 @@ func run() error {
 
 	// Start subtree announcement listener (BRC-127) — receiver-side discovery.
 	if !delivery && groupReg != nil {
+		// BRC-127 subtree group announcements sit on control-plane group
+		// index 0xFFFC, so BRC-129's prefix rule applies to them exactly as
+		// it does to the beacon: under SSM the address is FF3x, not FF0x.
+		// This used to read the any-source scope table unconditionally
+		// while shard-proxy already emitted via its -source-mode-derived
+		// prefix, so on an SSM fabric the two sides sat on different groups
+		// and no announcement ever arrived. -control-group-compat covers
+		// this group too; its default ("both") joins either.
 		var announceGroups []*net.UDPAddr
 		for _, scopeName := range cfg.AnnounceScopes {
-			scopePrefix := config.Scopes[scopeName]
-			annIP := shard.GroupAddr(scopePrefix, cfg.MCGroupID, shard.GroupSubtreeGroupAnnounce)
-			announceGroups = append(announceGroups, &net.UDPAddr{IP: annIP, Port: cfg.ListenPort})
+			prefixes, err := cfg.AnnounceGroupPrefixes(scopeName)
+			if err != nil {
+				slog.Error("subtree group announce derivation failed", "scope", scopeName, "err", err)
+				os.Exit(1)
+			}
+			for _, p := range prefixes {
+				annIP := shard.GroupAddr(p, cfg.MCGroupID, shard.GroupSubtreeGroupAnnounce)
+				announceGroups = append(announceGroups, &net.UDPAddr{IP: annIP, Port: cfg.ListenPort})
+			}
 		}
 		sal := &discovery.SubtreeGroupAnnounceListener{
 			Registry:      groupReg,
@@ -274,6 +288,8 @@ func run() error {
 		slog.Info("subtree announce listener started",
 			"groups", len(announceGroups),
 			"scopes", cfg.AnnounceScopes,
+			"control_group_compat", cfg.ControlGroupCompat,
+			"source_mode", cfg.SourceMode,
 		)
 	}
 
@@ -289,14 +305,25 @@ func run() error {
 
 	// Start beacon listener for dynamic endpoint discovery (receiver-side).
 	if !delivery && cfg.BeaconEnabled {
-		beaconScopePrefix, ok := config.Scopes[cfg.BeaconScope]
-		if !ok {
-			beaconScopePrefix = 0xFF05
+		// BRC-126 §Beacon Scopes / BRC-129 §Source Mode: under SSM the
+		// beacon group takes the source-specific FF3x prefix, not the
+		// any-source FF0x one. -control-group-compat selects which; its
+		// default ("both") joins BOTH so a listener upgraded ahead of the
+		// retry endpoints still hears an FF05 ADVERT. Config.Load has
+		// already validated this, so the old silent fall back to 0xFF05 is
+		// gone: an unusable scope is a startup error, not a wrong join.
+		beaconPrefixes, err := cfg.BeaconGroupPrefixes()
+		if err != nil {
+			slog.Error("beacon group derivation failed", "err", err)
+			os.Exit(1)
 		}
-		beaconIP := shard.GroupAddr(beaconScopePrefix, cfg.MCGroupID, shard.GroupBeacon)
+		beaconIPs := make([]net.IP, 0, len(beaconPrefixes))
+		for _, p := range beaconPrefixes {
+			beaconIPs = append(beaconIPs, shard.GroupAddr(p, cfg.MCGroupID, shard.GroupBeacon))
+		}
 		bl := &discovery.BeaconListener{
 			Registry: reg,
-			Groups:   beaconGroups(cfg, beaconIP),
+			Groups:   beaconGroups(cfg, beaconIPs),
 			Iface:    cfg.Iface,
 			Sources:  beaconSrcs,
 			Rec:      rec,
@@ -325,7 +352,11 @@ func run() error {
 				slog.Error("beacon listener error", "err", err)
 			}
 		}()
-		slog.Info("beacon listener started", "group", beaconIP, "ports", len(bl.Groups),
+		slog.Info("beacon listener started",
+			"groups", beaconIPs,
+			"control_group_compat", cfg.ControlGroupCompat,
+			"source_mode", cfg.SourceMode,
+			"sockets", len(bl.Groups),
 			"beacon_port", cfg.BeaconPort)
 	}
 
@@ -945,21 +976,32 @@ func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint
 	return gs, beaconSrcs, manifestSrcs, subAnnSrcs, nil
 }
 
-// beaconGroups returns the beacon-group sockets the listener opens: the
+// beaconGroups returns the (group, port) pairs the listener joins: the
 // ADVERT port always, plus the BRC-139 manifest port when the manifest
 // consumer is enabled and that port differs.
 //
-// Both sit on the SAME beacon group address; only the UDP port differs
-// (shard-manifest announces on its own -port, default 9001, while
-// retry-endpoint ADVERTs arrive on -beacon-port, default 9300). A listener
-// bound to the ADVERT port alone therefore never sees a manifest at stock
-// defaults, which is what this second entry fixes. The receive loop demuxes
-// on the MsgType byte, so one socket serving both ports' traffic — the case
-// where an operator sets them equal — needs no special handling.
-func beaconGroups(cfg *config.Config, beaconIP net.IP) []*net.UDPAddr {
-	groups := []*net.UDPAddr{{IP: beaconIP, Port: cfg.BeaconPort}}
+// All beacon addresses sit on the SAME group index (0xFFFD); only the UDP
+// port differs (shard-manifest announces on its own -port, default 9001,
+// while retry-endpoint ADVERTs arrive on -beacon-port, default 9300). A
+// listener bound to the ADVERT port alone therefore never sees a manifest
+// at stock defaults, which is what the second port fixes. The receive loop
+// demuxes on the MsgType byte, so one socket serving both ports' traffic —
+// the case where an operator sets them equal — needs no special handling.
+//
+// beaconIPs carries one address per -control-group-compat prefix (FF0x
+// and/or FF3x, see config/controlgroup.go), so during the flag day each
+// port yields one entry per prefix. Entries that share a port share one
+// socket; BeaconListener.Start buckets them.
+func beaconGroups(cfg *config.Config, beaconIPs []net.IP) []*net.UDPAddr {
+	ports := []int{cfg.BeaconPort}
 	if cfg.AutoConfigEnabled && cfg.AutoConfigBeaconPort != cfg.BeaconPort {
-		groups = append(groups, &net.UDPAddr{IP: beaconIP, Port: cfg.AutoConfigBeaconPort})
+		ports = append(ports, cfg.AutoConfigBeaconPort)
+	}
+	groups := make([]*net.UDPAddr, 0, len(ports)*len(beaconIPs))
+	for _, port := range ports {
+		for _, ip := range beaconIPs {
+			groups = append(groups, &net.UDPAddr{IP: ip, Port: port})
+		}
 	}
 	return groups
 }
