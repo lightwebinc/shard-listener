@@ -180,12 +180,24 @@ Egress protocol: `udp` or `tcp`.
 
 ### `-strip-header` / `STRIP_HEADER` (default: `true`)
 
-When `true` (the default), only the raw BSV transaction payload is forwarded
-(no frame header) — this is what a downstream node/miner expects, since it
-reads a standard `tx` (BRC-12) or Extended Format (BRC-30) serialisation, not a
-multicast frame. When `false`, the complete 92-byte BRC-124/BRC-128 frame is
-forwarded verbatim; set this only when the downstream re-reads frames itself
-(for example domain bridging into another multicast fabric).
+When `true` (the default), each frame is stripped to the bare object a
+downstream reader expects, rather than to the frame's raw payload:
+
+| Class | Delivered when stripped |
+|-------|-------------------------|
+| Transaction | The standard `tx` (BRC-12) or Extended Format (BRC-30) serialisation |
+| Block | The BRC-144 block object. A block-control frame that carries no whole block cannot be stripped into one, so it is refused and counted as an egress error rather than forwarded |
+| Subtree | The BRC-143 subtree object: merkle root, node count, then the ordered node hashes |
+
+The subtree row is why stripping is not simply "drop the header". BRC-132 keeps
+the subtree's merkle root in the frame header and carries aggregate fields and a
+conflict tail in its payload, so its raw payload is not a subtree object and
+cannot be verified against its root. The object is rebuilt from the frame, with
+the same helper the commercial delivery lane uses.
+
+When `false`, the complete frame is forwarded verbatim; set this only when the
+downstream re-reads frames itself (for example domain bridging into another
+multicast fabric).
 
 ---
 

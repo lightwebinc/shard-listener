@@ -247,12 +247,19 @@ func (s *Sender) SendRaw(buf []byte) error {
 }
 
 // SendBlock forwards a BRC-131 block control frame to the downstream.
-// When stripHeader is true, only bf.Payload is sent; otherwise the full raw
-// wire buffer is forwarded.
+// When stripHeader is true the frame is stripped to the bare BRC-144 block
+// object a downstream reader expects, through the same helper the commercial
+// delivery lane uses; a frame carrying no whole block is refused rather than
+// forwarded as bytes no BRC-144 reader can parse. Otherwise the full raw wire
+// buffer is forwarded.
 func (s *Sender) SendBlock(raw []byte, bf *frame.BlockFrame) error {
 	var buf []byte
 	if s.stripHeader {
-		buf = bf.Payload
+		obj, err := objfmt.StripBytes(objfmt.ClassBlock, raw)
+		if err != nil {
+			return fmt.Errorf("egress: strip block: %w", err)
+		}
+		buf = obj
 	} else {
 		buf = raw
 	}
@@ -267,12 +274,21 @@ func (s *Sender) SendBlock(raw []byte, bf *frame.BlockFrame) error {
 }
 
 // SendSubtreeData forwards a BRC-132 subtree data frame to the downstream.
-// When stripHeader is true, only sf.Payload is sent; otherwise the full raw
+// When stripHeader is true the frame is stripped to a bare BRC-143 subtree
+// object: merkle root, node count, then the ordered node hashes. It must not
+// send sf.Payload, which is the BRC-132 payload: that carries the aggregate
+// fields and the conflict tail, and it omits the merkle root entirely, which
+// BRC-132 keeps in the frame header. A downstream reader expecting a subtree
+// object would mis-parse it and could never verify it. Otherwise the full raw
 // wire buffer is forwarded.
 func (s *Sender) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) error {
 	var buf []byte
 	if s.stripHeader {
-		buf = sf.Payload
+		obj, err := objfmt.StripBytes(objfmt.ClassSubtree, raw)
+		if err != nil {
+			return fmt.Errorf("egress: strip subtree: %w", err)
+		}
+		buf = obj
 	} else {
 		buf = raw
 	}
