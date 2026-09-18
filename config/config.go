@@ -77,7 +77,7 @@
 //	-log-level                         LOG_LEVEL                          info             debug | info | warn | error
 //	-trace-sampling                    TRACE_SAMPLING                     0                Head sampling ratio 0..1 (0 = tracing off)
 //	-verify-payload-hash               VERIFY_PAYLOAD_HASH                false            Verify canonical TxID on V2 frames (EF-aware); drop on mismatch
-//	-require-block-pow                 REQUIRE_BLOCK_POW                  true             Gate BRC-131 announces on header PoW; correlate BRC-133 coinbase
+//	-require-block-pow                 REQUIRE_BLOCK_POW                  true             Gate BRC-131 announces on header PoW; drop deprecated standalone BRC-133 coinbase
 //	-min-pow-bits                      MIN_POW_BITS                       0                PoW difficulty floor (compact nBits); 0 = self-consistency only
 //	-subtree-data-enabled              SUBTREE_DATA_ENABLED               false            Enable BRC-132 subtree data reception (join 0xFFFB group)
 //	-subtree-data-verify-merkle        SUBTREE_DATA_VERIFY_MERKLE         false            Optional post-reassembly Merkle root verification (expensive)
@@ -325,7 +325,9 @@ type Config struct {
 	// Block-control gate (default ON; -require-block-pow=false disables it).
 	// Inter-domain BRC-131 announces reach the listener by multicast without
 	// passing our proxy, so the listener independently validates before
-	// fan-out: PoW on the announce, and coinbase↔block correlation on BRC-133.
+	// fan-out: PoW on the announce. A standalone BRC-133 coinbase frame is
+	// dropped, since it carries no PoW of its own; that carriage is deprecated
+	// and retained for a possible future split of block and coinbase.
 	RequireBlockPoW bool
 	MinPoWBits      uint32 // PoW difficulty floor (compact nBits); 0 = self-consistency only
 
@@ -532,7 +534,7 @@ func Load() (*Config, error) {
 	flag.BoolVar(&c.VerifyPayloadHash, "verify-payload-hash", envBool("VERIFY_PAYLOAD_HASH", false),
 		"verify the canonical TxID on BRC-124/BRC-128 frames (SHA256d(payload) for BRC-12 raw, objfmt.TxID for BRC-30 EF payloads); drop on mismatch")
 	flag.BoolVar(&c.RequireBlockPoW, "require-block-pow", envBool("REQUIRE_BLOCK_POW", true),
-		"gate BRC-131 announces on header proof-of-work + correlate BRC-133 coinbase with a validated block before fan-out (validates inter-domain block control); default ON — everything downstream of a block announce, including BRC-135 header egress, inherits this gate")
+		"gate BRC-131 announces on header proof-of-work and drop any deprecated standalone BRC-133 coinbase frame before fan-out (validates inter-domain block control); default ON. Everything downstream of a block announce, including BRC-135 header egress, inherits this gate")
 	minPoWBits := flag.String("min-pow-bits", envStr("MIN_POW_BITS", "0"),
 		"PoW difficulty floor for -require-block-pow in Bitcoin compact nBits form (e.g. 0x1d00ffff); 0 = header self-consistency only")
 	flag.BoolVar(&c.SubtreeDataEnabled, "subtree-data-enabled", envBool("SUBTREE_DATA_ENABLED", false),

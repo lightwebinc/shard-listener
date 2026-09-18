@@ -76,9 +76,10 @@ const groupSubtreeDataAnnounce uint32 = 0xFFFB
 // groupCoinbaseFlow is the virtual group index for BRC-133 coinbase frames.
 // Like groupAnchorFlow it never appears in an IPv6 address and is not carried
 // on the NACK wire — it exists so a coinbase flow is counted separately from
-// the block announces it shares GroupBlockBroadcast with. BRC-133 is legacy:
-// the block-control gate (default on) drops standalone coinbase frames, so
-// this label only appears when an operator has disabled the gate.
+// the block announces it shares GroupBlockBroadcast with. Standalone BRC-133
+// coinbase carriage is deprecated and retained, and the block-control gate
+// (default on) drops those frames, so this label only appears when an operator
+// has disabled the gate. The index stays reserved.
 const groupCoinbaseFlow uint32 = 0xFFF8
 
 // groupAnchorFlow is the virtual group index for BRC-134 anchor transaction frames.

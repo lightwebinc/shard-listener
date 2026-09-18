@@ -339,10 +339,11 @@ func (w *Worker) SetBEEF(pe *shard.PlaneEngine, topics map[[32]byte]struct{}, ve
 // the listener must independently validate them. When require is true, a
 // BRC-131 BlockAnnounce is forwarded only if its in-frame 80-byte header
 // satisfies proof of work at a target no easier than floorBits (Bitcoin
-// compact nBits; 0 = self-consistency only), and a BRC-133 coinbase is
-// forwarded only if corr holds its TxID (recorded from a validated block).
-// corr is shared across workers; pass nil to skip coinbase correlation.
-// Validates the artifact, not the emitter — permissionless. Must be called
+// compact nBits; 0 = self-consistency only). A standalone BRC-133 coinbase
+// frame is dropped while the gate is on: that carriage is deprecated, because
+// the coinbase travels inline in the block body, and retained only for a
+// possible future split of block and coinbase on the fabric.
+// Validates the artifact, not the emitter: permissionless. Must be called
 // before Run.
 func (w *Worker) SetBlockPoW(require bool, floorBits uint32) {
 	w.requireBlockPoW = require
@@ -1121,8 +1122,9 @@ func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 // NACK wire (which carries only HashKey and the seq range), so this affects
 // metric labelling only, never recovery routing.
 //
-// BRC-133 is legacy: the block-control gate drops standalone coinbase frames
-// by default, so brc133 only appears where an operator disabled the gate.
+// Standalone BRC-133 coinbase carriage is deprecated and retained: the
+// block-control gate drops those frames by default, so brc133 only appears
+// where an operator disabled the gate.
 func blockFlowIdx(msgType byte) uint32 {
 	if msgType == frame.BlockMsgCoinbase {
 		return uint32(shard.GroupCoinbaseFlow)
@@ -1150,8 +1152,9 @@ func (w *Worker) processBlockFrame(raw []byte) bool {
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc131")
 	}
 
-	// Block-control gate (opt-in): validate inter-domain announcements before
-	// fan-out — PoW on the announce, coinbase↔block correlation on coinbase.
+	// Block-control gate (default on): validate inter-domain announcements
+	// before fan-out. PoW on the announce; a standalone coinbase frame, whose
+	// carriage is deprecated, is dropped.
 	if !w.blockGateAllows(bf, bf.Payload) {
 		if w.debug {
 			w.log.Debug("block frame dropped by block-control gate",

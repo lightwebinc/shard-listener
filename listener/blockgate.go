@@ -13,8 +13,10 @@ import (
 // reassembled payload on the fragmentation path); its first 80 bytes are the
 // block header. Drops are counted via the metrics reason label.
 //
-// A standalone BRC-133 coinbase frame is LEGACY and is dropped while the gate
-// is on. It carries no proof of work of its own, so nothing about it can be
+// A standalone BRC-133 coinbase frame is DEPRECATED and is dropped while the
+// gate is on. The carriage is retained deliberately, so a future design could
+// carry blocks and their coinbase separately on the fabric and recombine them
+// at the edges. It carries no proof of work of its own, so nothing about it can be
 // validated in isolation; the push model supersedes it by carrying the
 // coinbase INLINE in the block body (BRC-144), where it inherits the
 // announce's PoW.

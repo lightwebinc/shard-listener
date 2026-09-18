@@ -58,8 +58,8 @@ func forwarded(ch <-chan []byte) bool {
 
 // TestBlockGate_PoWAndInlineCoinbase covers the block-control gate under the
 // push model: a block carries its coinbase INLINE (BRC-144 body), so the gate
-// is PoW-only on the announce and the retired separate-coinbase correlation
-// drops any stray BlockMsgCoinbase frame.
+// is PoW-only on the announce and drops any stray BlockMsgCoinbase frame. The
+// separate-coinbase carriage is deprecated, not removed.
 func TestBlockGate_PoWAndInlineCoinbase(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
 	defer cleanup()
@@ -91,8 +91,8 @@ func TestBlockGate_PoWAndInlineCoinbase(t *testing.T) {
 		t.Fatal("valid-PoW block announce must forward")
 	}
 
-	// Separate BRC-133 coinbase frames are retired: such a frame carries no PoW
-	// of its own and the push model carries the coinbase inline, so it is
+	// Separate BRC-133 coinbase frames are deprecated: such a frame carries no
+	// PoW of its own and the push model carries the coinbase inline, so it is
 	// dropped outright while the gate is on.
 	w.processBlockFrame(coinbaseFrame(t, cb))
 	if forwarded(ch) {

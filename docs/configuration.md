@@ -849,9 +849,14 @@ listener must independently validate them — this is the permissionless gate
   of work: `hash(header) ≤ target(nBits)`, and that target must be at least as
   hard as `-min-pow-bits`. Failing frames are dropped
   (`bsl_frames_dropped_total{reason="block_pow"}`) and not gap-tracked.
-- **BRC-133 coinbase** — gated by correlation: the listener records the
-  coinbase TxID of every PoW-valid announce and forwards a coinbase frame only
-  if its TxID matches one (`reason="coinbase_uncorrelated"` otherwise).
+- **BRC-133 coinbase**: a standalone coinbase frame is dropped while the gate
+  is on (`reason="coinbase_legacy"`). It carries no proof of work of its own, so
+  nothing about it can be validated in isolation. Standalone coinbase carriage
+  is deprecated: no current implementation produces it, because the coinbase
+  travels inline in the BRC-144 block body and inherits the announce's proof of
+  work there. It is retained deliberately so that a future design could carry
+  blocks and their coinbase separately on the fabric and recombine them at the
+  edges.
 
 This is anti-spam at fan-out, not consensus validation (no chain context); the
 consuming node does full validation. BRC-134 anchors are deliberately ungated.

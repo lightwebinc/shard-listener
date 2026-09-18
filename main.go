@@ -528,9 +528,10 @@ func run() error {
 	}
 
 	// Block-control gate (default ON): BRC-131 announces must carry valid PoW
-	// before fan-out. A standalone BRC-133 coinbase frame is legacy and is
-	// dropped while the gate is on — it carries no PoW of its own, and the push
-	// model supersedes it by carrying the coinbase inline in the block body.
+	// before fan-out. A standalone BRC-133 coinbase frame is dropped while the
+	// gate is on: it carries no PoW of its own, and the push model carries the
+	// coinbase inline in the block body. That carriage is deprecated, not
+	// removed, so the log key below keeps its name.
 	if !delivery && cfg.RequireBlockPoW {
 		slog.Info("block-control gate enabled",
 			"min_pow_bits", fmt.Sprintf("0x%08x", cfg.MinPoWBits),
