@@ -686,6 +686,7 @@ func run() error {
 			buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)
 			buf.SetLateFragmentHook(rec.ReassemblyLateFragment)
 			buf.SetBadFragmentHook(rec.ReassemblyBadFragment)
+			buf.SetOversizeHook(rec.ReassemblyOversize)
 			buf.SetBlockCallback(wLocal.DeliverReassembledBlock)
 			buf.SetSubtreeDataCallback(wLocal.DeliverReassembledSubtreeData)
 			buf.SetBEEFCallback(wLocal.DeliverReassembledBeef)

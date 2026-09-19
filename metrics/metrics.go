@@ -77,6 +77,7 @@ type Recorder struct {
 	frameReassemblyHashMismatch metric.Int64Counter
 	frameReassemblyLateFragment metric.Int64Counter
 	frameReassemblyBadFragment  metric.Int64Counter
+	frameReassemblyOversize     metric.Int64Counter
 	txDedupErrors               metric.Int64Counter // Redis errors during TxID claim
 
 	// Egress / ingress TxID dedup outcomes (txidset.Store callbacks)
@@ -303,6 +304,10 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.frameReassemblyBadFragment, err = meter.Int64Counter("bsl_reassembly_bad_fragment_total",
 		metric.WithDescription("Objects dropped because a fragment's data length is inconsistent with OrigPayloadLen/FragTotal (the BRC-130 offset grid); non-zero means some sender or path emits fragments that cannot be reassembled")); err != nil {
+		return nil, err
+	}
+	if r.frameReassemblyOversize, err = meter.Int64Counter("bsl_reassembly_oversize_fragments_total",
+		metric.WithDescription("Fragments dropped because their declared object length exceeds the reassembly bound (-beef-max-object-bytes for BEEF); non-zero means an ingress admits objects this listener cannot reassemble")); err != nil {
 		return nil, err
 	}
 	if r.txDedupErrors, err = meter.Int64Counter("bsl_txid_dedup_errors_total",
@@ -602,6 +607,12 @@ func (r *Recorder) ReassemblyLateFragment() {
 // and FragTotal — the fragment cannot be placed at the offset BRC-130 implies.
 func (r *Recorder) ReassemblyBadFragment() {
 	r.frameReassemblyBadFragment.Add(context.Background(), 1)
+}
+
+// ReassemblyOversize records a fragment dropped because the object it belongs
+// to declares a length above the reassembly bound.
+func (r *Recorder) ReassemblyOversize() {
+	r.frameReassemblyOversize.Add(context.Background(), 1)
 }
 
 // FrameDeduped records a BRC-124/BRC-128 retransmit suppressed before egress

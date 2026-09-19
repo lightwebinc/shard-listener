@@ -1066,6 +1066,7 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_reassembly_hash_mismatch_total` | — | Completed reassemblies dropped because SHA256d(payload) != TxID |
 | `bsl_reassembly_late_fragments_total` | — | Fragments dropped because their object already completed (multicast repair copies); a rate approaching bsl_reassembly_completed_total means repair is serving the group far more than the losses justify |
 | `bsl_reassembly_bad_fragment_total` | — | Objects dropped because a fragment's data length is inconsistent with `OrigPayloadLen`/`FragTotal` — it cannot sit at the offset BRC-130 implies (`FragIndex × fragSize`). Non-zero means a sender or path is emitting fragments that cannot be reassembled: corruption, a mis-sized fragmenter, or injection |
+| `bsl_reassembly_oversize_fragments_total` | — | Fragments dropped because their object's declared `OrigPayloadLen` exceeds the reassembly bound (`-beef-max-object-bytes` for `OrigFrameVer 0x09`, 64 MiB otherwise). Every fragment of such an object counts, so this is fragments, not objects. Non-zero on the BEEF plane means some ingress admits objects larger than this listener reassembles: the fabric carries them and no subscriber receives them |
 
 ### Bundles (BRC-142)
 
@@ -1162,7 +1163,7 @@ filter → version filter → delivery. Canonical spec:
 | `-beef-shard-bits` / `BEEF_SHARD_BITS` | `0` | Plane width (`0` = single group); must match the proxy |
 | `-beef-versions` / `BEEF_VERSIONS` | all | Accepted encodings: comma of `beef`\|`beefv2`\|`atomic` (capability gate on payload word) |
 | `-beef-verify-content` / `BEEF_VERIFY_CONTENT` | `false` | Debug: verify ContentID == SHA-256d(object) before fan-out (BEEF analogue of `-verify-payload-hash`) |
-| `-beef-max-object-bytes` / `BEEF_MAX_OBJECT_BYTES` | `1048576` | Per-object byte bound applied to `OrigFrameVer 0x09` fragment reassembly (declared OrigPayloadLen); must match the ingress proxies' `-beef-max-object-bytes` |
+| `-beef-max-object-bytes` / `BEEF_MAX_OBJECT_BYTES` | `1048576` | Per-object byte bound applied to `OrigFrameVer 0x09` fragment reassembly (declared OrigPayloadLen). Must be at least the largest object any ingress admits, including any per-source uplift above the proxies' `-beef-max-object-bytes`; a lower value drops those objects here (`bsl_reassembly_oversize_fragments_total`) |
 
 Join/emit sites: `buildGroups` (band joins; SSM inherits the global source
 roster per the spec), `processBeefFrame` (filters → `bsl:egr` claim on the

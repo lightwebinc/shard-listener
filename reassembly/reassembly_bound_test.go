@@ -20,9 +20,10 @@ func boundFrag(ver byte, origLen uint32, total uint16, seed byte) *frame.FragFra
 // ~1.5 MiB; thousands of such datagrams command gigabytes). The general bound
 // (64 MiB) gates V2; the V9 bound is the operator's -beef-max-object-bytes.
 func TestDeclaredLengthBounds(t *testing.T) {
-	opened := 0
+	opened, oversize := 0, 0
 	b := New(8, time.Second, false, func([]byte, *frame.Frame) {})
 	b.SetStartedHook(func() { opened++ })
+	b.SetOversizeHook(func() { oversize++ })
 	b.SetMaxObjectBytesV9(1 << 20)
 
 	b.Observe(boundFrag(frame.FrameVerV2, 0xFFFF0000, 65535, 1)) // ~4 GiB declared tx
@@ -40,5 +41,10 @@ func TestDeclaredLengthBounds(t *testing.T) {
 	b.Observe(boundFrag(frame.FrameVerV2, 32<<20, 30000, 4)) // 32 MiB tx — within general
 	if opened != 2 {
 		t.Fatalf("in-bound V2 rejected (opened=%d)", opened)
+	}
+	// Each over-bound fragment is counted: the drop must be visible, since it
+	// is otherwise indistinguishable from loss.
+	if oversize != 2 {
+		t.Fatalf("oversize hook fired %d times, want 2 (the 4 GiB V2 and the 2 MiB V9)", oversize)
 	}
 }

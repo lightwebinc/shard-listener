@@ -153,6 +153,7 @@ type Buffer struct {
 	onMerkleMismatch func() // metrics hook (Merkle root mismatch, V5)
 	onLateFragment   func() // metrics hook (fragment for an already-completed object)
 	onBadFragment    func() // metrics hook (fragment whose length breaks the BRC-130 offset grid)
+	onOversize       func() // metrics hook (fragment whose declared object exceeds the bound)
 	maxObject        int    // general declared-length cap (DefaultMaxObjectBytes)
 	maxObjectV9      int    // BRC-148 plane cap (-beef-max-object-bytes); 0 = use general
 	// done remembers slot keys that COMPLETED recently, mapped to the instant
@@ -331,6 +332,13 @@ func (b *Buffer) SetLateFragmentHook(fn func()) { b.onLateFragment = fn }
 // implies — corruption, a mis-sized fragmenter, or injection.
 func (b *Buffer) SetBadFragmentHook(fn func()) { b.onBadFragment = fn }
 
+// SetOversizeHook sets a metrics hook called once per fragment dropped because
+// its declared OrigPayloadLen exceeds the object bound. Every fragment of such
+// an object is dropped, so the count is fragments, not objects. Non-zero on the
+// BEEF plane means an ingress admits larger objects than this listener's
+// -beef-max-object-bytes, and the fabric is carrying objects no subscriber gets.
+func (b *Buffer) SetOversizeHook(fn func()) { b.onOversize = fn }
+
 // SetBlockCallback registers the callback invoked on successful V4 (BRC-131)
 // reassembly. If nil, completed V4 slots are silently discarded.
 func (b *Buffer) SetBlockCallback(cb BlockCallback) { b.onCompleteBlock = cb }
@@ -392,6 +400,9 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 			maxObj = b.maxObjectV9
 		}
 		if maxObj > 0 && int(ff.OrigPayloadLen) > maxObj {
+			if b.onOversize != nil {
+				b.onOversize()
+			}
 			return
 		}
 
