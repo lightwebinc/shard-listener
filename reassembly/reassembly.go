@@ -133,7 +133,6 @@ type Buffer struct {
 	maxSlots          int
 	ttl               time.Duration
 	verifyHash        bool                // canonical-TxID check for V2 slots (EF-aware)
-	verifyMerkle      bool                // optional Merkle root check for V5 slots
 	onComplete        Callback            // V2 (FrameVerV2) completion
 	onCompleteBlock   BlockCallback       // V4 (FrameVerV4) completion
 	onCompleteSubtree SubtreeDataCallback // V5 (FrameVerV5) completion
@@ -352,11 +351,6 @@ func (b *Buffer) SetBEEFCallback(cb BEEFCallback) { b.onCompleteBEEF = cb }
 // If nil, completed V5 slots are silently discarded.
 func (b *Buffer) SetSubtreeDataCallback(cb SubtreeDataCallback) { b.onCompleteSubtree = cb }
 
-// SetVerifyMerkle enables optional post-reassembly Merkle root verification
-// for V5 subtree data slots. This is expensive at large node counts and is
-// disabled by default.
-func (b *Buffer) SetVerifyMerkle(v bool) { b.verifyMerkle = v }
-
 // Observe processes one BRC-130 fragment. It opens a new slot on the first
 // fragment for a TxID, stores subsequent fragments, and calls the completion
 // callback when all fragments have arrived.
@@ -560,9 +554,10 @@ func (b *Buffer) complete(s *slot) {
 		}
 
 	case frame.FrameVerV5:
-		// BRC-132 subtree data: SHA256d verification never applies.
-		// Merkle root recomputation (verifyMerkle) is deferred to the callback
-		// layer because it requires payload decoding + tree recomputation.
+		// BRC-132 subtree data: SHA256d verification never applies. The merkle
+		// root is checked where a subtree ENTERS the fabric — shard-proxy's
+		// -verify-subtree-root, on the whole object before it is framed — not
+		// here, where only a reassembled payload is in hand.
 		sf := &frame.SubtreeDataFrame{
 			MsgType: s.msgType,
 			HashKey: s.hashKey,

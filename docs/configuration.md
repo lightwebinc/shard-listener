@@ -771,13 +771,14 @@ Enable BRC-132 subtree data reception. When `true`, the listener joins
 `GroupSubtreeDataAnnounce` (`0xFFFB`) in addition to its shard groups and `GroupBlockBroadcast`.
 When `false` (the default), the group is not joined and BRC-132 frames are never received.
 
-### `-subtree-data-verify-merkle` / `SUBTREE_DATA_VERIFY_MERKLE` (default: `false`)
+### `-subtree-data-verify-merkle` (REMOVED)
 
-Enable optional post-reassembly Merkle root verification for BRC-132 fragments. When `true`,
-after all fragments of a subtree data payload are reassembled, the listener verifies that the
-reassembled payload is consistent with the SubtreeID (Merkle root). Applies only to
-fragmented subtree data; inline unfragmented frames are not verified. This check is
-computationally expensive and should be disabled unless data integrity verification is required.
+This flag is gone. It parsed and threaded through to the reassembly buffer, where nothing
+read it: no listener build ever verified a Merkle root. A subtree's root is now checked where
+the subtree ENTERS the fabric, by `shard-proxy`'s `-verify-subtree-root` (on by default),
+which sees the whole object before it is framed and drops a mismatch before it is multicast.
+A listener passing this flag on the command line will fail to start; remove it. The
+environment variable is simply ignored.
 
 ---
 

@@ -690,9 +690,6 @@ func run() error {
 			buf.SetBlockCallback(wLocal.DeliverReassembledBlock)
 			buf.SetSubtreeDataCallback(wLocal.DeliverReassembledSubtreeData)
 			buf.SetBEEFCallback(wLocal.DeliverReassembledBeef)
-			if cfg.SubtreeDataVerifyMerkle {
-				buf.SetVerifyMerkle(true)
-			}
 			w.SetReassemblyBuffer(buf)
 			wg.Add(1)
 			go func(b *reassembly.Buffer) {

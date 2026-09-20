@@ -80,7 +80,6 @@
 //	-require-block-pow                 REQUIRE_BLOCK_POW                  true             Gate BRC-131 announces on header PoW; drop deprecated standalone BRC-133 coinbase
 //	-min-pow-bits                      MIN_POW_BITS                       0                PoW difficulty floor (compact nBits); 0 = self-consistency only
 //	-subtree-data-enabled              SUBTREE_DATA_ENABLED               false            Enable BRC-132 subtree data reception (join 0xFFFB group)
-//	-subtree-data-verify-merkle        SUBTREE_DATA_VERIFY_MERKLE         false            Optional post-reassembly Merkle root verification (expensive)
 //	-egress-dedup-cap                  EGRESS_DEDUP_CAP                   0                Egress dedup capacity (0 = disabled)
 //	-egress-dedup-ttl                  EGRESS_DEDUP_TTL                   2s               Egress dedup TTL (max age of a remembered key)
 //	-txid-dedup-addr                   TXID_DEDUP_ADDR                                     DEPRECATED: alias for -egress-dedup-redis-addr
@@ -312,8 +311,7 @@ type Config struct {
 	SenderExclude          []*net.IPNet // checked before include
 
 	// BRC-132 subtree data
-	SubtreeDataEnabled      bool // join GroupSubtreeDataAnnounce (0xFFFB)
-	SubtreeDataVerifyMerkle bool // optional post-reassembly Merkle root check
+	SubtreeDataEnabled bool // join GroupSubtreeDataAnnounce (0xFFFB)
 
 	// Runtime
 	NumWorkers        int
@@ -539,8 +537,6 @@ func Load() (*Config, error) {
 		"PoW difficulty floor for -require-block-pow in Bitcoin compact nBits form (e.g. 0x1d00ffff); 0 = header self-consistency only")
 	flag.BoolVar(&c.SubtreeDataEnabled, "subtree-data-enabled", envBool("SUBTREE_DATA_ENABLED", false),
 		"enable BRC-132 subtree data reception: join GroupSubtreeDataAnnounce (0xFFFB) group")
-	flag.BoolVar(&c.SubtreeDataVerifyMerkle, "subtree-data-verify-merkle", envBool("SUBTREE_DATA_VERIFY_MERKLE", false),
-		"optional post-reassembly Merkle root verification for BRC-132 frames (expensive at 1M nodes)")
 	flag.IntVar(&c.EgressDedupCap, "egress-dedup-cap", envInt("EGRESS_DEDUP_CAP", 0),
 		"egress duplicate-suppression capacity (0 = disabled); typical value: workers × tps × dedup-ttl")
 	flag.DurationVar(&c.EgressDedupTTL, "egress-dedup-ttl", envDuration("EGRESS_DEDUP_TTL", 2*time.Second),
