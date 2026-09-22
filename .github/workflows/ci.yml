@@ -18,7 +18,7 @@ jobs:
     name: ci (dagger)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: shard-listener
 
@@ -36,7 +36,7 @@ jobs:
             echo "Using shard-common@main (no matching feature branch)"
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: lightwebinc/shard-common
           ref: ${{ steps.common_ref.outputs.ref }}
@@ -57,7 +57,7 @@ jobs:
     name: e2e (host)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: shard-listener
 
@@ -85,13 +85,13 @@ jobs:
             echo "ref=main" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: lightwebinc/shard-common
           ref: ${{ steps.common_ref.outputs.ref }}
           path: shard-common
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: lightwebinc/shard-proxy
           ref: ${{ steps.proxy_ref.outputs.ref }}
@@ -155,7 +155,7 @@ jobs:
     name: cross-build (freebsd)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: shard-listener
 
@@ -171,7 +171,7 @@ jobs:
             echo "ref=main" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: lightwebinc/shard-common
           ref: ${{ steps.common_ref.outputs.ref }}
