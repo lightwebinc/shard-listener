@@ -592,7 +592,10 @@ func (b *Buffer) complete(s *slot) {
 		bf := &frame.BEEFFrame{
 			HashKey: s.hashKey,
 			SeqNum:  s.seqNum,
-			Payload: payload,
+			// Byte 7 of a V9 fragment carries DeliverCount; dropping it here
+			// would reassemble every fragmented record as single-topic.
+			DeliverCount: s.msgType,
+			Payload:      payload,
 		}
 		copy(bf.ContentID[:], s.txID[:])
 		copy(bf.TopicID[:], s.subtreeID[:])

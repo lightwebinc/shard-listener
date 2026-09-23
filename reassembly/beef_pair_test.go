@@ -66,3 +66,31 @@ func TestReassembly_NonBEEFKeyUnchanged(t *testing.T) {
 		t.Fatal("V9 must key on the (ContentID, TopicID) pair")
 	}
 }
+
+// TestReassembly_V9CarriesDeliverCount is the other half of the
+// silent-under-delivery regression (the proxy side is
+// TestFragmentBEEF_CarriesDeliverCount): byte 7 of a V9 fragment is the
+// original frame's DeliverCount, so a reassembled record must carry the same
+// deliverable prefix a whole frame would. Dropping it here makes every
+// fragmented record single-topic, with no drop counted anywhere.
+func TestReassembly_V9CarriesDeliverCount(t *testing.T) {
+	payload := []byte{0x01, 0x00, 0xBE, 0xEF, 0xAA, 0xBB, 0xCC, 0xDD}
+	first := sha256.Sum256(payload)
+	contentID := sha256.Sum256(first[:])
+
+	var got []frame.BEEFFrame
+	b := New(16, time.Second, true, nil)
+	b.SetBEEFCallback(func(_ []byte, bf *frame.BEEFFrame) { got = append(got, *bf) })
+
+	half := len(payload) / 2
+	for i, data := range [][]byte{payload[:half], payload[half:]} {
+		b.Observe(buildFragFrameWithVer(contentID, uint32(len(payload)), uint16(i), 2, data, frame.FrameVerV9, 3))
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("delivered %d objects, want 1", len(got))
+	}
+	if got[0].DeliverCount != 3 || got[0].Deliverable() != 3 {
+		t.Fatalf("reassembled DeliverCount = %d, want 3 (byte 7 dropped: every fragmented record would read single-topic)", got[0].DeliverCount)
+	}
+}
