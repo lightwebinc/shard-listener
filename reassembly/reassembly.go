@@ -391,7 +391,9 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 		// both the frags array (via FragTotal) and the final assembly copy.
 		maxObj := b.maxObject
 		if ff.OrigFrameVer == frame.FrameVerV9 && b.maxObjectV9 > 0 {
-			maxObj = b.maxObjectV9
+			// The BRC-149 bound is on the OBJECT; a V9 payload carrying the
+			// submission record verbatim may exceed it by the record envelope.
+			maxObj = b.maxObjectV9 + objfmt.BEEFRecordMaxEnvelope
 		}
 		if maxObj > 0 && int(ff.OrigPayloadLen) > maxObj {
 			if b.onOversize != nil {

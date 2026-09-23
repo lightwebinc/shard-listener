@@ -216,7 +216,13 @@ func (s *Sink) SetBEEFEngine(pe *shard.PlaneEngine) { s.beefEngine = pe }
 // SendBeef fans a BRC-148 BEEF object frame to the consumers whose group
 // election covers its domain-tagged group, then applies each consumer's
 // topic filter and BEEF-version (encoding capability) filter — group
-// membership → topic filter → version filter → delivery, per the spec.
+// membership → topic filter → version filter → delivery, per the spec. The
+// topic filter matches the consumer's election against the frame's
+// DELIVERABLE topics (the header TopicID and, when the payload is a
+// submission record, the next DeliverCount-1 names); a consumer electing
+// several of them receives the object ONCE, under the first that matched.
+// Names past the deliverable prefix are labels the consumer receives in the
+// payload and are never matched.
 // Own-traffic exclusion uses the BEEF flow identity: XXH64(consumer ingress
 // IP ∥ banded groupIdx ∥ zeros) — the 32-byte ingredient is ZERO (TopicID is
 // excluded from BEEF flow keys).
@@ -237,13 +243,30 @@ func (s *Sink) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 	allShards := s.allShards
 	s.mu.RUnlock()
 
+	// Resolved once per frame, not per consumer: the deliverable TopicIDs and
+	// the object the version filter reads (the payload may be the submission
+	// record, whose leading bytes are the record tag, not a BEEF marker).
+	deliverable := objfmt.BEEFDeliverableTopicIDs(bf)
+	object, _, splitErr := objfmt.SplitBEEFPayload(bf.Payload)
+	if splitErr != nil {
+		object = bf.Payload
+	}
+
 	var firstErr error
 	deliver := func(c *Consumer) {
 		// An empty election matches nothing. See Consumer.TopicSet: this is
 		// the whole point of the change, so an unsubscribed consumer receives
 		// and is billed for nothing rather than for everything.
+		matched := bf.TopicID
 		if !c.AllTopics {
-			if _, ok := c.TopicSet[bf.TopicID]; !ok {
+			found := false
+			for _, id := range deliverable {
+				if _, ok := c.TopicSet[id]; ok {
+					matched, found = id, true
+					break
+				}
+			}
+			if !found {
 				if c.BEEFObs != nil {
 					c.BEEFObs.ObserveBEEFFiltered(FilterTopic, len(raw))
 				}
@@ -251,7 +274,7 @@ func (s *Sink) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 			}
 		}
 		if len(c.BEEFVersions) > 0 {
-			w, ok := objfmt.BEEFVersionWord(bf.Payload)
+			w, ok := objfmt.BEEFVersionWord(object)
 			if _, accepted := c.BEEFVersions[w]; !ok || !accepted {
 				if c.BEEFObs != nil {
 					c.BEEFObs.ObserveBEEFFiltered(FilterVersion, len(raw))
@@ -265,7 +288,15 @@ func (s *Sink) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 			}
 			return
 		}
-		if err := c.Sink.SendBeef(raw, bf); err != nil && firstErr == nil && !egress.IsNotElected(err) {
+		// The delivery record names the topic THIS consumer matched, which
+		// need not be the shard-key topic in the header.
+		out := bf
+		if matched != bf.TopicID {
+			m := *bf
+			m.TopicID = matched
+			out = &m
+		}
+		if err := c.Sink.SendBeef(raw, out); err != nil && firstErr == nil && !egress.IsNotElected(err) {
 			firstErr = err
 		}
 	}

@@ -99,9 +99,19 @@ func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame) {
 	groupIdx := w.beefEngine.GroupIndex(&bf.TopicID)
 
 	// Worker-level election: topic filter then version (encoding
-	// capability) filter; absent filters admit everything (aggregator).
+	// capability) filter; absent filters admit everything (aggregator). The
+	// topic filter sees every DELIVERABLE topic of the frame (header TopicID
+	// plus the record's next DeliverCount-1 names); the version filter reads
+	// the object inside the payload, which may be a submission record.
 	if len(w.beefTopics) > 0 {
-		if _, ok := w.beefTopics[bf.TopicID]; !ok {
+		elected := false
+		for _, id := range objfmt.BEEFDeliverableTopicIDs(bf) {
+			if _, ok := w.beefTopics[id]; ok {
+				elected = true
+				break
+			}
+		}
+		if !elected {
 			if w.rec != nil {
 				w.rec.FrameDropped(w.id, "topic_filter")
 			}
@@ -109,7 +119,11 @@ func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame) {
 		}
 	}
 	if len(w.beefVersions) > 0 {
-		word, ok := objfmt.BEEFVersionWord(bf.Payload)
+		object, _, splitErr := objfmt.SplitBEEFPayload(bf.Payload)
+		if splitErr != nil {
+			object = bf.Payload
+		}
+		word, ok := objfmt.BEEFVersionWord(object)
 		if !ok {
 			if w.rec != nil {
 				w.rec.FrameDropped(w.id, "beef_version_filter")

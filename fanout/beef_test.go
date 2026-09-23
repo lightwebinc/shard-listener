@@ -199,3 +199,65 @@ func TestSendBeef_EmptyElectionDeliversNothing(t *testing.T) {
 		t.Errorf("explicit aggregator got %d, want 1: asking for the whole plane must still work", aggregator.beef)
 	}
 }
+
+// topicSink records the TopicID each delivery record would carry.
+type topicSink struct {
+	recSink
+	topics [][32]byte
+}
+
+func (r *topicSink) SendBeef(_ []byte, bf *frame.BEEFFrame) error {
+	r.beef++
+	r.topics = append(r.topics, bf.TopicID)
+	return nil
+}
+
+// TestSendBeef_RecordPayloadDeliverOnce covers the record-carrying frame: a
+// consumer electing several of the deliverable topics receives the object
+// ONCE under the first that matched; a consumer electing only a topic past
+// the deliverable prefix (a label) receives nothing; and the version filter
+// reads the object inside the record, not the record tag.
+func TestSendBeef_RecordPayloadDeliverOnce(t *testing.T) {
+	s, _ := beefSinkFixture(t)
+	names := []string{"tm_a", "tm_b", "tm_c", "tm_label"}
+	rec, err := objfmt.EncodeBEEFRecord(names, beefV1Obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := objfmt.BEEFMulticastRecord(rec, 3) // a, b, c deliverable; tm_label is a label
+	if err != nil {
+		t.Fatal(err)
+	}
+	bf, err := frame.DecodeBEEF(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	both := &topicSink{}      // elects b and c: once, under b
+	second := &topicSink{}    // elects c only: once, under c (not the header topic)
+	labelOnly := &topicSink{} // elects the label only: nothing
+	v1 := &topicSink{}        // aggregator with a v1 version filter: the record's object IS v1
+	labelObs := &filterRec{}
+	s.Apply([]*fanout.Consumer{
+		{ID: "both", Sink: both, TopicSet: map[[32]byte]struct{}{objfmt.TopicID("tm_b"): {}, objfmt.TopicID("tm_c"): {}}},
+		{ID: "second", Sink: second, TopicSet: map[[32]byte]struct{}{objfmt.TopicID("tm_c"): {}}},
+		{ID: "label", Sink: labelOnly, TopicSet: map[[32]byte]struct{}{objfmt.TopicID("tm_label"): {}}, BEEFObs: labelObs},
+		{ID: "v1", Sink: v1, AllTopics: true, BEEFVersions: map[uint32]struct{}{objfmt.BEEFMarkerV1: {}}},
+	})
+	if err := s.SendBeef(raw, bf); err != nil {
+		t.Fatalf("SendBeef: %v", err)
+	}
+
+	if both.beef != 1 || both.topics[0] != objfmt.TopicID("tm_b") {
+		t.Errorf("overlapping election: %d deliveries, want exactly 1 under tm_b", both.beef)
+	}
+	if second.beef != 1 || second.topics[0] != objfmt.TopicID("tm_c") {
+		t.Errorf("non-header deliverable: %d deliveries, want 1 under tm_c", second.beef)
+	}
+	if labelOnly.beef != 0 || labelObs.n != 1 || labelObs.reason != fanout.FilterTopic {
+		t.Errorf("label-only election: %d deliveries (obs %+v), want 0 and one topic filter", labelOnly.beef, *labelObs)
+	}
+	if v1.beef != 1 || v1.topics[0] != objfmt.TopicID("tm_a") {
+		t.Errorf("v1 aggregator: %d deliveries, want 1 under the header topic", v1.beef)
+	}
+}
