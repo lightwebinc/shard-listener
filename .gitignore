@@ -35,3 +35,6 @@ go.work.sum
 /shard-listener
 /sink-test-frames
 /build/
+
+# go build output of the ci/ module (run it with `go run .`)
+ci/ci
