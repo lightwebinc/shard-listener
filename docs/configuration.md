@@ -1147,7 +1147,7 @@ shard-listener \
 
 Every flag documented in this file is exposed under `.config` in the corresponding Helm chart's `values.yaml`. See the chart repository for installation snippets and the `values.schema.json` for validation rules.
 
-Chart: [`lightwebinc/shard-listener-helm`](https://github.com/lightwebinc/shard-listener-helm) — supports `workloadType=Deployment | DaemonSet`; hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication.
+Chart: [`charts/shard-listener`](https://github.com/lightwebinc/charts/tree/main/charts/shard-listener) — supports `workloadType=Deployment | DaemonSet`; hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication.
 
 ## BRC-148 BEEF object plane
 

@@ -134,7 +134,7 @@ Helm `values.yaml`, container environment variables, or CLI flags.
 
 A Kubernetes Helm chart is published from a dedicated chart repository:
 
-- Repository: [`lightwebinc/shard-listener-helm`](https://github.com/lightwebinc/shard-listener-helm)
+- Repository: [`charts/shard-listener`](https://github.com/lightwebinc/charts/tree/main/charts/shard-listener)
 - HTTPS:
   ```
   helm repo add bsl https://lightwebinc.github.io/shard-listener-helm
