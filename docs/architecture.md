@@ -1,5 +1,26 @@
 # shard-listener — Architecture
 
+## Features
+
+- **SO_REUSEPORT** multi-worker receive with kernel-level source affinity
+- **Shard filter** — subscribe to a subset of shard groups (empty = all)
+- **Subtree filter** — include/exclude by 32-byte SubtreeID (BRC-124/BRC-128 frames)
+- **BRC-127 subtree group announcements** — dynamic group-based filtering via multicast SubtreeGroupAnnounce datagrams with TTL eviction and sender ACLs
+- **Gap tracking** — per-flow HashKey/SeqNum monotonic counter gap detection (BRC-124/BRC-128)
+- **NACK dispatch** — 64-byte NACK datagrams (HashKey + StartSeq/EndSeq + SubtreeID) with 16-byte ACK/MISS response handling
+- **Beacon discovery** — dynamic retry endpoint registry via BRC-126 ADVERT beacons
+- **Receive-side retry tee** — `-retry-tee` mirrors every received data frame to a co-resident retry-endpoint's loopback tee ingest (source-preserving `teewire` envelope), so the cache learns remote-origin frames without a multicast join of its own (see [configuration.md](configuration.md))
+- **Tier escalation** — MISS → immediate advance to next endpoint; bare ACK → gap cancelled on trust; unicast-flagged ACK → wait for the data frame, escalate on timeout
+- **Semaphore-bounded dispatch** — concurrent NACK goroutines with configurable limit
+- **Egress UDP or TCP** — strip-header (payload-only) by default, since a downstream node reads a raw BSV tx, not a multicast frame; disable for frame-aware downstreams (domain bridging)
+- **Multicast egress** — optional domain bridging; re-emits filtered frames onto a separate multicast address space with configurable scope, interface, port, and hop limit
+- **BRC-135 header egress** — optional; re-emits the 80-byte block header carried in BRC-131 BlockAnnounce frames as a 172-byte BRC-135 frame on a dedicated egress group (`0xFFFA`) for SPV-style consumers
+- **Per-deployment egress TxID dedup** — optional shared store (Redis SETNX) to suppress duplicate egress when multiple listeners cover the same shard subset; honours optional ingress courtesy marks from `shard-proxy`
+- **Prometheus + OTLP metrics**, `/healthz`, `/readyz`
+- **Graceful shutdown** with configurable drain window
+- **SSM (RFC 4607) opt-in** — `-source-mode=ssm` branches every join site (data plane, beacon, subtree-announce) between `IPV6_JOIN_GROUP` and `MCAST_JOIN_SOURCE_GROUP` via `shard-common/netjoin`; per-control-group bootstrap source lists resolve DNS names or IPv6 literals through `shard-common/bootstrap.Resolver` (fail-closed startup, last-good retention on refresh failures); ASM is the default. See [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm).
+- **Receiver/delivery role split** — `-mode collapsed|receiver|delivery` (default `collapsed`). `collapsed`/`receiver` join fabric `(S,G)` and run gap/NACK; `delivery` does neither — it reads raw frames off a **unicast** socket (forwarded by a receiver) and runs only the egress fan-out, so decode/demux/gap recovery happen once at the receiver and never per consumer. The wire format between the two is the stamped frame itself (envelope-preserving), so the split needs no new protocol; a downstream build supplies the multi-consumer fan-out sink for delivery.
+
 ## Overview
 
 `shard-listener` sits downstream of `shard-proxy` in the BSV
@@ -394,8 +415,7 @@ The listener forwards the raw payload without parsing. `MsgType` `0x01` = hashes
 (32 bytes per node), `0x02` = full-nodes (48 bytes per node); both are forwarded verbatim.
 
 **Reassembly:** fragmented BRC-132 payloads arrive as BRC-130 fragments with `OrigFrameVer=0x05`.
-The reassembly buffer's `SubtreeDataCallback` is called on completion. Optional post-reassembly
-Merkle root verification is applied if `-subtree-data-verify-merkle=true`. The completed payload
+The reassembly buffer's `SubtreeDataCallback` is called on completion. The completed payload
 is delivered via `DeliverReassembledSubtreeData`, which re-encodes it via `frame.EncodeSubtreeData`
 before forwarding.
 
@@ -476,7 +496,7 @@ Four callback types are registered on the reassembly buffer (`reassembly.Buffer`
 |---|---|---|---|
 | `Callback` | V2 (BRC-124/BRC-128) | Fragment set complete | BRC-124/128 egress path; optional SHA256d verification |
 | `BlockCallback` | V4 (BRC-131) | Fragment set complete | `DeliverReassembledBlock` |
-| `SubtreeDataCallback` | V5 (BRC-132) | Fragment set complete | Merkle verify if enabled → `DeliverReassembledSubtreeData` |
+| `SubtreeDataCallback` | V5 (BRC-132) | Fragment set complete | `DeliverReassembledSubtreeData` |
 | `BEEFCallback` | V9 (BRC-149 BEEF) | Fragment set complete | Registered via `SetBEEFCallback`; BEEF egress path — ContentID is the SHA-256d verification hash |
 
 ## Egress deduplication

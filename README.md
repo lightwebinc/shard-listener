@@ -18,7 +18,7 @@ tier-based escalation.
 
 ```
 FF05::B:<shard>:9001 ──multicast──►  shard-listener  ──UDP/TCP──►  downstream :9100
-[Control Groups]    ──multicast──►  (BRC-127 SubtreeGroupAnnounce) └─multicast►  FF02::B:<shard>
+[Control Groups]    ──multicast──►  (BRC-127 SubtreeGroupAnnounce) └─multicast►  FF05::B:<shard>
                                            │  shard + subtree filter
                                      gap detected
                                            │
@@ -26,26 +26,7 @@ FF05::B:<shard>:9001 ──multicast──►  shard-listener  ──UDP/TCP─�
                                            ◄─── ACK / MISS
 ```
 
-## Features
-
-- **SO_REUSEPORT** multi-worker receive with kernel-level source affinity
-- **Shard filter** — subscribe to a subset of shard groups (empty = all)
-- **Subtree filter** — include/exclude by 32-byte SubtreeID (BRC-124/BRC-128 frames)
-- **BRC-127 subtree group announcements** — dynamic group-based filtering via multicast SubtreeGroupAnnounce datagrams with TTL eviction and sender ACLs
-- **Gap tracking** — per-flow HashKey/SeqNum monotonic counter gap detection (BRC-124/BRC-128)
-- **NACK dispatch** — 64-byte NACK datagrams (HashKey + StartSeq/EndSeq + SubtreeID) with 16-byte ACK/MISS response handling
-- **Beacon discovery** — dynamic retry endpoint registry via BRC-126 ADVERT beacons
-- **Receive-side retry tee** — `-retry-tee` mirrors every received data frame to a co-resident retry-endpoint's loopback tee ingest (source-preserving `teewire` envelope), so the cache learns remote-origin frames without a multicast join of its own (see [docs/configuration.md](docs/configuration.md))
-- **Tier escalation** — MISS → immediate advance to next endpoint; bare ACK → gap cancelled on trust; unicast-flagged ACK → wait for the data frame, escalate on timeout
-- **Semaphore-bounded dispatch** — concurrent NACK goroutines with configurable limit
-- **Egress UDP or TCP** — strip-header (payload-only) by default, since a downstream node reads a raw BSV tx, not a multicast frame; disable for frame-aware downstreams (domain bridging)
-- **Multicast egress** — optional domain bridging; re-emits filtered frames onto a separate multicast address space with configurable scope, interface, port, and hop limit
-- **BRC-135 header egress** — optional; re-emits the 80-byte block header carried in BRC-131 BlockAnnounce frames as a 172-byte BRC-135 frame on a dedicated egress group (`0xFFFA`) for SPV-style consumers
-- **Per-deployment egress TxID dedup** — optional shared store (Redis SETNX) to suppress duplicate egress when multiple listeners cover the same shard subset; honours optional ingress courtesy marks from `shard-proxy`
-- **Prometheus + OTLP metrics**, `/healthz`, `/readyz`
-- **Graceful shutdown** with configurable drain window
-- **SSM (RFC 4607) opt-in** — `-source-mode=ssm` branches every join site (data plane, beacon, subtree-announce) between `IPV6_JOIN_GROUP` and `MCAST_JOIN_SOURCE_GROUP` via `shard-common/netjoin`; per-control-group bootstrap source lists resolve DNS names or IPv6 literals through `shard-common/bootstrap.Resolver` (fail-closed startup, last-good retention on refresh failures); ASM is the default. See [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm).
-- **Receiver/delivery role split** — `-mode collapsed|receiver|delivery` (default `collapsed`). `collapsed`/`receiver` join fabric `(S,G)` and run gap/NACK; `delivery` does neither — it reads raw frames off a **unicast** socket (forwarded by a receiver) and runs only the egress fan-out, so decode/demux/gap recovery happen once at the receiver and never per consumer. The wire format between the two is the stamped frame itself (envelope-preserving), so the split needs no new protocol; a downstream build supplies the multi-consumer fan-out sink for delivery.
+Feature list: [docs/architecture.md#features](docs/architecture.md#features).
 
 ## Quick start
 
@@ -76,43 +57,16 @@ shard-listener \
 ```sh
 make build       # -> build/shard-listener
 make test        # unit tests (race detector)
-make test-e2e    # end-to-end tests (see Testing below)
+make test-e2e    # end-to-end tests (see docs/testing.md)
 make docker      # build Docker image
-```
-
-## Testing
-
-Unit tests cover the filter, NACK tracker, egress, and frame-decode paths:
-
-```sh
-make test
-```
-
-The E2E suite (`test/run-e2e.sh`) starts a listener instance, injects frames
-as unicast UDP directly to the listener's bound port, and verifies delivery via
-a `sink-test-frames` UDP sink. Four scenarios are exercised sequentially:
-
-1. **Basic delivery** — all frames forwarded; verified by sink count and
-   `bsl_frames_forwarded_total` Prometheus metric.
-2. **Shard filter** — `-shard-include 0` passes only the group-0 frame.
-3. **Strip-header** — on by default, forwards raw payload bytes (the BSV tx);
-   `-strip-header=false` forwards the full frame. Sink counts raw datagrams.
-4. **BRC-130 fragmentation** — fragmented payloads are reassembled and
-   delivered.
-
-The suite requires `shard-proxy` checked out at `../shard-proxy`
-(for `send-test-frames`). `make test-e2e` builds all binaries fresh before
-running:
-
-```sh
-make test-e2e
 ```
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
-- [Configuration reference](docs/configuration.md) — every flag, plus a
-  metrics reference covering all 49 `bsl_` series
+- [Configuration reference](docs/configuration.md) — every flag, plus the
+  `bsl_` metrics reference
+- [Testing](docs/testing.md)
 - [Unified Component Logging](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md) — `-log-format json` structured logs, `host.inventory`, `-trace-sampling`, runtime `/loglevel`
 - [Protocol specification](https://github.com/lightwebinc/shard-common/blob/main/docs/protocol.md)
 - [BRC-126 (Retransmission Protocol)](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-126-retransmission-protocol.md)
@@ -120,9 +74,9 @@ make test-e2e
 ## Dependencies
 
 - [`github.com/lightwebinc/shard-common`](https://github.com/lightwebinc/shard-common) — `frame`, `shard` packages
-- Prometheus client + OpenTelemetry SDK (same versions as proxy)
-- `golang.org/x/net/ipv6` — multicast group join
-- `golang.org/x/sys/unix` — `SO_REUSEPORT`
+- Prometheus client (`client_golang`, `common`) + OpenTelemetry SDK, OTLP gRPC and Prometheus exporters
+- `golang.org/x/sys` — `SO_REUSEPORT`, multicast socket options
+- `github.com/alicebob/miniredis/v2` — in-process Redis for egress dedup tests
 
 ## Container image
 
@@ -135,14 +89,13 @@ Helm `values.yaml`, container environment variables, or CLI flags.
 A Kubernetes Helm chart is published from a dedicated chart repository:
 
 - Repository: [`charts/shard-listener`](https://github.com/lightwebinc/charts/tree/main/charts/shard-listener)
-- HTTPS:
-  ```
-  helm repo add bsl https://lightwebinc.github.io/shard-listener-helm
-  helm install listener bsl/shard-listener
-  ```
-- OCI: `helm install listener oci://ghcr.io/lightwebinc/charts/shard-listener` (add `--version` to pin a released chart)
+- Install: `helm install shard-listener oci://ghcr.io/lightwebinc/charts/shard-listener` (add `--version` to pin a released chart)
 
 Supports `workloadType=Deployment` (default) and `workloadType=DaemonSet`. Every flag accepted by this binary is exposed under `.config` in the chart's `values.yaml`. The chart hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication. See the chart README for the full reference.
+
+## Releases
+
+Releases and release notes live on [GitHub Releases](https://github.com/lightwebinc/shard-listener/releases); there is no CHANGELOG.
 
 ## License
 

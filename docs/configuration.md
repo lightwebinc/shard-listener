@@ -362,7 +362,7 @@ Scope of the mirror (deliberate, all four matter for cache correctness):
   BRC-135 header frames are outside the primary NACK path.
 - **Never from `Reinject`** — a NACK-recovered frame came *from* a retry cache
   and is not re-mirrored.
-- **Never from the local-mirror ingest** (`-local-mirror-port`) — those are
+- **Never from the local-mirror ingest** (`Worker.RunUnicastIngestOn`, used by downstream builds) — those are
   own-origin frames the proxy's tee already mirrors.
 
 Failure posture: dial errors **fail startup closed** (a tee-only cache
