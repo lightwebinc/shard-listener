@@ -3,7 +3,7 @@ module github.com/lightwebinc/shard-listener
 go 1.26.2
 
 require (
-	github.com/alicebob/miniredis/v2 v2.39.0
+	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/lightwebinc/shard-common v0.22.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/common v0.72.0
