@@ -74,7 +74,8 @@ func startIngestWorker(t *testing.T, ingestPort int, teeAddr string, run func(*W
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-errCh:
+		case err := <-errCh:
+			_ = err // the loop's exit error after cancel is expected
 		case <-time.After(2 * time.Second):
 			t.Error("ingest loop did not exit on cancel")
 		}

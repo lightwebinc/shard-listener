@@ -4,10 +4,15 @@
 // # Worker model
 //
 // Each Worker binds one UDP socket with SO_REUSEPORT on the configured port
-// and joins all configured multicast groups on the configured interface. The
-// kernel distributes incoming datagrams across all SO_REUSEPORT workers; the
-// same source will consistently land on the same worker, giving CPU-local
-// per-sender gap tracking with no lock contention between workers.
+// and joins all configured multicast groups on the configured interface.
+//
+// The kernel load-balances UNICAST datagrams across SO_REUSEPORT sockets (the
+// same source consistently lands on the same worker), but it does NOT balance
+// multicast: every socket that joined a group receives its own copy of every
+// datagram (verified on Linux 7.0, two sockets each received all 200 of 200).
+// With more than one worker on the multicast-receive path every frame is
+// processed and forwarded once per worker. Run one worker there; see
+// docs/configuration.md (-workers).
 //
 // # Hot path per frame
 //

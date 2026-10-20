@@ -191,7 +191,9 @@ func TestRunUnicastIngest_DeliveryForwardsToSink(t *testing.T) {
 				t.Fatalf("got %d bytes want %d", len(got), len(raw))
 			}
 			cancel()
-			<-errCh
+			if err := <-errCh; err != nil {
+				t.Logf("loop exit after cancel: %v", err) // expected; not a failure
+			}
 			return
 		case <-time.After(100 * time.Millisecond):
 		case <-deadline:
