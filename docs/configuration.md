@@ -404,6 +404,28 @@ Maximum lifetime of a gap entry before it is evicted regardless of retry
 count. Set to approximately one Bitcoin block interval to avoid accumulating
 stale state across block boundaries.
 
+### `-reassembly-ttl` / `REASSEMBLY_TTL` (default: `10s`)
+
+Time an incomplete BRC-130 reassembly slot waits before it asks for its
+missing fragments (the tail case: a lost final fragment has no successor to
+expose it as a gap). With NACK on, the slot is not evicted at this point while
+repair of any missing fragment is still in progress; see
+`-reassembly-max-age`. With NACK off, the slot is abandoned at its TTL.
+
+### `-reassembly-max-age` / `REASSEMBLY_MAX_AGE` (default: `2m`)
+
+Cap on how long a reassembly slot is held past its TTL while the NACK tracker
+still holds a pending gap for one of its missing fragments. A large object is
+only as fast as the repair of its slowest fragment: jitter, then up to
+`-nack-max-retries` backoff rounds from `-nack-backoff-base` to
+`-nack-backoff-max`, each a round trip to whichever retry tier answers, plus
+any THROTTLED holds. A fixed slot TTL shorter than that ladder abandons
+objects whose every fragment is eventually repaired, more often the farther
+away the repair is served from. Size this above the ladder at the slowest
+repair round trip. A slot is abandoned earlier when the tracker gives up on a
+fragment (`reason="expired"`), and at this cap with repair still pending
+(`reason="repair_timeout"`); see `bsl_reassembly_abandoned_reason_total`.
+
 ### `-nack-max-flows` / `NACK_MAX_FLOWS` (default: `100000`)
 
 Cap on tracked per-source flows (flood guard). New sources past the cap still
@@ -1064,6 +1086,9 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_reassembly_started_total` | — | BRC-130 reassembly slots opened (first fragment of a TxID received) |
 | `bsl_reassembly_completed_total` | — | BRC-130 reassemblies that produced a complete payload |
 | `bsl_reassembly_abandoned_total` | — | BRC-130 reassembly slots evicted before completion (TTL expired or buffer full) |
+| `bsl_reassembly_abandoned_reason_total` | `reason` | Abandoned slots by reason: `expired` (TTL reached with no repair of the missing fragments in progress, after the repair path gave up: real loss), `repair_timeout` (`-reassembly-max-age` reached while repair was still in progress: repair timing, not loss), `capacity` (slot cap). Sums to `bsl_reassembly_abandoned_total` |
+| `bsl_reassembly_repair_wait_total` | — | Slots held past `-reassembly-ttl` because repair of their missing fragments was in progress |
+| `bsl_reassembly_repair_wait_completed_total` | — | Slots held past their TTL for repair that then completed: objects a fixed TTL would have abandoned |
 | `bsl_reassembly_hash_mismatch_total` | — | Completed reassemblies dropped because SHA256d(payload) != TxID |
 | `bsl_reassembly_late_fragments_total` | — | Fragments dropped because their object already completed (multicast repair copies); a rate approaching bsl_reassembly_completed_total means repair is serving the group far more than the losses justify |
 | `bsl_reassembly_bad_fragment_total` | — | Objects dropped because a fragment's data length is inconsistent with `OrigPayloadLen`/`FragTotal` — it cannot sit at the offset BRC-130 implies (`FragIndex × fragSize`). Non-zero means a sender or path is emitting fragments that cannot be reassembled: corruption, a mis-sized fragmenter, or injection |

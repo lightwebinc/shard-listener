@@ -946,3 +946,20 @@ func TestWireLowSeqStillResetsFlow(t *testing.T) {
 		t.Fatalf("after restart+1: PendingGaps = %d, want 0", g)
 	}
 }
+
+// TestPending reports a gap only while it is pending on that flow.
+func TestPending(t *testing.T) {
+	tr := newTestTracker()
+	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil) // gap at 2
+	if !tr.Pending(flowA, []uint64{9, 2}) {
+		t.Fatal("pending gap 2 not reported")
+	}
+	if tr.Pending(flowA, []uint64{1, 3}) || tr.Pending(flowA+1, []uint64{2}) {
+		t.Fatal("received SeqNums or another flow reported pending")
+	}
+	tr.Fill(flowA, 2)
+	if tr.Pending(flowA, []uint64{2}) {
+		t.Fatal("filled gap still reported pending")
+	}
+}

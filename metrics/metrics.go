@@ -78,6 +78,9 @@ type Recorder struct {
 	frameReassemblyLateFragment metric.Int64Counter
 	frameReassemblyBadFragment  metric.Int64Counter
 	frameReassemblyOversize     metric.Int64Counter
+	reassemblyAbandonedReason   metric.Int64Counter
+	reassemblyRepairWait        metric.Int64Counter
+	reassemblyRepairWaitDone    metric.Int64Counter
 	txDedupErrors               metric.Int64Counter // Redis errors during TxID claim
 
 	// Egress / ingress TxID dedup outcomes (txidset.Store callbacks)
@@ -308,6 +311,18 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}
 	if r.frameReassemblyOversize, err = meter.Int64Counter("bsl_reassembly_oversize_fragments_total",
 		metric.WithDescription("Fragments dropped because their declared object length exceeds the reassembly bound (-beef-max-object-bytes for BEEF); non-zero means an ingress admits objects this listener cannot reassemble")); err != nil {
+		return nil, err
+	}
+	if r.reassemblyAbandonedReason, err = meter.Int64Counter("bsl_reassembly_abandoned_reason_total",
+		metric.WithDescription("BRC-130 reassembly slots evicted before completion, by reason: expired (TTL reached with no repair of the missing fragments in progress: real loss), repair_timeout (maximum age reached while repair was still in progress: repair timing, not loss), capacity (slot cap)")); err != nil {
+		return nil, err
+	}
+	if r.reassemblyRepairWait, err = meter.Int64Counter("bsl_reassembly_repair_wait_total",
+		metric.WithDescription("BRC-130 reassembly slots held past their TTL because repair of their missing fragments was in progress")); err != nil {
+		return nil, err
+	}
+	if r.reassemblyRepairWaitDone, err = meter.Int64Counter("bsl_reassembly_repair_wait_completed_total",
+		metric.WithDescription("BRC-130 reassembly slots held past their TTL for repair that then completed: objects a fixed TTL would have abandoned")); err != nil {
 		return nil, err
 	}
 	if r.txDedupErrors, err = meter.Int64Counter("bsl_txid_dedup_errors_total",
@@ -613,6 +628,26 @@ func (r *Recorder) ReassemblyBadFragment() {
 // to declares a length above the reassembly bound.
 func (r *Recorder) ReassemblyOversize() {
 	r.frameReassemblyOversize.Add(context.Background(), 1)
+}
+
+// ReassemblyAbandonedReason records an abandoned reassembly slot with its
+// reason (reassembly.AbandonExpired, AbandonRepairTimeout, AbandonCapacity).
+// It is recorded beside ReassemblyAbandoned, which keeps its unlabelled total.
+func (r *Recorder) ReassemblyAbandonedReason(reason string) {
+	r.reassemblyAbandonedReason.Add(context.Background(), 1,
+		metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+// ReassemblyRepairWait records a slot first held past its TTL because repair
+// of its missing fragments was in progress.
+func (r *Recorder) ReassemblyRepairWait() {
+	r.reassemblyRepairWait.Add(context.Background(), 1)
+}
+
+// ReassemblyRepairWaitCompleted records a slot held past its TTL for repair
+// that then completed.
+func (r *Recorder) ReassemblyRepairWaitCompleted() {
+	r.reassemblyRepairWaitDone.Add(context.Background(), 1)
 }
 
 // FrameDeduped records a BRC-124/BRC-128 retransmit suppressed before egress

@@ -666,13 +666,16 @@ func run() error {
 			wLocal := w
 			buf := reassembly.New(
 				reassembly.DefaultMaxSlots,
-				reassembly.DefaultTTL,
+				cfg.ReassemblyTTL,
 				cfg.VerifyPayloadHash,
 				wLocal.DeliverReassembled,
 			)
 			buf.SetMaxObjectBytesV9(cfg.BEEFMaxObjectBytes)
 			buf.SetStartedHook(rec.ReassemblyStarted)
 			buf.SetAbandonedHook(rec.ReassemblyAbandoned)
+			buf.SetAbandonedReasonHook(rec.ReassemblyAbandonedReason)
+			buf.SetExtendedHook(rec.ReassemblyRepairWait)
+			buf.SetLateCompleteHook(rec.ReassemblyRepairWaitCompleted)
 			// Tail loss on the object plane: a slot that expires holding SOME
 			// fragments proves the object was in flight, so the fragments it never
 			// got are real losses. Fragments are individually cached and
@@ -682,6 +685,11 @@ func run() error {
 				buf.SetIncompleteHook(func(hashKey uint64, groupIdx uint32, subtreeID [32]byte, missing []uint64) {
 					tracker.RequestGapsFrom(wLocal.ID(), hashKey, groupIdx, subtreeID, missing)
 				})
+				// Hold a slot past its TTL while its missing fragments are still
+				// in repair: on a distant or rate-limited repair path the NACK
+				// ladder outlasts a fixed TTL, and an object whose every fragment
+				// is repaired would otherwise be abandoned first.
+				buf.SetRepairWait(tracker.Pending, cfg.ReassemblyMaxAge)
 			}
 			buf.SetHashMismatchHook(rec.ReassemblyHashMismatch)
 			buf.SetLateFragmentHook(rec.ReassemblyLateFragment)

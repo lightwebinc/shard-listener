@@ -1297,6 +1297,25 @@ func (t *Tracker) PendingGaps() int {
 	return total
 }
 
+// Pending reports whether any of seqs is still a pending gap on the flow
+// hashKey: detected or requested, and neither recovered nor given up. The
+// reassembly buffer asks this to keep an object's slot open while its missing
+// fragments are still being repaired.
+func (t *Tracker) Pending(hashKey uint64, seqs []uint64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	fs, ok := t.flows[hashKey]
+	if !ok {
+		return false
+	}
+	for _, seq := range seqs {
+		if _, ok := fs.pending[seq]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // ActiveFlows returns the number of active flows being tracked.
 func (t *Tracker) ActiveFlows() int {
 	t.mu.Lock()

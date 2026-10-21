@@ -48,6 +48,8 @@
 //	-nack-backoff-max                  NACK_BACKOFF_MAX                   5s               Cap on exponential backoff per gap
 //	-nack-max-retries                  NACK_MAX_RETRIES                   5                Max failed recovery rounds per gap (tier hops are free)
 //	-nack-gap-ttl                      NACK_GAP_TTL                       10m              Max gap state lifetime
+//	-reassembly-ttl                    REASSEMBLY_TTL                     10s              BRC-130 slot TTL before its missing fragments are requested
+//	-reassembly-max-age                REASSEMBLY_MAX_AGE                 2m               Cap on a slot held past its TTL while repair is in progress
 //	-nack-tail-probe                   NACK_TAIL_PROBE                    true             Speculative NACK of the next SeqNum on an idle flow
 //	-nack-tail-probe-idle-factor       NACK_TAIL_PROBE_IDLE_FACTOR        4.0              Idle multiple of smoothed inter-arrival before probing
 //	-nack-tail-probe-min-idle          NACK_TAIL_PROBE_MIN_IDLE           500ms            Floor on the tail-probe idle threshold
@@ -225,6 +227,11 @@ type Config struct {
 	NACKMaxRetries  int
 	NACKGapTTL      time.Duration
 	NACKMaxFlows    int
+	// BRC-130 reassembly timing. A slot that reaches ReassemblyTTL is held
+	// while repair of its missing fragments is in progress, up to
+	// ReassemblyMaxAge from its opening.
+	ReassemblyTTL    time.Duration
+	ReassemblyMaxAge time.Duration
 	// BRC-126 tail probe: closes the tail-loss blind spot without a protocol
 	// addition by reusing the existing MISS response.
 	NACKTailProbe           bool
@@ -468,6 +475,10 @@ func Load() (*Config, error) {
 		"max failed recovery rounds per gap before declaring unrecoverable (tier-escalation hops are free)")
 	flag.DurationVar(&c.NACKGapTTL, "nack-gap-ttl", envDuration("NACK_GAP_TTL", 10*time.Minute),
 		"max time to hold a gap entry before evicting (~Bitcoin block interval)")
+	flag.DurationVar(&c.ReassemblyTTL, "reassembly-ttl", envDuration("REASSEMBLY_TTL", 10*time.Second),
+		"BRC-130: time an incomplete reassembly slot waits before asking for its missing fragments; with NACK on, the slot is then held while that repair is in progress (see -reassembly-max-age)")
+	flag.DurationVar(&c.ReassemblyMaxAge, "reassembly-max-age", envDuration("REASSEMBLY_MAX_AGE", 2*time.Minute),
+		"BRC-130: cap on how long a reassembly slot is held past its TTL while repair of its missing fragments is in progress; size it above the NACK ladder at the slowest repair round trip")
 	flag.BoolVar(&c.NACKTailProbe, "nack-tail-probe", envBool("NACK_TAIL_PROBE", true),
 		"BRC-126: speculatively NACK the next expected SeqNum on a flow that has gone quiet. Gap detection is otherwise inferential (frame N is only known lost when N+1 arrives), so the last frames before a sender idles are invisible. Uses the existing MISS response — no protocol change")
 	flag.Float64Var(&c.NACKTailProbeIdleFactor, "nack-tail-probe-idle-factor", envFloat("NACK_TAIL_PROBE_IDLE_FACTOR", 4.0),

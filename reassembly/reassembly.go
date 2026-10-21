@@ -20,6 +20,18 @@
 // Slots that never complete are evicted after TTL. The oldest slot is evicted
 // when the slot limit is reached.
 //
+// # Repair wait
+//
+// A fragmented object is only as fast as the repair of its slowest missing
+// fragment, and that repair runs on the NACK ladder (jitter, then backoff
+// rounds, each costing a round trip to whichever retry tier answers, plus any
+// THROTTLED holds). On a distant or rate-limited repair path the ladder can
+// outlast a fixed TTL, so an object whose every fragment is eventually
+// repaired would still be abandoned. With [Buffer.SetRepairWait] installed, a
+// slot that reaches its TTL is kept while repair of its missing fragments is
+// still in progress, bounded by a maximum age. Repair is never bypassed: the
+// slot waits for it.
+//
 // # Thread safety
 //
 // [Buffer] is safe for concurrent use from multiple goroutines (one per
@@ -73,6 +85,15 @@ const (
 	// DefaultTTL is the default time before an incomplete slot is abandoned.
 	DefaultTTL = 10 * time.Second
 
+	// DefaultMaxAge bounds how long a slot may be held past its TTL while
+	// repair of its missing fragments is still in progress (see
+	// [Buffer.SetRepairWait]). Two minutes covers the default NACK ladder
+	// (8 rounds, 400 ms base, 5 s cap: about 30 s of backoff plus response
+	// timeouts) at a transcontinental repair round trip with headroom for
+	// THROTTLED holds, and outlives the retry cache's 60 s resend window, past
+	// which no repair can arrive anyway.
+	DefaultMaxAge = 2 * time.Minute
+
 	// DefaultCompletionTTL is how long a completed slot key is remembered so
 	// late copies of its fragments cannot reopen it. It is deliberately NOT the
 	// slot TTL: the slot TTL bounds how long THIS listener waits for fragments,
@@ -125,6 +146,19 @@ type SubtreeDataCallback func(payload []byte, sf *frame.SubtreeDataFrame)
 // TopicID from the fragment SubtreeID slot.
 type BEEFCallback func(payload []byte, bf *frame.BEEFFrame)
 
+// Abandonment reasons reported through [Buffer.SetAbandonedReasonHook].
+const (
+	// AbandonExpired: the slot reached its TTL with no repair of its missing
+	// fragments in progress. With a repair wait installed, this is the outcome
+	// after the repair path itself gave up: real loss.
+	AbandonExpired = "expired"
+	// AbandonRepairTimeout: the slot reached its maximum age while repair of
+	// its missing fragments was still in progress. Repair timing, not loss.
+	AbandonRepairTimeout = "repair_timeout"
+	// AbandonCapacity: the slot was evicted to make room at the slot cap.
+	AbandonCapacity = "capacity"
+)
+
 // Buffer holds in-progress BRC-130 reassembly slots.
 type Buffer struct {
 	mu                sync.Mutex
@@ -138,6 +172,13 @@ type Buffer struct {
 	onCompleteSubtree SubtreeDataCallback // V5 (FrameVerV5) completion
 	onCompleteBEEF    BEEFCallback        // V9 (FrameVerV9) completion
 	onAbandoned       func()              // metrics hook: one call per evicted slot
+	onAbandonedReason func(reason string) // metrics hook: one call per evicted slot, with its reason
+	// repairPending reports whether repair of any of a slot's missing SeqNums is
+	// still in progress (nil = no repair wait: a slot is evicted at its TTL).
+	repairPending func(hashKey uint64, missing []uint64) bool
+	maxAge        time.Duration // cap on a slot's lifetime under repair wait
+	onExtended    func()        // metrics hook: a slot first held past its TTL for repair
+	onLateDone    func()        // metrics hook: a slot held past its TTL that then completed
 	// onIncomplete is called for a slot evicted with SOME fragments present,
 	// carrying the flow key and the SeqNums that never arrived. It is what turns
 	// an abandoned object into a recovery request: losing one trailing fragment
@@ -226,8 +267,14 @@ type slot struct {
 	// groupIdx is the flow's shard group, supplied by the caller (this package
 	// deliberately knows nothing about shard group semantics). Needed so a recovery
 	// request for missing fragments names the correct flow.
-	groupIdx     uint32
-	deadline     time.Time
+	groupIdx uint32
+	deadline time.Time
+	born     time.Time // when the slot opened; bounds the repair wait
+	// requested is set once the slot has asked for its missing fragments
+	// (first TTL expiry under a repair wait).
+	requested bool
+	// extended is set once the slot has been held past its TTL for repair.
+	extended     bool
 	origFrameVer byte // from the first fragment received (0/2=V2, 4=V4, 5=V5)
 	msgType      byte // frame-type-specific message type preserved from byte 7
 }
@@ -256,8 +303,51 @@ func New(maxSlots int, ttl time.Duration, verifyHash bool, cb Callback) *Buffer 
 		verifyHash:    verifyHash,
 		onComplete:    cb,
 		maxObject:     DefaultMaxObjectBytes,
+		maxAge:        DefaultMaxAge,
 	}
 }
+
+// SetRepairWait keeps a slot past its TTL while repair of its missing
+// fragments is in progress, instead of evicting it on age alone.
+//
+// pending reports whether any of the given SeqNums of the flow hashKey is
+// still being repaired (for the listener, the NACK tracker's pending set). At
+// TTL expiry a slot is handled as follows:
+//
+//   - on the first expiry the slot asks for every missing fragment through the
+//     incomplete hook, exactly as without a repair wait (this is how a lost
+//     tail, which no successor frame exposes, enters repair);
+//   - repair pending: the deadline moves out by one TTL, never past maxAge
+//     from the slot's opening;
+//   - nothing pending: the repair path has given up on a fragment, so the slot
+//     is abandoned ([AbandonExpired]);
+//   - maxAge reached with repair still pending: abandoned
+//     ([AbandonRepairTimeout]).
+//
+// maxAge <= 0 keeps [DefaultMaxAge]. pending is called with the Buffer's lock
+// held and must not call back into the Buffer.
+func (b *Buffer) SetRepairWait(pending func(hashKey uint64, missing []uint64) bool, maxAge time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.repairPending = pending
+	if maxAge > 0 {
+		b.maxAge = maxAge
+	}
+}
+
+// SetAbandonedReasonHook sets a metrics hook called once per abandoned slot
+// with its reason ([AbandonExpired], [AbandonRepairTimeout],
+// [AbandonCapacity]). It lets an alert tell repair timing apart from loss.
+func (b *Buffer) SetAbandonedReasonHook(fn func(reason string)) { b.onAbandonedReason = fn }
+
+// SetExtendedHook sets a metrics hook called once per slot the first time it is
+// held past its TTL because repair of its missing fragments is in progress.
+func (b *Buffer) SetExtendedHook(fn func()) { b.onExtended = fn }
+
+// SetLateCompleteHook sets a metrics hook called when a slot that was held
+// past its TTL for repair then completes: an object the fixed TTL would have
+// abandoned.
+func (b *Buffer) SetLateCompleteHook(fn func()) { b.onLateDone = fn }
 
 // SetCompletionTTL overrides how long a completed slot key is remembered
 // (0 keeps [DefaultCompletionTTL]). Shortening it below a deployment's recovery
@@ -419,6 +509,7 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 			fragSeq:        make([]uint64, ff.FragTotal),
 			groupIdx:       groupIdxOf(b.groupIdxFn, ff),
 			deadline:       now.Add(b.ttl),
+			born:           now,
 			origFrameVer:   ff.OrigFrameVer,
 			msgType:        ff.MsgType,
 		}
@@ -534,6 +625,9 @@ func (b *Buffer) complete(s *slot) {
 	// already ignores duplicate fragments, so remembering the failed case costs
 	// no recovery that was ever available.)
 	b.markDone(s.key)
+	if s.extended && b.onLateDone != nil {
+		b.onLateDone()
+	}
 
 	payload := make([]byte, 0, s.origPayloadLen)
 	for _, frag := range s.frags {
@@ -742,12 +836,16 @@ func (b *Buffer) evictExpired(now time.Time) {
 		if !ok {
 			continue
 		}
-		if now.After(s.deadline) {
+		if !now.After(s.deadline) {
+			continue
+		}
+		if b.repairPending == nil {
 			b.notifyIncomplete(s)
-			if b.onAbandoned != nil {
-				b.onAbandoned()
-			}
-			b.removeSlot(txID)
+			b.abandon(txID, AbandonExpired)
+			continue
+		}
+		if reason, keep := b.holdForRepair(s, now); !keep {
+			b.abandon(txID, reason)
 		}
 	}
 	// Compact insertOrder.
@@ -760,6 +858,59 @@ func (b *Buffer) evictExpired(now time.Time) {
 	b.insertOrder = live
 }
 
+// holdForRepair decides, at TTL expiry under a repair wait, whether the slot is
+// kept (moving its deadline) or abandoned, and why. Must be called with b.mu
+// held.
+func (b *Buffer) holdForRepair(s *slot, now time.Time) (reason string, keep bool) {
+	missing := s.missingSeqNums()
+	if len(missing) == 0 {
+		// Nothing to anchor a request on: no repair can name these fragments.
+		return AbandonExpired, false
+	}
+	limit := s.born.Add(b.maxAge)
+	if !s.requested && now.Before(limit) {
+		// First expiry: ask for every missing fragment. Gaps a successor frame
+		// already exposed are in repair and the request leaves them alone; a
+		// lost tail, which nothing exposed, is registered here.
+		s.requested = true
+		if b.onIncomplete != nil {
+			b.onIncomplete(s.hashKey, s.groupIdx, s.subtreeID, missing)
+		}
+	}
+	pending := b.repairPending(s.hashKey, missing)
+	switch {
+	case !now.Before(limit) && pending:
+		return AbandonRepairTimeout, false
+	case !pending:
+		// The repair path holds none of the missing fragments any more: it has
+		// given up on at least one of them, or refused to track the flow.
+		return AbandonExpired, false
+	}
+	s.deadline = now.Add(b.ttl)
+	if s.deadline.After(limit) {
+		s.deadline = limit
+	}
+	if !s.extended {
+		s.extended = true
+		if b.onExtended != nil {
+			b.onExtended()
+		}
+	}
+	return "", true
+}
+
+// abandon removes a slot that will not complete and reports it. Must be called
+// with b.mu held.
+func (b *Buffer) abandon(key [32]byte, reason string) {
+	if b.onAbandoned != nil {
+		b.onAbandoned()
+	}
+	if b.onAbandonedReason != nil {
+		b.onAbandonedReason(reason)
+	}
+	b.removeSlot(key)
+}
+
 // evictOldest removes the oldest slot (FIFO order). Must be called with b.mu held.
 func (b *Buffer) evictOldest() {
 	for i, txID := range b.insertOrder {
@@ -767,10 +918,7 @@ func (b *Buffer) evictOldest() {
 			// No incomplete-notify here: this is capacity pressure, and asking for
 			// missing fragments while already at the slot cap adds load exactly
 			// when there is none to spare. TTL expiry is the tail-loss path.
-			if b.onAbandoned != nil {
-				b.onAbandoned()
-			}
-			b.removeSlot(txID)
+			b.abandon(txID, AbandonCapacity)
 			b.insertOrder = append(b.insertOrder[:i], b.insertOrder[i+1:]...)
 			return
 		}
