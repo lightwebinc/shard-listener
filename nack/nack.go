@@ -142,6 +142,11 @@ type flowState struct {
 	// re-baseline only NACK-recovers its transition tail once the rate estimate is
 	// trustworthy (contiguous >= minContiguousForRecover); reset on any gap/re-baseline.
 	contiguous uint64
+	// samples counts the inter-arrival samples behind ewmaIPG since the rate was
+	// last learned. Unlike contiguous, an ordinary gap does not reset it: step 6
+	// never feeds ewmaIPG, so a lost frame leaves the estimate as settled as it
+	// was. Reset only where ewmaIPG is (emitter change). Gates the tail probe.
+	samples uint64
 	// probeMisses counts consecutive tail probes answered MISS. Reset by any new
 	// frame, so a flow that goes quiet, is confirmed idle, then resumes, is
 	// eligible to probe again on its next tail.
@@ -168,7 +173,8 @@ const ownerUnknown = -1
 // minContiguousForRecover is how many consecutive in-order frames must have settled the
 // inter-arrival estimate before a re-baseline trusts it enough to NACK-recover the
 // transition tail. Below it, the estimate is too noisy to tell a real loss from emitter
-// divergence, so the re-baseline drops silently (the pre-existing behavior).
+// divergence, so the re-baseline drops silently (the pre-existing behavior). The tail
+// probe asks the same of the estimate's samples (flowState.samples).
 const minContiguousForRecover = 16
 
 // gapEntry holds retry state for a single missing frame.
@@ -547,6 +553,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		}
 		fs.lastSeqNum = seqNum
 		fs.contiguous++
+		fs.samples++
 		return
 	}
 
@@ -607,6 +614,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		fs.lastSeqNum = seqNum
 		fs.ewmaIPG = 0    // new emitter, new cadence — re-learn
 		fs.contiguous = 0 // rate estimate is stale across the emitter change
+		fs.samples = 0
 		if t.rec != nil {
 			t.rec.SeqRebaselined(fs.flowType, srcStr(fs.source))
 		}
@@ -869,15 +877,19 @@ func (t *Tracker) sweepOnce(now time.Time) {
 // The idle threshold is derived from the flow's OWN smoothed inter-arrival
 // (ewmaIPG) rather than a fixed timeout, because a "long silence" means nothing
 // in absolute terms: 200ms is unremarkable on a 1-per-second flow and a total
-// stall on a 10k/s one. That is also why the probe is gated on the same
-// contiguity guard the re-baseline path uses — until the estimate has settled,
-// silence cannot be distinguished from an unestablished rate.
+// stall on a 10k/s one. That is also why the probe waits for the estimate to
+// settle (minContiguousForRecover samples) — until it has, silence cannot be
+// distinguished from an unestablished rate. The gate counts the estimate's
+// samples, not the contiguous run the re-baseline path uses: a gap shortly
+// before the flow went quiet leaves the estimate intact, and gating on the run
+// left exactly those tails unprobed (at 5% loss more than half of all flows
+// end within 16 frames of a gap, so a lost final frame was never asked for).
 func (t *Tracker) maybeProbeTail(hashKey uint64, fs *flowState, now time.Time) {
 	if !t.cfg.TailProbe || fs.probing != 0 {
 		return
 	}
 	// An unsettled rate estimate cannot tell an abnormal silence from a normal one.
-	if fs.ewmaIPG <= 0 || fs.contiguous < minContiguousForRecover {
+	if fs.ewmaIPG <= 0 || fs.samples < minContiguousForRecover {
 		return
 	}
 	maxMisses := t.cfg.TailProbeMaxMisses

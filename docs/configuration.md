@@ -448,7 +448,10 @@ arrives — so the last frames before a sender idles are invisible. The tail
 probe speculatively NACKs the next expected `SeqNum` on a flow that has gone
 quiet, using the existing MISS response (no protocol change). Silence counts
 as abnormal after `idle-factor ×` the flow's own smoothed inter-arrival,
-floored at `min-idle`.
+floored at `min-idle`. A flow is probed once that estimate has settled (16
+inter-arrival samples since it was last learned). An ordinary gap does not
+reset the count, so a flow that lost a frame shortly before going quiet is
+still probed.
 
 | Flag | Env | Default | Notes |
 |------|-----|---------|-------|

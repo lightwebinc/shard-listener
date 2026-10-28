@@ -244,3 +244,57 @@ func TestTailProbeAccountedOnDataPathFill(t *testing.T) {
 		t.Error("probing flag not cleared by data-path fill; the flow would never probe again")
 	}
 }
+
+// A flow that lost a frame shortly before going quiet has a settled rate
+// estimate all the same, so its tail must still be probed. Gating the probe on
+// the contiguous run, which every gap resets, left those tails blind: a lost
+// final frame within 16 frames of an earlier loss was never asked for.
+func TestTailProbeIssuedAfterRecentGap(t *testing.T) {
+	fr := newFakeRetry(t, false)
+	tr := New(probeCfg(), []string{fr.addr()}, nil, nil, nil)
+	tr.Start(t.Context())
+	settleFlow(tr)
+
+	// The frame after the settled run is lost; a few more arrive, then quiet.
+	var zero [32]byte
+	last := uint64(minContiguousForRecover + 2)
+	for s := last + 2; s <= last+4; s++ {
+		tr.Observe(1, zero, 42, s, zero, net.ParseIP("fd00::1"))
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	want := last + 5
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case seq := <-fr.got:
+			if seq == want {
+				return
+			}
+			// The gap's own NACK (last+1) is answered too; keep waiting.
+		case <-deadline:
+			t.Fatalf("no tail probe for seq=%d: a gap shortly before the flow went quiet "+
+				"left its tail unprobed", want)
+		}
+	}
+}
+
+// The gate itself stays: a flow too young to have a rate estimate is not
+// probed, however long it is quiet.
+func TestTailProbeWaitsForASettledRate(t *testing.T) {
+	fr := newFakeRetry(t, false)
+	tr := New(probeCfg(), []string{fr.addr()}, nil, nil, nil)
+	tr.Start(t.Context())
+
+	var zero [32]byte
+	for i := uint64(1); i < minContiguousForRecover/2; i++ {
+		tr.Observe(1, zero, 42, i, zero, net.ParseIP("fd00::1"))
+		time.Sleep(2 * time.Millisecond)
+	}
+	select {
+	case seq := <-fr.got:
+		t.Errorf("probe for seq=%d on a flow with %d frames; an unsettled estimate must not probe",
+			seq, minContiguousForRecover/2-1)
+	case <-time.After(600 * time.Millisecond):
+	}
+}
