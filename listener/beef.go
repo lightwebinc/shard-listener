@@ -59,11 +59,7 @@ func (w *Worker) DeliverReassembledBeef(_ []byte, bf *frame.BEEFFrame) {
 	if w.rec != nil {
 		w.rec.ReassemblyCompleted()
 	}
-	var seqs []uint64
-	if w.reassemBuf != nil {
-		seqs = w.reassemBuf.LastCompletedSeqs()
-	}
-	w.deliverBeefSeqs(buf[:n], bf, seqs)
+	w.deliverBeef(buf[:n], bf)
 }
 
 // deliverBeef is the shared BEEF delivery core: group membership (implicit —
@@ -72,21 +68,6 @@ func (w *Worker) DeliverReassembledBeef(_ []byte, bf *frame.BEEFFrame) {
 // SubtreeID (a BEEF flow interleaves topics, so a gap's TopicID is
 // unknowable) and the ContentID as the frame identity.
 func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame) {
-	w.deliverBeefSeqs(raw, bf, nil)
-}
-
-// deliverBeefSeqs is deliverBeef told the object's fragment SeqNums in
-// FragIndex order (nil for an unfragmented frame): the range a repair of
-// this object asks the retry cache for.
-func (w *Worker) deliverBeefSeqs(raw []byte, bf *frame.BEEFFrame, seqs []uint64) {
-	// A repair's object is claimed before every gate: it was delivered once
-	// already and is wanted by one lane, not by the fan-out.
-	if w.replay != nil && w.beefEngine != nil && w.replay.Claim(raw, bf, seqs) {
-		if w.rec != nil {
-			w.rec.FrameReceived(w.id, w.iface.Name, "brc148")
-		}
-		return
-	}
 	if w.beefEngine == nil {
 		if w.rec != nil {
 			w.rec.FrameDropped(w.id, "beef_disabled")
@@ -190,17 +171,11 @@ func (w *Worker) deliverBeefSeqs(raw []byte, bf *frame.BEEFFrame, seqs []uint64)
 		}
 	}
 
-	var sendErr error
-	if ss, ok := w.egr.(BeefSeqsSink); ok {
-		sendErr = ss.SendBeefSeqs(raw, bf, seqs)
-	} else {
-		sendErr = w.egr.SendBeef(raw, bf)
-	}
-	if sendErr != nil {
+	if err := w.egr.SendBeef(raw, bf); err != nil {
 		if w.rec != nil {
 			w.rec.EgressError(w.id)
 		}
-		w.log.Debug("beef egress send error", "err", sendErr)
+		w.log.Debug("beef egress send error", "err", err)
 	} else if w.rec != nil {
 		w.rec.FrameForwarded(w.id, w.egr.Proto())
 	}

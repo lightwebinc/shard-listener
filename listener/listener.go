@@ -146,10 +146,6 @@ type Worker struct {
 	// channel this deep, so recvfrom overlaps with decode, reassembly and
 	// delivery. 0 processes inline, in the serve loop. See SetRecvQueueDepth.
 	recvQueue int
-	// replay, when set, is asked first for every reassembled BEEF object: a
-	// lane repairing a consumer claims the objects it asked the retry cache
-	// for, and a claimed object goes to that lane alone. See SetReplayClaimer.
-	replay ReplayClaimer
 
 	// egressSeq assigns a monotonic per-bundle-flow (keyed by the bundle
 	// HashKey) egress SeqNum to decoalesced BRC-142 members: the per-tx SeqNum
@@ -179,28 +175,6 @@ type Worker struct {
 // SetGroupSources configures per-group SSM source lists for the data-plane
 // join. Must be called before [Worker.Run]. Groups absent from src (or
 // with empty source lists) are joined ASM-style.
-// ReplayClaimer is consulted for every reassembled BEEF object before
-// deduplication and fan-out. Claim returns true when the object was requested
-// for a repair (a lane re-delivering what a consumer missed): the claimer has
-// delivered it where it was wanted and the worker drops it, so an object the
-// fabric already delivered once is not fanned out again. seqs are the
-// object's fragment SeqNums in FragIndex order, the range a BRC-126 NACK for
-// this object names.
-type ReplayClaimer interface {
-	Claim(raw []byte, bf *frame.BEEFFrame, seqs []uint64) bool
-}
-
-// SetReplayClaimer installs the repair hook. Must be called before Run.
-func (w *Worker) SetReplayClaimer(c ReplayClaimer) { w.replay = c }
-
-// BeefSeqsSink is an egress that wants each BEEF object's fragment SeqNums
-// beside the object: a lane that records what it could not deliver by the
-// range a repair must ask for. An egress implementing it is called instead
-// of SendBeef.
-type BeefSeqsSink interface {
-	SendBeefSeqs(raw []byte, bf *frame.BEEFFrame, seqs []uint64) error
-}
-
 // SetRecvQueueDepth pipelines the worker's receive path: the serve loop reads
 // each datagram into a pooled buffer and queues it, and one processing
 // goroutine drains the queue in arrival order under procMu, so the socket is

@@ -171,7 +171,6 @@ type Buffer struct {
 	mu                sync.Mutex
 	slots             map[[32]byte]*slot
 	lastEvict         time.Time     // when Observe last swept; see evictEvery
-	lastSeqs          []uint64      // the fragment SeqNums of the object complete() last delivered
 	evictEvery        time.Duration // 0 = sweep on every Observe (tests)
 	insertOrder       [][32]byte    // eviction order (FIFO)
 	maxSlots          int
@@ -639,7 +638,6 @@ func checkFragLen(s *slot, ff *frame.FragFrame) (fragSize int, ok bool) {
 //   - 0x05        → deliver via onCompleteSubtree (V5 BRC-132); no SHA256d;
 //     optional Merkle root verification via verifyMerkle.
 func (b *Buffer) complete(s *slot) {
-	b.lastSeqs = append(b.lastSeqs[:0], s.fragSeq...)
 	// Remember the key before any branch removes the slot. Every path below is
 	// terminal for this object — delivered or rejected on verification — so any
 	// further copy of its fragments is a duplicate either way. (A live slot
@@ -1014,13 +1012,4 @@ func groupIdxOf(fn func(*frame.FragFrame) uint32, ff *frame.FragFrame) uint32 {
 		return 0
 	}
 	return fn(ff)
-}
-
-// LastCompletedSeqs returns the fragment SeqNums (indexed by FragIndex) of the
-// object the most recent completion callback delivered. Valid only inside
-// that callback, which runs under the buffer's mutex: a repair needs the
-// object's whole sequence range, which the completed frame alone cannot
-// name. The slice is reused by the next completion; copy to keep it.
-func (b *Buffer) LastCompletedSeqs() []uint64 {
-	return b.lastSeqs
 }

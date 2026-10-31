@@ -240,9 +240,9 @@ func TestRunUnicastIngest_PipelinedDeliveryForwardsToSink(t *testing.T) {
 	got := 0
 	for {
 		if got == 0 {
-			// Only the first frame probes the bind race: a burst sent half
-			// before the bind would lose its tail with no resend.
-			_, _ = pc.WriteTo(raws[0], dst)
+			for _, raw := range raws {
+				_, _ = pc.WriteTo(raw, dst)
+			}
 		}
 		select {
 		case g := <-ch:
@@ -250,11 +250,6 @@ func TestRunUnicastIngest_PipelinedDeliveryForwardsToSink(t *testing.T) {
 				t.Fatalf("frame %d: got %d bytes want %d", got, len(g), len(raws[got]))
 			}
 			got++
-			if got == 1 {
-				for _, raw := range raws[1:] { // the socket is bound: the rest once
-					_, _ = pc.WriteTo(raw, dst)
-				}
-			}
 			if got == len(raws) {
 				cancel()
 				if err := <-errCh; err != nil {
