@@ -94,6 +94,13 @@ const (
 	// which no repair can arrive anyway.
 	DefaultMaxAge = 2 * time.Minute
 
+	// DefaultEvictEvery bounds how often Observe sweeps for expired slots and
+	// stale completion memories. The sweep walks every live slot and every
+	// remembered completion; per fragment it is quadratic at object-plane
+	// rates (18,000 fragments a second against a thousand remembered pieces
+	// on the lab edge). Expiry only needs to be observed to the nearest tick.
+	DefaultEvictEvery = 50 * time.Millisecond
+
 	// DefaultCompletionTTL is how long a completed slot key is remembered so
 	// late copies of its fragments cannot reopen it. It is deliberately NOT the
 	// slot TTL: the slot TTL bounds how long THIS listener waits for fragments,
@@ -163,7 +170,9 @@ const (
 type Buffer struct {
 	mu                sync.Mutex
 	slots             map[[32]byte]*slot
-	insertOrder       [][32]byte // eviction order (FIFO)
+	lastEvict         time.Time     // when Observe last swept; see evictEvery
+	evictEvery        time.Duration // 0 = sweep on every Observe (tests)
+	insertOrder       [][32]byte    // eviction order (FIFO)
 	maxSlots          int
 	ttl               time.Duration
 	verifyHash        bool                // canonical-TxID check for V2 slots (EF-aware)
@@ -300,6 +309,7 @@ func New(maxSlots int, ttl time.Duration, verifyHash bool, cb Callback) *Buffer 
 		maxSlots:      maxSlots,
 		ttl:           ttl,
 		completionTTL: DefaultCompletionTTL,
+		evictEvery:    DefaultEvictEvery,
 		verifyHash:    verifyHash,
 		onComplete:    cb,
 		maxObject:     DefaultMaxObjectBytes,
@@ -451,7 +461,16 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 	defer b.mu.Unlock()
 
 	now := time.Now()
-	b.evictExpired(now)
+	// A TTL shorter than the sweep interval (tests, or a deliberately tight
+	// deployment) must still be observed: sweep at half the TTL then.
+	every := b.evictEvery
+	if b.ttl > 0 && b.ttl/2 < every {
+		every = b.ttl / 2
+	}
+	if now.Sub(b.lastEvict) >= every {
+		b.evictExpired(now)
+		b.lastEvict = now
+	}
 
 	key := slotKey(ff)
 	s, exists := b.slots[key]

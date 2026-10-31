@@ -580,3 +580,22 @@ func TestValidateFragment(t *testing.T) {
 		t.Error("want error for FragIndex >= FragTotal")
 	}
 }
+
+// Observe sweeps for expiry at most every evictEvery (per fragment the sweep
+// walks every slot and every completion memory): a slot past its TTL is still
+// gone by the next tick, and never later than the TTL plus the interval.
+func TestReassembly_EvictSweepThrottled(t *testing.T) {
+	payload := []byte("throttled-sweep-payload")
+	abandoned := 0
+	b := New(16, 20*time.Millisecond, true, func(_ []byte, _ *frame.Frame) {})
+	b.evictEvery = 5 * time.Millisecond
+	b.SetAbandonedHook(func() { abandoned++ })
+	b.Observe(buildFragFrame(txIDOf(payload), uint32(len(payload)), 0, 2, payload[:8]))
+	time.Sleep(30 * time.Millisecond)
+	var other [32]byte
+	other[0] = 0xEE
+	b.Observe(buildFragFrame(other, 16, 0, 2, payload[:8])) // past the TTL and the interval: the first slot goes
+	if abandoned != 1 {
+		t.Fatalf("abandoned hook called %d times, want 1", abandoned)
+	}
+}
