@@ -614,14 +614,6 @@ func (w *Worker) handleDatagram(raw []byte, from unix.Sockaddr, tee bool) {
 	w.procMu.Unlock()
 }
 
-// recvDatagram is one queued datagram: a pooled buffer, the bytes read into it
-// and the kernel source address.
-type recvDatagram struct {
-	buf  *[]byte
-	n    int
-	from unix.Sockaddr
-}
-
 // maxDatagram bounds a pooled receive buffer: the largest UDP payload an IPv6
 // datagram carries without jumbograms.
 const maxDatagram = 65535
@@ -631,49 +623,7 @@ const maxDatagram = 65535
 // per-datagram cost. Buffers come from a pool, so a steady state allocates
 // nothing; the pool bounds nothing, the channel does.
 func (w *Worker) servePipelined(ctx context.Context, fd int, tee bool) error {
-	pool := sync.Pool{New: func() any { b := make([]byte, maxDatagram); return &b }}
-	queue := make(chan recvDatagram, w.recvQueue)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for d := range queue {
-			w.handleDatagram((*d.buf)[:d.n], d.from, tee)
-			pool.Put(d.buf)
-		}
-	}()
-	defer func() {
-		close(queue)
-		<-done
-	}()
-	for {
-		bp := pool.Get().(*[]byte)
-		n, from, err := unix.Recvfrom(fd, *bp, 0)
-		if err != nil {
-			pool.Put(bp)
-			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
-				if ctx.Err() != nil {
-					return nil
-				}
-				continue
-			}
-			if err == unix.EBADF || err == unix.EINVAL {
-				return nil
-			}
-			if err == unix.EINTR {
-				continue
-			}
-			if ctx.Err() != nil {
-				return nil
-			}
-			w.log.Error("recvfrom error", "err", err)
-			continue
-		}
-		if n == 0 {
-			pool.Put(bp)
-			continue
-		}
-		queue <- recvDatagram{buf: bp, n: n, from: from}
-	}
+	return w.recvPipelined(ctx, fd, tee)
 }
 
 // Reinject feeds a recovered raw frame through the normal receive pipeline
