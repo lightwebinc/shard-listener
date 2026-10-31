@@ -202,15 +202,10 @@ type Buffer struct {
 	onHashMismatch   func() // metrics hook (SHA256d mismatch, V2)
 	onMerkleMismatch func() // metrics hook (Merkle root mismatch, V5)
 	onLateFragment   func() // metrics hook (fragment for an already-completed object)
-	// wantReplay, when set, is asked whether a completed object's key is
-	// wanted again before a late copy is suppressed: a lane repairing a
-	// consumer NACKed the object's fragments and needs reassembly to rebuild
-	// it inside the completion window. nil = late copies are always dropped.
-	wantReplay    func(key [32]byte) bool
-	onBadFragment func() // metrics hook (fragment whose length breaks the BRC-130 offset grid)
-	onOversize    func() // metrics hook (fragment whose declared object exceeds the bound)
-	maxObject     int    // general declared-length cap (DefaultMaxObjectBytes)
-	maxObjectV9   int    // BRC-148 plane cap (-beef-max-object-bytes); 0 = use general
+	onBadFragment    func() // metrics hook (fragment whose length breaks the BRC-130 offset grid)
+	onOversize       func() // metrics hook (fragment whose declared object exceeds the bound)
+	maxObject        int    // general declared-length cap (DefaultMaxObjectBytes)
+	maxObjectV9      int    // BRC-148 plane cap (-beef-max-object-bytes); 0 = use general
 	// done remembers slot keys that COMPLETED recently, mapped to the instant
 	// the memory expires.
 	//
@@ -430,12 +425,6 @@ func (b *Buffer) SetMerkleMismatchHook(fn func()) { b.onMerkleMismatch = fn }
 // from the fragments simply never arriving.
 func (b *Buffer) SetLateFragmentHook(fn func()) { b.onLateFragment = fn }
 
-// SetReplayWanted installs the repair question: called with a completed
-// object's slot key ([SlotKey] for BEEF objects) when a late copy of one of
-// its fragments arrives; true forgets the completion and lets the object
-// reassemble again. Must be set before Observe is first called.
-func (b *Buffer) SetReplayWanted(fn func(key [32]byte) bool) { b.wantReplay = fn }
-
 // SetBadFragmentHook sets a metrics hook called once per object dropped
 // because a fragment's data length is inconsistent with the object's
 // OrigPayloadLen and FragTotal. Non-zero means some sender or path is
@@ -495,15 +484,10 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 		// this fragment to the gap tracker, so the copy books the fill it was
 		// sent to book.
 		if _, recentlyDone := b.done[key]; recentlyDone {
-			if b.wantReplay == nil || !b.wantReplay(key) {
-				if b.onLateFragment != nil {
-					b.onLateFragment()
-				}
-				return
+			if b.onLateFragment != nil {
+				b.onLateFragment()
 			}
-			// A requested repair: forget the completion so the object can
-			// be rebuilt from its retransmitted fragments.
-			delete(b.done, key)
+			return
 		}
 		// Reject pathological fragment metadata before opening a slot.
 		if ff.FragTotal == 0 || ff.FragIndex >= ff.FragTotal {
@@ -779,16 +763,9 @@ func slotKey(ff *frame.FragFrame) [32]byte {
 	if ff.OrigFrameVer != frame.FrameVerV9 {
 		return ff.TxID
 	}
-	return SlotKey(ff.TxID, ff.SubtreeID)
-}
-
-// SlotKey is the reassembly key of a BRC-149 BEEF object:
-// SHA-256(ContentID ∥ TopicID). Exported so a repair coordinator can name the
-// object it wants rebuilt (see [Buffer.SetReplayWanted]).
-func SlotKey(contentID, topicID [32]byte) [32]byte {
 	var buf [64]byte
-	copy(buf[:32], contentID[:])
-	copy(buf[32:], topicID[:])
+	copy(buf[:32], ff.TxID[:])      // ContentID
+	copy(buf[32:], ff.SubtreeID[:]) // TopicID
 	return sha256.Sum256(buf[:])
 }
 
