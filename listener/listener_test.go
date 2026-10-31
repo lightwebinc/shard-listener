@@ -3,6 +3,7 @@ package listener
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -198,6 +199,67 @@ func TestRunUnicastIngest_DeliveryForwardsToSink(t *testing.T) {
 		case <-time.After(100 * time.Millisecond):
 		case <-deadline:
 			t.Fatal("timeout waiting for delivered frame")
+		}
+	}
+}
+
+// The pipelined receive path (SetRecvQueueDepth) delivers exactly like the
+// inline one: the serve loop queues, the processing goroutine forwards.
+func TestRunUnicastIngest_PipelinedDeliveryForwardsToSink(t *testing.T) {
+	addr, ch, cleanup := newSink(t)
+	defer cleanup()
+
+	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
+	egr, err := egress.New(addr, "udp", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egr.Close() })
+	iface := loopbackIface(t)
+	const ingestPort = 39018
+	w := New(0, iface, ingestPort, nil, eng, filter.New(nil, nil, nil, nil), egr, nil, nil, nil, false)
+	w.SetRecvQueueDepth(64)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.RunUnicastIngest(ctx) }()
+
+	pc, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = pc.Close() }()
+	dst := &net.UDPAddr{IP: net.IPv6loopback, Port: ingestPort}
+	// Several distinct frames in one burst: all must come out, in order.
+	var raws [][]byte
+	for i := 0; i < 5; i++ {
+		raws = append(raws, buildBRC124Frame(t, [32]byte{byte(i + 1), 7, 7}, []byte(fmt.Sprintf("piece-%d", i))))
+	}
+	deadline := time.After(3 * time.Second)
+	got := 0
+	for {
+		if got == 0 {
+			for _, raw := range raws {
+				_, _ = pc.WriteTo(raw, dst)
+			}
+		}
+		select {
+		case g := <-ch:
+			if len(g) != len(raws[got]) {
+				t.Fatalf("frame %d: got %d bytes want %d", got, len(g), len(raws[got]))
+			}
+			got++
+			if got == len(raws) {
+				cancel()
+				if err := <-errCh; err != nil {
+					t.Logf("loop exit after cancel: %v", err)
+				}
+				return
+			}
+		case <-time.After(100 * time.Millisecond):
+		case <-deadline:
+			t.Fatalf("timeout after %d of %d frames", got, len(raws))
 		}
 	}
 }

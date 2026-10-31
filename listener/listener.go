@@ -141,6 +141,11 @@ type Worker struct {
 	// path (single-worker receive) and only meets the rare unicast-recovery
 	// re-injection.
 	procMu sync.Mutex
+	// recvQueue > 0 pipelines the socket: the serve loop only reads datagrams
+	// into pooled buffers and hands them to one processing goroutine through a
+	// channel this deep, so recvfrom overlaps with decode, reassembly and
+	// delivery. 0 processes inline, in the serve loop. See SetRecvQueueDepth.
+	recvQueue int
 
 	// egressSeq assigns a monotonic per-bundle-flow (keyed by the bundle
 	// HashKey) egress SeqNum to decoalesced BRC-142 members: the per-tx SeqNum
@@ -170,6 +175,25 @@ type Worker struct {
 // SetGroupSources configures per-group SSM source lists for the data-plane
 // join. Must be called before [Worker.Run]. Groups absent from src (or
 // with empty source lists) are joined ASM-style.
+// SetRecvQueueDepth pipelines the worker's receive path: the serve loop reads
+// each datagram into a pooled buffer and queues it, and one processing
+// goroutine drains the queue in arrival order under procMu, so the socket is
+// read while the previous datagram is decoded, reassembled and delivered. depth
+// is the queue's length in datagrams; 0 (the default) processes inline.
+//
+// Why: all of one topic's fragments land on ONE worker, and inline the worker
+// alternates recvfrom with processing, so its drain rate is the SUM of both
+// costs per datagram (about 40,000 a second on a lab edge, 200 MB/s at a
+// 9000-byte fragment MTU). Pipelined, the slower of the two sets the rate. A
+// full queue blocks the serve loop, which is the kernel buffer's job to absorb;
+// nothing is dropped here. Must be called before Run.
+func (w *Worker) SetRecvQueueDepth(depth int) {
+	if depth < 0 {
+		depth = 0
+	}
+	w.recvQueue = depth
+}
+
 func (w *Worker) SetGroupSources(src GroupSources) {
 	w.groupSources = src
 }
@@ -526,6 +550,9 @@ func (w *Worker) serve(ctx context.Context, fd int, readyMsg string, tee bool) e
 		_ = unix.Close(fd)
 	}()
 
+	if w.recvQueue > 0 {
+		return w.servePipelined(ctx, fd, tee)
+	}
 	buf := make([]byte, recvBufSize)
 	for {
 		n, from, err := unix.Recvfrom(fd, buf, 0)
@@ -549,35 +576,103 @@ func (w *Worker) serve(ctx context.Context, fd int, readyMsg string, tee bool) e
 			continue
 		}
 		if n > 0 {
-			// Extract the source only when something consumes it (sender ACL or the
-			// gap tracker), so a worker with neither pays no per-frame cost.
-			var src net.IP
-			if w.senderACL != nil || w.tracker != nil {
-				src = sockaddrIP(from)
-			}
-			if w.senderACL != nil {
-				if !w.senderACL.Allow(src) {
-					if w.rec != nil {
-						w.rec.FrameDropped(w.id, "sender_filter")
-					}
-					if w.debug {
-						w.log.Debug("sender filter rejected", "src", src)
-					}
-					continue
-				}
-			}
-			// Mirror the raw wire bytes to the co-resident retry cache BEFORE
-			// local processing: what the cache must hold is exactly what a NACK
-			// will ask for — the datagram as received, pre-dedup and
-			// pre-reassembly (fragments and bundles are cached as wire frames).
-			if tee && w.retryTee != nil {
-				w.teeToRetry(buf[:n], from)
-			}
-			w.procMu.Lock()
-			w.curSource = src
-			w.processFrame(buf[:n])
-			w.procMu.Unlock()
+			w.handleDatagram(buf[:n], from, tee)
 		}
+	}
+}
+
+// handleDatagram is the per-datagram path shared by the inline and pipelined
+// serve loops: sender filter, retry tee, then processFrame under procMu.
+func (w *Worker) handleDatagram(raw []byte, from unix.Sockaddr, tee bool) {
+	// Extract the source only when something consumes it (sender ACL or the
+	// gap tracker), so a worker with neither pays no per-frame cost.
+	var src net.IP
+	if w.senderACL != nil || w.tracker != nil {
+		src = sockaddrIP(from)
+	}
+	if w.senderACL != nil {
+		if !w.senderACL.Allow(src) {
+			if w.rec != nil {
+				w.rec.FrameDropped(w.id, "sender_filter")
+			}
+			if w.debug {
+				w.log.Debug("sender filter rejected", "src", src)
+			}
+			return
+		}
+	}
+	// Mirror the raw wire bytes to the co-resident retry cache BEFORE
+	// local processing: what the cache must hold is exactly what a NACK
+	// will ask for — the datagram as received, pre-dedup and
+	// pre-reassembly (fragments and bundles are cached as wire frames).
+	if tee && w.retryTee != nil {
+		w.teeToRetry(raw, from)
+	}
+	w.procMu.Lock()
+	w.curSource = src
+	w.processFrame(raw)
+	w.procMu.Unlock()
+}
+
+// recvDatagram is one queued datagram: a pooled buffer, the bytes read into it
+// and the kernel source address.
+type recvDatagram struct {
+	buf  *[]byte
+	n    int
+	from unix.Sockaddr
+}
+
+// maxDatagram bounds a pooled receive buffer: the largest UDP payload an IPv6
+// datagram carries without jumbograms.
+const maxDatagram = 65535
+
+// servePipelined is serve with the receive queue on (SetRecvQueueDepth): this
+// goroutine only reads the socket; the processing goroutine owns every
+// per-datagram cost. Buffers come from a pool, so a steady state allocates
+// nothing; the pool bounds nothing, the channel does.
+func (w *Worker) servePipelined(ctx context.Context, fd int, tee bool) error {
+	pool := sync.Pool{New: func() any { b := make([]byte, maxDatagram); return &b }}
+	queue := make(chan recvDatagram, w.recvQueue)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for d := range queue {
+			w.handleDatagram((*d.buf)[:d.n], d.from, tee)
+			pool.Put(d.buf)
+		}
+	}()
+	defer func() {
+		close(queue)
+		<-done
+	}()
+	for {
+		bp := pool.Get().(*[]byte)
+		n, from, err := unix.Recvfrom(fd, *bp, 0)
+		if err != nil {
+			pool.Put(bp)
+			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+				if ctx.Err() != nil {
+					return nil
+				}
+				continue
+			}
+			if err == unix.EBADF || err == unix.EINVAL {
+				return nil
+			}
+			if err == unix.EINTR {
+				continue
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
+			w.log.Error("recvfrom error", "err", err)
+			continue
+		}
+		if n == 0 {
+			pool.Put(bp)
+			continue
+		}
+		queue <- recvDatagram{buf: bp, n: n, from: from}
 	}
 }
 
