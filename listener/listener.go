@@ -190,8 +190,32 @@ type ReplayClaimer interface {
 	Claim(raw []byte, bf *frame.BEEFFrame, seqs []uint64) bool
 }
 
+// ReplayWanter is a [ReplayClaimer] that can also say, by reassembly slot
+// key ([reassembly.SlotKey]), whether an object already delivered once is
+// wanted again: reassembly then rebuilds it from the retransmitted
+// fragments instead of suppressing them as late copies.
+type ReplayWanter interface {
+	WantsReplay(slotKey [32]byte) bool
+}
+
 // SetReplayClaimer installs the repair hook. Must be called before Run.
-func (w *Worker) SetReplayClaimer(c ReplayClaimer) { w.replay = c }
+func (w *Worker) SetReplayClaimer(c ReplayClaimer) {
+	w.replay = c
+	w.wireReplayWanted()
+}
+
+// wireReplayWanted points the reassembly buffer's repair question at the
+// claimer; either may be installed first.
+func (w *Worker) wireReplayWanted() {
+	if w.reassemBuf == nil || w.replay == nil {
+		return
+	}
+	rw, ok := w.replay.(ReplayWanter)
+	if !ok {
+		return
+	}
+	w.reassemBuf.SetReplayWanted(rw.WantsReplay)
+}
 
 // BeefSeqsSink is an egress that wants each BEEF object's fragment SeqNums
 // beside the object: a lane that records what it could not deliver by the
@@ -252,6 +276,7 @@ func (w *Worker) ID() int { return w.id }
 // are dropped as unknown-version frames).
 func (w *Worker) SetReassemblyBuffer(b *reassembly.Buffer) {
 	w.reassemBuf = b
+	w.wireReplayWanted()
 }
 
 // New constructs a Worker. mcastEgr may be nil to disable multicast egress.
