@@ -1,25 +1,25 @@
-# shard-listener — Architecture
+# shard-listener Architecture
 
 ## Features
 
-- **SO_REUSEPORT** multi-worker receive with kernel-level source affinity
-- **Shard filter** — subscribe to a subset of shard groups (empty = all)
-- **Subtree filter** — include/exclude by 32-byte SubtreeID (BRC-124/BRC-128 frames)
-- **BRC-127 subtree group announcements** — dynamic group-based filtering via multicast SubtreeGroupAnnounce datagrams with TTL eviction and sender ACLs
-- **Gap tracking** — per-flow HashKey/SeqNum monotonic counter gap detection (BRC-124/BRC-128)
-- **NACK dispatch** — 64-byte NACK datagrams (HashKey + StartSeq/EndSeq + SubtreeID) with 16-byte ACK/MISS response handling
-- **Beacon discovery** — dynamic retry endpoint registry via BRC-126 ADVERT beacons
-- **Receive-side retry tee** — `-retry-tee` mirrors every received data frame to a co-resident retry-endpoint's loopback tee ingest (source-preserving `teewire` envelope), so the cache learns remote-origin frames without a multicast join of its own (see [configuration.md](configuration.md))
-- **Tier escalation** — MISS → immediate advance to next endpoint; bare ACK → gap cancelled on trust; unicast-flagged ACK → wait for the data frame, escalate on timeout
-- **Semaphore-bounded dispatch** — concurrent NACK goroutines with configurable limit
-- **Egress UDP or TCP** — strip-header (payload-only) by default, since a downstream node reads a raw BSV tx, not a multicast frame; disable for frame-aware downstreams (domain bridging)
-- **Multicast egress** — optional domain bridging; re-emits filtered frames onto a separate multicast address space with configurable scope, interface, port, and hop limit
-- **BRC-135 header egress** — optional; re-emits the 80-byte block header carried in BRC-131 BlockAnnounce frames as a 172-byte BRC-135 frame on a dedicated egress group (`0xFFFA`) for SPV-style consumers
-- **Per-deployment egress TxID dedup** — optional shared store (Redis SETNX) to suppress duplicate egress when multiple listeners cover the same shard subset; honours optional ingress courtesy marks from `shard-proxy`
+- **SO_REUSEPORT** receive workers: unicast ingest is kernel-balanced by source; multicast receive runs one worker (see [Receive workers](#receive-workers))
+- **Shard filter**: subscribe to a subset of shard groups (empty = all)
+- **Subtree filter**: include/exclude by 32-byte SubtreeID (BRC-124/BRC-128 frames)
+- **BRC-127 subtree group announcements**: dynamic group-based filtering via multicast SubtreeGroupAnnounce datagrams with TTL eviction and sender ACLs
+- **Gap tracking**: per-flow HashKey/SeqNum monotonic counter gap detection (BRC-124/BRC-128)
+- **NACK dispatch**: 64-byte NACK datagrams (HashKey + StartSeq/EndSeq + SubtreeID) with 16-byte ACK/MISS response handling
+- **Beacon discovery**: dynamic retry endpoint registry via BRC-126 ADVERT beacons
+- **Receive-side retry tee**: `-retry-tee` mirrors every received data frame to a co-resident retry-endpoint's loopback tee ingest (source-preserving `teewire` envelope), so the cache learns remote-origin frames without a multicast join of its own (see [configuration.md](configuration.md))
+- **Tier escalation**: MISS → immediate advance to next endpoint; bare ACK → gap canceled on trust; unicast-flagged ACK → wait for the data frame, escalate on timeout
+- **Semaphore-bounded dispatch**: concurrent NACK goroutines with configurable limit
+- **Egress UDP or TCP**: strip-header (payload-only) by default, since a downstream node reads a raw BSV tx, not a multicast frame; disable for frame-aware downstreams (domain bridging)
+- **Multicast egress**: optional domain bridging; re-emits filtered frames onto a separate multicast address space with configurable scope, interface, port, and hop limit
+- **BRC-135 header egress**: optional; re-emits the 80-byte block header carried in BRC-131 BlockAnnounce frames as a 172-byte BRC-135 frame on a dedicated egress group (`0xFFFA`) for SPV-style consumers
+- **Per-deployment egress TxID dedup**: optional shared store (SETNX on a `shard-common/cache` backend) to suppress duplicate egress when multiple listeners cover the same shard subset; honors optional ingress courtesy marks from `shard-proxy`
 - **Prometheus + OTLP metrics**, `/healthz`, `/readyz`
 - **Graceful shutdown** with configurable drain window
-- **SSM (RFC 4607) opt-in** — `-source-mode=ssm` branches every join site (data plane, beacon, subtree-announce) between `IPV6_JOIN_GROUP` and `MCAST_JOIN_SOURCE_GROUP` via `shard-common/netjoin`; per-control-group bootstrap source lists resolve DNS names or IPv6 literals through `shard-common/bootstrap.Resolver` (fail-closed startup, last-good retention on refresh failures); ASM is the default. See [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm).
-- **Receiver/delivery role split** — `-mode collapsed|receiver|delivery` (default `collapsed`). `collapsed`/`receiver` join fabric `(S,G)` and run gap/NACK; `delivery` does neither — it reads raw frames off a **unicast** socket (forwarded by a receiver) and runs only the egress fan-out, so decode/demux/gap recovery happen once at the receiver and never per consumer. The wire format between the two is the stamped frame itself (envelope-preserving), so the split needs no new protocol; a downstream build supplies the multi-consumer fan-out sink for delivery.
+- **SSM (RFC 4607) opt-in**: `-source-mode=ssm` branches every join site (data plane, beacon, subtree-announce) between `IPV6_JOIN_GROUP` and `MCAST_JOIN_SOURCE_GROUP` via `shard-common/netjoin`; per-control-group bootstrap source lists resolve DNS names or IPv6 literals through `shard-common/bootstrap.Resolver` (fail-closed startup, last-good retention on refresh failures); ASM is the default. See [Source-Specific Multicast design](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm).
+- **Receiver/delivery role split**: `-mode collapsed|receiver|delivery` (default `collapsed`). `collapsed`/`receiver` join fabric `(S,G)` and run gap/NACK; `delivery` does neither: it reads raw frames off a **unicast** socket (forwarded by a receiver) and runs only the egress fan-out, so decode/demux/gap recovery happen once at the receiver and never per consumer. The wire format between the two is the stamped frame itself (envelope-preserving), so the split needs no new protocol; a downstream build supplies the multi-consumer fan-out sink for delivery.
 
 ## Overview
 
@@ -63,11 +63,11 @@ Multicast fabric (site-scoped FF05::/16 under ASM, FF35::/16 under SSM)
 `-mode` selects the listener's role (flag details in the
 [configuration reference](configuration.md#mode-receiver--delivery-split)):
 
-- **`collapsed`** (default) — monolith: joins fabric `(S,G)`, runs
+- **`collapsed`** (default), the monolith: joins fabric `(S,G)`, runs
   demux/gap/NACK, and fans out to consumers in one process.
-- **`receiver`** — multicast-facing half: joins + gap/NACK, forwards raw
+- **`receiver`**, the multicast-facing half: joins + gap/NACK, forwards raw
   frames (envelope-preserving) to the delivery tier (`-delivery-addrs`).
-- **`delivery`** — consumer-facing half: no multicast join, no gap/NACK
+- **`delivery`**, the consumer-facing half: no multicast join, no gap/NACK
   (the receiver owns those); a unicast-ingest front reads raw frames off
   the wire and runs only the egress (fan-out) sink.
 
@@ -86,18 +86,18 @@ Source lists per group come from two places:
 | Group                          | Source set                                                                                    |
 | ------------------------------ | --------------------------------------------------------------------------------------------- |
 | Data groups (`FF35::B:idx`)    | `-ssm-publishers-static` (lab/CI) or manifest-derived publisher union (production)             |
-| Beacon (`:FFFD`)               | `-ssm-bootstrap-beacon` — the retry-endpoint pod IPs (retry-endpoint emits NACK ADVERTs)       |
-| Manifest / BlockBroadcast      | `-ssm-bootstrap-manifest` — the shard-manifest pod IPs                                         |
+| Beacon (`:FFFD`)               | `-ssm-bootstrap-beacon`: the retry-endpoint pod IPs (retry-endpoint emits NACK ADVERTs)       |
+| Manifest / BlockBroadcast      | `-ssm-bootstrap-manifest`: the shard-manifest pod IPs                                         |
 | SubtreeGroupAnnounce (`:FFFB/FFFC`) | `-ssm-bootstrap-subtree-announce`                                                              |
 
 Bootstrap lists are resolved via the shared `bootstrap.Resolver`
 (`shard-common/bootstrap`): DNS names or IPv6 literals; fail-closed
 startup; last-good retention on transient refresh failures. The
 addressing prefix switches from `FF0x` (ASM) to `FF3x` (SSM) per
-`shard.Prefix(SourceModeSSM, scope)` — FF35 for site, FF3E for global
-(RFC 8815 rejects global-scope ASM).
+`shard.Prefix(SourceModeSSM, scope)`: FF35 for site, FF3E for global,
+the only two scopes SSM accepts.
 
-See the [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm)
+See the [Source-Specific Multicast design](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm)
 for fabric prerequisites (PIM-SSM, MLDv2, raised `mld_max_msf`).
 
 ## Receive workers
@@ -121,14 +121,23 @@ Each worker:
    and for BRC-131/BRC-132 frames on their respective control-plane flow keys.
 
 **SO_REUSEPORT and multicast:** Linux does **not** load-balance multicast
-datagrams across SO_REUSEPORT sockets — every socket that has joined the group
+datagrams across SO_REUSEPORT sockets: every socket that has joined the group
 receives a full copy of each datagram. Running more than one worker therefore
 causes every frame to be processed and forwarded multiple times.
 **`NUM_WORKERS` must be set to `1` for multicast-receive deployments.**
 
-SO_REUSEPORT load balancing applies to unicast UDP only. The E2E test suite
-exploits this property by injecting frames as unicast to `[::]:listen-port`,
-allowing multiple worker sockets to be tested in isolation.
+SO_REUSEPORT load balancing applies to unicast UDP only: the `-mode delivery`
+unicast ingest, and the E2E test suite, which injects frames as unicast to
+`[::]:listen-port` so multiple worker sockets can be tested in isolation.
+
+A worker processes each datagram inline in its receive loop: decode, reassembly
+and delivery complete before the next `recvfrom`. An embedding build can
+pipeline a worker with `Worker.SetRecvQueueDepth`: the receive loop then only
+reads datagrams into pooled buffers and hands them, in arrival order, to one
+processing goroutine through a bounded queue (on Linux the receive side reads
+`recvmmsg` batches of up to 32 datagrams), so the socket is drained while the
+previous datagram is processed. A full queue blocks the receive loop; nothing
+is dropped there. The stock binary exposes no flag for this and runs inline.
 
 ## Receive-side retry tee (`-retry-tee`)
 
@@ -144,20 +153,20 @@ port on a collapsed node.
 
 Placement in the loop is deliberate and load-bearing:
 
-- **In `serve`, on the raw wire bytes** — before dedup, reassembly, and
+- **In `serve`, on the raw wire bytes**: before dedup, reassembly, and
   decoalescing, so the cache holds exactly the datagrams a NACK will name
   (fragments and bundles are cached as wire frames, not as their reassembled
   or re-encoded forms).
-- **After the sender ACL** — filtered senders are not cached.
-- **Not on `Reinject`** — a NACK-recovered frame came *from* a retry cache;
+- **After the sender ACL**: filtered senders are not cached.
+- **Not on `Reinject`**: a NACK-recovered frame came *from* a retry cache;
   re-mirroring it would re-store what was just served.
-- **Not on the local-mirror ingest** (`RunUnicastIngestOn`) — mirror frames
+- **Not on the local-mirror ingest** (`RunUnicastIngestOn`): mirror frames
   are this node's own egress, which the proxy's tee already covers.
 
 The mirror is lossy by design: one connected-socket `Write` per eligible
 frame, errors counted (`bsl_retry_tee_errors_total`) and logged once, never
 retried, never blocking the receive path. Enabling it costs one extra syscall
-per received frame — acceptable at edge listener rates; the proxy's batched
+per received frame, acceptable at edge listener rates; the proxy's batched
 tee remains the model if a Mpps-class receive path ever needs one.
 
 The canonical 92-byte header layout is specified in
@@ -195,19 +204,19 @@ a gap in one flow does not affect another flow's tail.
   accepted; they never create new gap entries and never regress `lastSeqNum`.
 - `lastSeqNum` only advances forward.
 
-**Re-baseline on emitter change** (v1.7.0/v1.7.1): a forward jump that is
+**Re-baseline on emitter change:** a forward jump that is
 implausible for the elapsed silence means a *different* emitter now stamps the
 flow (e.g. anycast failover between long-lived proxies whose in-memory counters
-diverged) — the intermediate range was never emitted toward this listener.
+diverged); the intermediate range was never emitted toward this listener.
 Implausibility is judged two ways: the jump exceeds `-nack-max-forward-jump`
 (default 4096, the absolute bound), or it exceeds 4× the frames expected for
 the elapsed time at the flow's observed rate (a smoothed inter-arrival EWMA,
 `ewmaIPG`, α=1/8; only applied to jumps > 64 frames). On re-baseline the
 pending phantom gaps are dropped silently (never NACKed),
 `bsl_seq_rebaselines_total` is incremented, and tracking restarts at the new
-`SeqNum`. Since v1.7.1, if the rate estimate is settled (≥ 16 contiguous
+`SeqNum`. If the rate estimate is settled (≥ 16 contiguous
 in-order frames), the rate-plausible *transition tail* (≈ elapsed/`ewmaIPG`
-frames just before the new `SeqNum`, bounded) is still NACK-recovered — the new
+frames just before the new `SeqNum`, bounded) is still NACK-recovered: the new
 emitter stamped those frames during reconvergence and holds them in its retry
 cache, so a real sub-second outage is repaired instead of vanishing inside the
 phantom range.
@@ -216,7 +225,7 @@ phantom range.
 - Called when a retransmit arrives via a NACK ACK response. Deletes the
   matching `pending` entry and increments `bsl_gaps_suppressed_total`.
 
-**Sweeper** — fires every 100 ms:
+**Sweeper**, every 100 ms:
 - Entries past `deadline` (detected + `nack-gap-ttl`) are evicted;
   `bsl_gaps_unrecovered_total` is incremented.
 - Entries past `nextAttempt` with `retries < nack-max-retries` are enqueued
@@ -228,11 +237,12 @@ phantom range.
 
 **NACK escalation** on endpoint response:
 - **ACK**: the Flags byte decides. A **unicast-flagged** ACK (`0x02`) is only a
-  PROMISE — the gap stays pending, the socket keeps draining for the data frame,
+  PROMISE: the gap stays pending, the socket keeps draining for the data frame,
   and a timeout escalates to the next cache. A **bare / multicast-flagged** ACK
   cancels the gap on TRUST (`Fill`; `bsl_gaps_suppressed_total` incremented), so a
   repair lost on the same degraded link is never retried. That trust path is why
-  `bsl_gaps_suppressed_total` is not proof of repair — see *Gap counters*.
+  `bsl_gaps_suppressed_total` is not proof of repair; see the gap metrics in
+  [configuration.md](configuration.md#gap-recovery-brc-126).
 - **MISS**: endpoint index is advanced immediately (no backoff). The next sweep
   dispatch targets the next endpoint in the sorted registry snapshot.
 - **THROTTLED** (`MsgType 0x13`): honest-congestion backoff hint from the
@@ -249,27 +259,31 @@ phantom range.
 
 By default a repaired frame returns over the **multicast** data plane: the retry
 endpoint re-multicasts it and the listener's normal receive path closes the gap.
-On a fabric where multicast re-injection is blocked for a remote receiver — e.g.
-PIM-SSM RPF only lets the *source* node inject into its own `(S,G)` tree — the
+On a fabric where multicast re-injection is blocked for a remote receiver (e.g.
+PIM-SSM RPF only lets the *source* node inject into its own `(S,G)` tree), the
 listener can instead recover frames over the **unicast NACK return channel**:
 
-- `Tracker.SetRecoverFunc(func([]byte))` registers a re-inject callback, wired to
-  `(*listener.Worker).Reinject`. `Reinject` feeds the frame through the normal
-  pipeline (shard filter → own-traffic exclusion → gap tracking → fan-out egress),
-  serialised against the receive loop by `Worker.procMu`, so a recovered frame
-  reaches downstream consumers with no client-side logic.
+- `Tracker.RegisterRecover(workerID, fn)` registers each worker's re-inject
+  callback, `(*listener.Worker).Reinject`; a recovered frame is handed to the
+  worker that observed the gap's flow, the one holding the object's other
+  fragments (`SetRecoverFunc` is the single-worker form). `Reinject` feeds the
+  frame through the normal pipeline (shard filter → own-traffic exclusion → gap
+  tracking → fan-out egress), serialized against the receive loop by
+  `Worker.procMu`, so a recovered frame reaches downstream consumers with no
+  client-side logic. With no callback registered the drained frame is dropped
+  and the gap is booked unrecovered (`reason="no_recover"`).
 - `sendNACK` drains the NACK socket: a retry that has the frame **unicasts it back**
   to the NACK source (plus a `unicast_sent`-flagged ACK). The tracker re-injects the
   data frame and cancels the gap. Classification is by size + magic (a control
   response is 16 bytes; a data frame is a full BRC frame).
-- **The ACK alone never confirms recovery** for a unicast retransmit — only the
+- **The ACK alone never confirms recovery** for a unicast retransmit; only the
   arriving data frame does. A `unicast_sent` ACK whose data is lost in transit (the
   retransmit can re-cross the same lossy path) does **not** cancel the gap; it
   **escalates to the next cache**, so a frame lost on one path is repaired from a
   node that received it over a clean path. (A non-unicast/legacy ACK keeps the
   original trust-the-multicast-repair semantics.)
 - `Tracker.SetNACKSource(addr)` binds the NACK socket to a routable source address.
-  This is **required on a tunnelled fabric**: an unbound socket picks a per-route
+  This is **required on a tunneled fabric**: an unbound socket picks a per-route
   source that can be a point-to-point `/127` tunnel inner address, and the retry's
   unicast reply is then misrouted off the tunnel and lost. Bind a globally routable
   `/128` so the return traffic routes back.
@@ -301,8 +315,8 @@ The same goroutine carries BRC-139 manifests, but on a **second port of the
 same group**: shard-manifest announces on UDP 9001 while ADVERTs arrive on
 9300, so with `-manifest-consumer-enabled` the listener opens both
 (`-beacon-port` and `-manifest-beacon-port`) and demuxes on the MsgType byte.
-Under SSM each port joins its own source roster — `-ssm-bootstrap-beacon` for
-ADVERTs, `-ssm-bootstrap-manifest` for manifests — because the two are
+Under SSM each port joins its own source roster (`-ssm-bootstrap-beacon` for
+ADVERTs, `-ssm-bootstrap-manifest` for manifests) because the two are
 published by different hosts.
 
 Endpoints are evicted automatically after 3 × BeaconInterval without a refresh.
@@ -311,25 +325,23 @@ take effect at the next gap sweep without locking.
 
 Beacon discovery is enabled by default (`-beacon-enabled`). Static seeds
 (`-retry-endpoints`) are ALWAYS carried in the registry alongside beacon entries,
-deduped by address (v1.14.0). They sit at `Tier=0xFF` and therefore sort behind
+deduped by address. They sit at `Tier=0xFF` and therefore sort behind
 every beacon entry, so they cost nothing until the discovered caches are
-exhausted. Dropping them whenever any beacon existed (the pre-v1.14.0 behaviour)
-removed only the deepest fallbacks — which are exactly the ones that survive a
-loss UPSTREAM of beacon scope, where every discovered cache is missing the same
-frames.
+exhausted, and they are the fallbacks that survive a loss UPSTREAM of beacon
+scope, where every discovered cache is missing the same frames.
 
 Because Tier defaults to `0` on every endpoint and the registry sort uses
 `sort.Slice` (not stable), an unconfigured fleet ties on `(0, 128)` and the
 escalation ORDER is arbitrary and not repeatable between runs. Note also that an
-ADVERT says nothing about WHAT an endpoint caches — no group range, shard-bit
-width, plane/band or FrameVer coverage — so a retry that never joined the BEEF
+ADVERT says nothing about WHAT an endpoint caches (no group range, shard-bit
+width, plane/band or FrameVer coverage), so a retry that never joined the BEEF
 `0x1000` band is indistinguishable from a healthy one until it answers MISS.
 
 ## Filter
 
 Filtering is pure (no I/O) and allocation-free on the hot path:
 
-| Config | Behaviour |
+| Config | Behavior |
 |-----------------------------|---------------------------------------|
 | `shard-include` empty | all shard indices accepted |
 | `shard-include` non-empty | only listed indices accepted |
@@ -380,13 +392,13 @@ header egress endpoint.
 
 Per BRC-135, the listener stamps the frame with its **own emitter identity**:
 
-- `HashKey = XXH64(listenerIPv6 ∥ 0xFFFA ∥ zeros[32])` — computed once at startup
+- `HashKey = XXH64(listenerIPv6 ∥ 0xFFFA ∥ zeros[32])`: computed once at startup
   from the configured `-iface` primary IPv6 address (see `primaryIPv6` in `main.go`).
-  The group index is `GroupBlockHeader` (0xFFFA), the BRC-135 egress group — not
+  The group index is `GroupBlockHeader` (0xFFFA), the BRC-135 egress group, not
   `GroupBlockBroadcast` (0xFFFE), the upstream BRC-131 ingress group.
-- `SeqNum` — a monotonic per-worker counter (`atomic.Uint64`) starting at 1,
+- `SeqNum`: a monotonic per-worker counter (`atomic.Uint64`) starting at 1,
   incremented on every emission.
-- `BlockHash` (TxID slot) — copied verbatim from the upstream BRC-131 `ContentID`.
+- `BlockHash` (TxID slot): copied verbatim from the upstream BRC-131 `ContentID`.
 
 Downstream SPV consumers track gaps on the emitter-attributed `(HashKey, SeqNum)`
 flow; if multiple listeners emit headers for the same block, each appears as an
@@ -429,7 +441,7 @@ before forwarding.
 4. Calls `nack.Tracker.Observe` with a **virtual anchor groupIdx `0xFFF9`** so anchor gap
    tracking has an independent flow label (`brc134`) separate from BRC-131 block control.
 
-The virtual `0xFFF9` is not a real multicast address — it matches the proxy's HashKey
+The virtual `0xFFF9` is not a real multicast address; it matches the proxy's HashKey
 derivation for anchor frames to keep flow identity consistent end to end. See
 [bsv-multicast/docs/brc-134-anchor-transactions.md](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-134-anchor-transactions.md).
 
@@ -459,9 +471,9 @@ flow keyed by the parent `HashKey` for monotonic per-flow SeqNums.
 
 Own-traffic exclusion is skipped for re-bucketed (cross-generation) flows: it keys
 on `HashKey = hash(originalSenderIP, group, subtree)`, which cannot be recomputed
-at the local groups from the opaque parent `HashKey` — a documented re-shard
+at the local groups from the opaque parent `HashKey`, a documented re-shard
 boundary limitation, not a per-tx regression on the common (same-generation) path.
-Each re-bucket increments `bsl_bundles_rebucketed_total` (labelled by worker).
+Each re-bucket increments `bsl_bundles_rebucketed_total` (labeled by worker).
 
 ### Edge-decoalesce vs consumer-decoalesce (`egress.BundleSink`)
 
@@ -478,7 +490,7 @@ the optional `egress.BundleSink` capability (`SendBundle(raw, b)`) on top of
   implements `BundleSink`, so the worker hands it the whole bundle. The fan-out
   then decides **per consumer**: a `BundleCapable` consumer whose own sink is an
   `egress.BundleSink` receives the whole bundle intact (one datagram, many
-  transactions — the coalescing saving reaches that consumer's last hop); every
+  transactions, so the coalescing saving reaches that consumer's last hop); every
   other consumer gets the bundle decoalesced into re-stamped BRC-124 frames.
   Decoalescing happens at most once per bundle and is shared across all
   non-capable consumers. The multicast re-emit path (`mcastEgr`), when present,
@@ -487,6 +499,27 @@ the optional `egress.BundleSink` capability (`SendBundle(raw, b)`) on top of
 `egress.DeliverBundle(sink, raw, b)` is the helper a pass-through wrapper uses to
 forward a bundle toward a bundle-aware inner sink while still decoalescing
 correctly if the inner chain turns out not to be bundle-aware.
+
+## Fragment reassembly (BRC-130)
+
+Fragments (`FrameVerV3`) land in a per-worker `reassembly.Buffer` of at most
+4096 slots, keyed by the fragment's TxID (V9 BEEF fragments key on the
+`(ContentID, TopicID)` pair). An object whose declared `OrigPayloadLen` exceeds
+the bound (`-beef-max-object-bytes` for `OrigFrameVer 0x09`, 64 MiB otherwise)
+is refused fragment by fragment (`bsl_reassembly_oversize_fragments_total`).
+
+A slot that reaches `-reassembly-ttl` still incomplete asks the NACK tracker for
+its missing fragments (the tail case: a lost final fragment has no successor to
+expose it as a gap) and, while any of them is pending, is held up to
+`-reassembly-max-age` rather than abandoned (`bsl_reassembly_repair_wait_total`).
+A slot is abandoned with `reason="expired"` once repair has given up,
+`"repair_timeout"` at the age cap, or `"capacity"` when evicted oldest-first at
+the slot cap. Expiry is observed by a sweep that `Observe` runs at most every
+50 ms (the sweep walks every live slot and every remembered completion, so a
+per-fragment sweep would be quadratic at object-plane fragment rates) and by a
+1 s `Tick` when no fragments arrive. A completed key is remembered for 60 s so
+late repair copies of its fragments cannot reopen the slot
+(`bsl_reassembly_late_fragments_total`).
 
 ## Fragment Reassembly Callbacks
 
@@ -497,7 +530,7 @@ Four callback types are registered on the reassembly buffer (`reassembly.Buffer`
 | `Callback` | V2 (BRC-124/BRC-128) | Fragment set complete | BRC-124/128 egress path; optional SHA256d verification |
 | `BlockCallback` | V4 (BRC-131) | Fragment set complete | `DeliverReassembledBlock` |
 | `SubtreeDataCallback` | V5 (BRC-132) | Fragment set complete | `DeliverReassembledSubtreeData` |
-| `BEEFCallback` | V9 (BRC-149 BEEF) | Fragment set complete | Registered via `SetBEEFCallback`; BEEF egress path — ContentID is the SHA-256d verification hash |
+| `BEEFCallback` | V9 (BRC-149 BEEF) | Fragment set complete | Registered via `SetBEEFCallback`; BEEF egress path; ContentID is the SHA-256d verification hash |
 
 ## Egress deduplication
 
@@ -506,8 +539,8 @@ TTL-bounded set of recently-seen `(groupIdx, subtreeID, seqNum)` keys.
 Before forwarding a BRC-124/BRC-128 frame with a non-zero `SeqNum`, the worker
 checks the set:
 
-- **First occurrence** — key is inserted; frame is forwarded normally.
-- **Duplicate** — key is already present (inline frame and its retransmit both
+- **First occurrence**: key is inserted; frame is forwarded normally.
+- **Duplicate**: key is already present (inline frame and its retransmit both
   arrived); frame is discarded; `bsl_frames_deduped_total` is incremented.
   `nack.Tracker.Observe` still runs so gap-fill bookkeeping stays accurate.
 
@@ -526,13 +559,13 @@ BRC-124/BRC-128 frames (`SeqNum == 0`) bypass dedup entirely.
 
 A single `egress.Sender` per worker delivers frames to `egress-addr`:
 
-| `egress-proto` | Behaviour |
+| `egress-proto` | Behavior |
 |----------------|-------------------------------------------------------|
 | `udp` | `net.DialUDP` on startup; `Write` per frame |
 | `tcp` | lazy connect on first frame; reconnect on write error |
 
 `strip-header=true` (default) sends only the raw BSV transaction bytes (frame
-payload) — what a downstream node/miner expects; `strip-header=false` sends the
+payload), what a downstream node/miner expects; `strip-header=false` sends the
 complete 92-byte BRC-124/BRC-128 frame verbatim, for downstreams that re-read
 frames (e.g. domain bridging).
 
@@ -551,7 +584,7 @@ and/or address-space translation.
 | `-mc-egress-group-id` | IANA group-id (bytes 12–13) for egress groups (default: same as `-mc-group-id`) |
 | `-mc-egress-hoplimit` | `IPV6_MULTICAST_HOPS` (default 1) |
 
-Multicast egress fires independently of unicast egress — both paths execute
+Multicast egress fires independently of unicast egress; both paths execute
 for every accepted frame. `strip-header` governs only the final unicast hop;
 multicast egress always re-emits the complete frame (header + payload), since
 bridged-domain members must decode the header to demux, gap-track, and NACK.
@@ -568,7 +601,7 @@ so the stock listener is unchanged; an alternative sink can be injected via
 `listener.New` to receive every frame the worker would otherwise unicast. The
 interface mirrors `Sender`'s surface exactly (`Send`, `SendBlock`,
 `SendSubtreeData`, `SendBeef`, `SendRaw`, `Proto`, `Close`) and leaks no routing or policy
-detail — analogous to the proxy's pluggable-ingress seam. A downstream build
+detail, analogous to the proxy's pluggable-ingress seam. A downstream build
 can plug a multi-consumer sink into this seam without forking.
 
 ### Multi-consumer fan-out (`fanout` package)
@@ -581,23 +614,23 @@ ingress + decode N times before any consumer is served. Instead the worker
 decodes once and `fanout.Sink` (an `EgressSink`) delivers to the matching subset
 of a **consumer table**:
 
-- **Shard dimension** — inverted into a reverse index (`shardIdx → consumers`),
+- **Shard dimension**: inverted into a reverse index (`shardIdx → consumers`),
   so a transaction frame's per-frame cost is `O(consumers-on-that-shard)`, not
   `O(all-consumers)`. Consumers with no shard restriction are an `allShards` set.
-- **Subtree dimension** — the residual predicate reuses `filter.Filter.Allow`.
+- **Subtree dimension**: the residual predicate reuses `filter.Filter.Allow`.
 - **Control frames** (BRC-131/132, BRC-135 headers) broadcast to all consumers,
   matching the worker's bypass-filter semantics for those classes.
-- **Own-traffic exclusion (opt-in)** — a consumer entry with a non-zero
+- **Own-traffic exclusion (opt-in)**: a consumer entry with a non-zero
   `OwnIngressIP` does not receive its own transactions back: a frame (or
   bundle) whose proxy-stamped `HashKey` matches
   `XXH64(OwnIngressIP ∥ groupIdx ∥ SubtreeID)` is skipped for that consumer
   (and surfaced to the optional `IngressObserver` so a downstream build can
   meter the upstream volume). Zero `OwnIngressIP` (the default) keeps full
   delivery.
-- **BEEF election (BRC-148)** — a `TopicSet` / `BEEFVersions` on the entry
+- **BEEF election (BRC-148)**: a `TopicSet` / `BEEFVersions` on the entry
   filters `SendBeef` per consumer. An **empty `TopicSet` delivers nothing** on
-  the object plane (no election is no subscription); the aggregator posture —
-  every topic on the consumer's elected groups — is the explicit `AllTopics`
+  the object plane (no election is no subscription); the aggregator posture
+  (every topic on the consumer's elected groups) is the explicit `AllTopics`
   opt-in, never an encoding of emptiness. An empty `BEEFVersions` admits all
   encodings. A frame the consumer's own election excludes is surfaced to the
   optional `BEEFObserver` (`Consumer.BEEFObs`) with the reason (`topic` or
@@ -620,13 +653,13 @@ on stdout for fleet aggregation; `-log-level` is runtime-togglable via
 a `bsl_host_info` gauge.
 
 **Category-8 OS/NIC logging:** the pilot-driven auto-join path in `main.go`
-classifies `AddGroup` failures — an `ENOBUFS` from exceeding `net.ipv6.mld_max_msf`
+classifies `AddGroup` failures: an `ENOBUFS` from exceeding `net.ipv6.mld_max_msf`
 (the kernel's per-socket source-filter cap, the canonical fleet-scale SSM join
 failure) is logged at Error with the errno and a remediation hint, distinct from
 generic join failures.
 
 **Tracing** is opt-in (`-trace-sampling > 0` + `-otlp-endpoint`) and
-control-plane only — the receive/reassembly hot paths take no span. See the
+control-plane only; the receive/reassembly hot paths take no span. See the
 [Unified Component Logging](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md).
 
 ## Testing

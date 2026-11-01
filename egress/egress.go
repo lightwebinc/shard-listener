@@ -248,8 +248,8 @@ func (s *Sender) SendRaw(buf []byte) error {
 
 // SendBlock forwards a BRC-131 block control frame to the downstream.
 // When stripHeader is true the frame is stripped to the bare BRC-144 block
-// object a downstream reader expects, through the same helper the commercial
-// delivery lane uses; a frame carrying no whole block is refused rather than
+// object a downstream reader expects, through objfmt.StripBytes (shared with
+// downstream builds); a frame carrying no whole block is refused rather than
 // forwarded as bytes no BRC-144 reader can parse. Otherwise the full raw wire
 // buffer is forwarded.
 func (s *Sender) SendBlock(raw []byte, bf *frame.BlockFrame) error {

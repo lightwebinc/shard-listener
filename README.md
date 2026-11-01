@@ -6,7 +6,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/lightwebinc/shard-listener.svg)](https://pkg.go.dev/github.com/lightwebinc/shard-listener)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-> Part of the [**BSV Layered Multicast**](https://github.com/lightwebinc/bsv-multicast) open-source project — see the main repository for the full architecture, design docs, and BRC specifications.
+> Part of the [**BSV Layered Multicast**](https://github.com/lightwebinc/bsv-multicast) open-source project; see the main repository for the full architecture, design docs, and BRC specifications.
 
 Multicast subscriber and forwarder for the BSV transaction sharding pipeline.
 Receives BRC-124/BRC-128 frames from the `shard-proxy` multicast fabric, applies
@@ -38,7 +38,7 @@ shard-listener \
   -egress-addr 127.0.0.1:9100
 ```
 
-SSM (Posture C — requires PIM-SSM in the fabric and raised
+SSM (requires PIM-SSM in the fabric and a raised
 `net.ipv6.mld_max_msf`):
 
 ```sh
@@ -64,19 +64,19 @@ make docker      # build Docker image
 ## Documentation
 
 - [Architecture](docs/architecture.md)
-- [Configuration reference](docs/configuration.md) — every flag, plus the
+- [Configuration reference](docs/configuration.md): every flag, plus the
   `bsl_` metrics reference
 - [Testing](docs/testing.md)
-- [Unified Component Logging](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md) — `-log-format json` structured logs, `host.inventory`, `-trace-sampling`, runtime `/loglevel`
+- [Unified Component Logging](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md): `-log-format json` structured logs, `host.inventory`, `-trace-sampling`, runtime `/loglevel`
 - [Protocol specification](https://github.com/lightwebinc/shard-common/blob/main/docs/protocol.md)
 - [BRC-126 (Retransmission Protocol)](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-126-retransmission-protocol.md)
 
 ## Dependencies
 
-- [`github.com/lightwebinc/shard-common`](https://github.com/lightwebinc/shard-common) — `frame`, `shard` packages
+- [`github.com/lightwebinc/shard-common`](https://github.com/lightwebinc/shard-common): `frame`, `shard` packages
 - Prometheus client (`client_golang`, `common`) + OpenTelemetry SDK, OTLP gRPC and Prometheus exporters
-- `golang.org/x/sys` — `SO_REUSEPORT`, multicast socket options
-- `github.com/alicebob/miniredis/v2` — in-process Redis for egress dedup tests
+- `golang.org/x/sys`: `SO_REUSEPORT`, multicast socket options
+- `github.com/alicebob/miniredis/v2`: in-process Redis for egress dedup tests
 
 ## Container image
 

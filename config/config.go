@@ -207,7 +207,7 @@ type Config struct {
 	//   set. Production uses manifest-driven discovery.
 	// SSMBootstrapRefresh: DNS re-resolve interval (default 30s).
 	// LocalSource: the co-located proxy's BIND_SOURCE on a collapsed node.
-	//   Excluded from every roster-driven (S,G) join — joining the node's
+	//   Excluded from every roster-driven (S,G) join: joining the node's
 	//   own source on the PIM interface installs an iif==oif mroute and
 	//   loops originated frames until hop-limit death (~60x amplification,
 	//   measured in a geo SSM lab). Consequence: this listener
@@ -941,13 +941,13 @@ func Load() (*Config, error) {
 
 	// Deprecation: when -egress-dedup-redis-addr is empty but the deprecated
 	// -txid-dedup-addr is set, alias the old values into the new fields. This
-	// preserves behaviour for operators who have not yet migrated. An info
-	// log is emitted at startup (in main.go) when the alias is taken.
+	// preserves behavior for operators who have not yet migrated. A warning
+	// is logged at startup (in main.go) when the alias is taken.
 	if c.EgressDedupRedisAddr == "" && c.TxidDedupAddr != "" {
 		c.EgressDedupRedisAddr = c.TxidDedupAddr
 	}
 	if c.TxidDedupPrefix != "" {
-		// Operator set the deprecated flag explicitly — honour it.
+		// Operator set the deprecated flag explicitly; honor it.
 		c.EgressDedupPrefix = c.TxidDedupPrefix
 	}
 	if c.TxidDedupTTL > 0 {
@@ -1019,7 +1019,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("live-resharding requires egress-dedup-cap > 0 (dedup absorbs bridging-window duplicates)")
 	}
 	if c.AutoConfigEnabled && c.AutoConfigLiveResharding && c.EgressDedupTTL < 4*time.Second {
-		// Loose floor — full check (>= 2 × bridging window) happens at
+		// Loose floor; full check (>= 2 × bridging window) happens at
 		// bridging-mode entry, since the bridging window is not known
 		// until the pilot publishes a Successor block.
 		return nil, fmt.Errorf("live-resharding requires egress-dedup-ttl >= 4s (got %s); production deployments should size to >= 2 × bridgingWindow", c.EgressDedupTTL)

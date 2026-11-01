@@ -1,4 +1,4 @@
-# shard-listener — Configuration Reference
+# shard-listener Configuration Reference
 
 All parameters are accepted as CLI flags. Environment variables serve as
 fallbacks; hard-coded defaults apply when neither is present.
@@ -22,7 +22,7 @@ Multicast scope nibble. Must match the proxy's `-scope`.
 |----------|--------|-----------------------------------------------------|
 | `link` | `FF02` | Same L2 segment only |
 | `site` | `FF05` | Site-local; crosses routers within a site (default) |
-| `org` | `FF08` | Organisation-wide |
+| `org` | `FF08` | Organization-wide |
 | `global` | `FF0E` | Internet-wide |
 
 ### `-mc-group-id` / `MC_GROUP_ID` (default: `0x000B`)
@@ -40,7 +40,7 @@ The default `0x000B` corresponds to the IANA-assigned Bitcoin allocation
 
 Role in the receiver/delivery split:
 
-| Value | Behaviour |
+| Value | Behavior |
 |-------------|--------------------------------------------------------------|
 | `collapsed` | Default monolith: join fabric `(S,G)`, demux/gap/NACK, and fan out to consumers in one process. |
 | `receiver` | Multicast-facing half: joins + gap/NACK, forwards raw frames (envelope-preserving) to the delivery tier. |
@@ -49,7 +49,7 @@ Role in the receiver/delivery split:
 ### `-delivery-addrs` / `DELIVERY_ADDRS` (default: empty)
 
 Receiver mode only: comma-separated delivery `host:port` set. Every demuxed
-frame is fanned out (envelope-preserving — `HashKey`/`SeqNum` intact) to each
+frame is fanned out (envelope-preserving: `HashKey`/`SeqNum` intact) to each
 entry. Empty falls back to the single `-egress-addr` (equivalent to collapsed
 egress).
 
@@ -57,15 +57,16 @@ egress).
 
 ## SSM (RFC 4607)
 
-See the [SSM Support Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm)
+See the [Source-Specific Multicast design](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#source-specific-multicast-ssm)
 for the full design. ASM remains the default; SSM is fully opt-in.
 
 ### `-source-mode` / `SOURCE_MODE` (default: `asm`)
 
 Multicast addressing model: `asm` (FF0x scope; default) or `ssm`
 (FF3x scope per RFC 4607). In SSM mode the prefix is derived via
-`shard.Prefix(SSM, scope)` — FF35 for site, FF3E for global. RFC 8815
-deprecates ASM at global scope and the validator rejects it. All three
+`shard.Prefix(SSM, scope)`: FF35 for site, FF3E for global, the only two
+scopes SSM accepts (`-scope link|org` with `-source-mode ssm` is a startup
+error). All three
 join sites (data plane, beacon, subtree-announce) branch between
 `IPV6_JOIN_GROUP` (ASM) and `MCAST_JOIN_SOURCE_GROUP` (SSM, one per
 source) via the shared `shard-common/netjoin` helper.
@@ -81,8 +82,8 @@ group `(S,G)` join.
 ### `-ssm-bootstrap-beacon` / `SSM_BOOTSTRAP_BEACON` (default: `""`)
 
 CSV of retry-endpoint source IPs (the retry-endpoint is the beacon
-emitter — see BRC-126). Used as the SSM source set for the beacon
-group `(S,G)` join under Posture C.
+emitter; see BRC-126). Used as the SSM source set for the beacon
+group `(S,G)` join under SSM.
 
 ### `-ssm-bootstrap-subtree-announce` / `SSM_BOOTSTRAP_SUBTREE_ANNOUNCE` (default: `""`)
 
@@ -107,7 +108,7 @@ DNS outage doesn't drop active joins.
 ### `-local-source` / `LOCAL_SOURCE` (default: `""`)
 
 The co-located proxy's `BIND_SOURCE` on a collapsed node. This source is
-excluded from every roster-driven `(S,G)` join — joining the node's own source
+excluded from every roster-driven `(S,G)` join: joining the node's own source
 on the PIM interface would install an `iif==oif` mroute and loop originated
 frames until hop-limit death. When set, this listener does not receive
 own-node frames via multicast; mirror locally where own-source completeness
@@ -152,9 +153,9 @@ Empty means exclude nothing.
 
 ### BRC-142 bundle handling
 
-BRC-142 coalescing bundles (FrameVer `0x08`) are handled automatically —
+BRC-142 coalescing bundles (FrameVer `0x08`) are handled automatically;
 decoalescing needs **no CLI flag**. Bundles are decoalesced/re-bucketed and delivered by the normal
-egress path (see [architecture — BRC-142 Bundle Processing](architecture.md#brc-142-bundle-processing)).
+egress path (see [architecture: BRC-142 Bundle Processing](architecture.md#brc-142-bundle-processing)).
 When a bundle's ShardBits generation differs from this listener's, it is
 re-bucketed to the local generation; the re-bucketed datagram size cap is the
 hardcoded public-internet MTU baseline (`rebucketMaxBytes = 1500` in `listener.go`),
@@ -175,8 +176,8 @@ Downstream unicast `host:port`. Frames passing the filter are forwarded here.
 
 Egress protocol: `udp` or `tcp`.
 
-- **UDP** — one datagram per frame; no connection state.
-- **TCP** — persistent connection; reconnects automatically on error.
+- **UDP**: one datagram per frame; no connection state.
+- **TCP**: persistent connection; reconnects automatically on error.
 
 ### `-strip-header` / `STRIP_HEADER` (default: `true`)
 
@@ -185,15 +186,15 @@ downstream reader expects, rather than to the frame's raw payload:
 
 | Class | Delivered when stripped |
 |-------|-------------------------|
-| Transaction | The standard `tx` (BRC-12) or Extended Format (BRC-30) serialisation |
+| Transaction | The standard `tx` (BRC-12) or Extended Format (BRC-30) serialization |
 | Block | The BRC-144 block object. A block-control frame that carries no whole block cannot be stripped into one, so it is refused and counted as an egress error rather than forwarded |
 | Subtree | The BRC-143 subtree object: merkle root, node count, then the ordered node hashes |
 
 The subtree row is why stripping is not simply "drop the header". BRC-132 keeps
 the subtree's merkle root in the frame header and carries aggregate fields and a
 conflict tail in its payload, so its raw payload is not a subtree object and
-cannot be verified against its root. The object is rebuilt from the frame, with
-the same helper the commercial delivery lane uses.
+cannot be verified against its root. The object is rebuilt from the frame by
+`shard-common/objfmt.StripBytes`.
 
 When `false`, the complete frame is forwarded verbatim; set this only when the
 downstream re-reads frames itself (for example domain bridging into another
@@ -239,7 +240,7 @@ routed delivery.
 |----------|--------|-----------------------------------------------------|
 | `link` | `FF02` | Same L2 segment only |
 | `site` | `FF05` | Site-local; crosses routers within a site |
-| `org` | `FF08` | Organisation-wide |
+| `org` | `FF08` | Organization-wide |
 | `global` | `FF0E` | Internet-wide |
 
 ### `-mc-egress-group-id` / `MC_EGRESS_GROUP_ID` (default: same as `-mc-group-id`)
@@ -347,7 +348,7 @@ counted). Example: `[2001:db8::1]:9300,[2001:db8::2]:9300`.
 `host:port` of a **co-resident** retry-endpoint's tee ingest (its
 `-tee-listen`, conventionally `[::1]:9002`). When set, every fabric-received
 data frame is mirrored there over loopback UDP, wrapped in a
-`shard-common/teewire` envelope carrying the original datagram source — so the
+`shard-common/teewire` envelope carrying the original datagram source, so the
 co-resident cache learns frames this node did **not** originate without a
 multicast join of its own (`retry-endpoint -mc-join-enabled=false`, the
 collapsed-node co-bind end-state). The proxy's `-retry-tee` covers own-origin
@@ -355,19 +356,19 @@ frames; together the two mirrors are the cache's complete feed.
 
 Scope of the mirror (deliberate, all four matter for cache correctness):
 
-- **Raw wire bytes, pre-dedup, pre-reassembly** — the cache must hold exactly
+- **Raw wire bytes, pre-dedup, pre-reassembly**: the cache must hold exactly
   what a NACK asks for; fragments and bundles are cached as wire frames.
 - **Data frames only** (fabric magic, FrameVer `0x01–0x09` except `0x07`):
   control datagrams would only book decode-error drops at the cache, and
   BRC-135 header frames are outside the primary NACK path.
-- **Never from `Reinject`** — a NACK-recovered frame came *from* a retry cache
+- **Never from `Reinject`**: a NACK-recovered frame came *from* a retry cache
   and is not re-mirrored.
-- **Never from the local-mirror ingest** (`Worker.RunUnicastIngestOn`, used by downstream builds) — those are
+- **Never from the local-mirror ingest** (`Worker.RunUnicastIngestOn`, used by downstream builds): those are
   own-origin frames the proxy's tee already mirrors.
 
 Failure posture: dial errors **fail startup closed** (a tee-only cache
 depending on this feed must not silently lose it), but per-frame write errors
-are counted (`bsl_retry_tee_errors_total`) and never retried — a missed mirror
+are counted (`bsl_retry_tee_errors_total`) and never retried; a missed mirror
 only narrows repair to the other endpoints a listener walks on MISS.
 Mirrored frames are counted in `bsl_retry_tee_frames_total`.
 
@@ -387,13 +388,13 @@ Cap on exponential backoff between successive NACK retries for the same gap.
 
 ### `-nack-max-retries` / `NACK_MAX_RETRIES` (default: `5`)
 
-Maximum **failed recovery rounds** per gap — a response timeout, a send
+Maximum **failed recovery rounds** per gap: a response timeout, a send
 error, or a MISS from the deepest endpoint in the registry. Once reached the
 gap is declared unrecoverable and evicted (`bsl_gaps_unrecovered_total` and
 `bsl_gaps_abandoned_total{reason="retries"}` incremented).
 
 > **Tier escalation is free:** a MISS with endpoints still to try advances to
-> the next registry entry immediately — it consumes no round and applies no
+> the next registry entry immediately; it consumes no round and applies no
 > backoff, and a clean escalation resets the failed-round counter. The budget
 > therefore does not need to be sized to the registry length; only consecutive
 > failed rounds count.
@@ -436,15 +437,15 @@ unbounded.
 
 Forward `SeqNum` jump beyond which a flow re-baselines (emitter change, e.g.
 anycast failover between proxies with divergent counters) instead of
-registering — and NACK-storming — a phantom gap range. `0` selects the
+registering (and NACK-storming) a phantom gap range. `0` selects the
 default 4096. See
-[architecture — Gap tracking](architecture.md#gap-tracking-nack--norm-inspired)
-for the rate-aware plausibility check and the v1.7.1 transition-tail recovery.
+[architecture: Gap tracking](architecture.md#gap-tracking-nack--norm-inspired)
+for the rate-aware plausibility check and the transition-tail recovery.
 
 ### Tail probe
 
-Gap detection is otherwise inferential — frame N is only known lost when N+1
-arrives — so the last frames before a sender idles are invisible. The tail
+Gap detection is otherwise inferential (frame N is only known lost when N+1
+arrives), so the last frames before a sender idles are invisible. The tail
 probe speculatively NACKs the next expected `SeqNum` on a flow that has gone
 quiet, using the existing MISS response (no protocol change). Silence counts
 as abnormal after `idle-factor ×` the flow's own smoothed inter-arrival,
@@ -497,7 +498,7 @@ siblings sharing a `-deployment-id` arbitrate a single forwarder per TxID
 through a shared backend, keyed per `DEPLOYMENT_ID` (not across all
 listeners). See `-egress-dedup-redis-addr` / `-egress-dedup-prefix` /
 `-egress-dedup-ttl-redis` and `-deployment-id` below. The old
-`-txid-dedup-*` flags remain as aliases — see
+`-txid-dedup-*` flags remain as aliases; see
 [Deprecated TxID dedup flags](#deprecated-txid-dedup-flags).
 
 Local egress dedup (above) operates on `(groupIdx, subtreeID, SeqNum)` within
@@ -536,17 +537,17 @@ selects which form this listener joins.
 
 | Value | ASM prefix | SSM prefix | Reach |
 |--------|-----------|------------|--------------------------------------|
-| `link` | `FF02` | — | Same L2 segment only |
+| `link` | `FF02` | none | Same L2 segment only |
 | `site` | `FF05` | `FF35` | Site-local; crosses routers within a site |
-| `org` | `FF08` | — | Organisation-wide |
+| `org` | `FF08` | none | Organization-wide |
 | `global` | `FF0E` | `FF3E` | Internet-wide |
 
 BRC-129 tables an SSM control group at site and global scope only, so
-`link` and `org` are ASM-only. With `-control-group-compat derived` — an
-explicit request for the conformant address — combining either with
+`link` and `org` are ASM-only. With `-control-group-compat derived` (an
+explicit request for the conformant address), combining either with
 `-source-mode ssm` is a startup error rather than a silent fall back to
-`FF0x`. With `asm-only` or `both` they keep working exactly as today (`both`
-simply has no second form to add), so a binary upgrade at default settings
+`FF0x`. With `asm-only` or `both` they keep working (`both`
+simply has no second form to add), so the default settings
 can never fail to start.
 
 At site scope the beacon group is therefore `FF05::B:FFFD` under ASM and
@@ -555,7 +556,7 @@ At site scope the beacon group is therefore `FF05::B:FFFD` under ASM and
 > **Firewall:** the listener's nftables input chain must accept UDP traffic on
 > `beacon-port` from the beacon multicast prefix (`ff00::/8`) on the fabric
 > interface. The `listener-infra` Ansible role already includes this rule.
-> `ff00::/8` covers both `FF0x` and `FF3x`, so the rule needs no change — but
+> `ff00::/8` covers both `FF0x` and `FF3x`, so the rule needs no change, but
 > any deployment that narrowed it to the ASM block (`ff05::/16`,
 > `ff0e::/16`) must widen it to the matching SSM block (`ff35::/16`,
 > `ff3e::/16`) before moving off `-control-group-compat asm-only`. The same
@@ -568,37 +569,31 @@ At site scope the beacon group is therefore `FF05::B:FFFD` under ASM and
 Which multicast prefix the control-plane groups this listener joins are
 derived from:
 
-- index `0xFFFD` — BRC-126 ADVERT beacons on `-beacon-port` and BRC-139
+- index `0xFFFD`: BRC-126 ADVERT beacons on `-beacon-port` and BRC-139
   manifests on `-manifest-beacon-port`, which share that group address;
-- index `0xFFFC` — BRC-127 subtree group announcements, joined at
-  `-announce-scope` (see that flag: on this group the proxy was already
-  conformant, so the join was simply mismatched under SSM rather than
-  needing a transition).
+- index `0xFFFC`: BRC-127 subtree group announcements, joined at
+  `-announce-scope` (see that flag).
 
 | Value | Joins |
 |-------|-------|
-| `asm-only` | Always the any-source `FF0x` form, ignoring `-source-mode`. Pre-fix behaviour. |
+| `asm-only` | Always the any-source `FF0x` form, ignoring `-source-mode`. |
 | `both` (default) | Both the `FF0x` form and the `-source-mode`-derived form, where one exists. |
 | `derived` | The `-source-mode`-derived form only: `FF3x` under `-source-mode ssm`. BRC-126/129 conformant. |
 
 Under `-source-mode asm` all three collapse to the same single `FF0x`
 prefix, so the flag does nothing in an ASM deployment.
 
-**This is a flag day.** Releases before this one always derived the
-any-source prefix here, even under `-source-mode ssm` — while the data plane
-in the same process derived `FF3x` correctly. A listener joined to
-`FF35::B:FFFD` hears nothing from a retry endpoint still advertising into
+**Why the default is `both`.** Senders and receivers do not all move to the
+`FF3x` form at once, and a mismatch is silent: a listener joined only to
+`FF35::B:FFFD` hears nothing from a retry endpoint advertising into
 `FF05::B:FFFD`, and a beacon that lands on the wrong group raises no error
-anywhere: the symptom is that ADVERTs and manifests simply never arrive, the
+anywhere. The symptom is that ADVERTs and manifests simply never arrive, the
 endpoint registry stays empty and the manifest consumer never reaches pilot
-quorum.
+quorum. A listener that joins both forms hears every sender whichever form it
+uses. Entries that share a UDP port share one socket, so `both` costs an extra
+membership per port, not an extra socket.
 
-The default is `both` precisely so that upgrading listeners is safe on its
-own: a listener that joins both groups hears un-upgraded and upgraded
-senders alike. Entries that share a UDP port share one socket, so `both`
-costs an extra membership per port, not an extra socket.
-
-**Rollout order** — the senders are `retry-endpoint` (ADVERT) and
+**Rollout order.** The senders are `retry-endpoint` (ADVERT) and
 `shard-manifest` (manifest); the other receiver is `shard-proxy`:
 
 1. Roll every **receiver** (shard-listener, shard-proxy). Default `both`; no
@@ -616,32 +611,31 @@ the one ordering that silently strands a peer.
 Note that under `-source-mode ssm` a fabric's multicast routes and PIM/
 smcroute group ranges are usually derived from the source mode too, and so
 cover `ff35::/16` and `ff3e::/16` but not `ff05::/16`. The legacy leg of
-`both` therefore reaches only same-segment peers on such a fabric — which is
-all it reached before this fix as well.
+`both` therefore reaches only same-segment peers on such a fabric.
 
 ---
 
 ## Auto-Shard-Config (BRC-139)
 
 The listener can consume BRC-139 ShardManifest announcements off the same
-beacon **group** — on its own **port** (`-manifest-beacon-port`, see below) —
+beacon **group**, on its own **port** (`-manifest-beacon-port`, see below),
 applying the normative consumer profile (Authoritative quorum, hysteresis,
 ±1 ShardBits shift bound, manual-pin precedence).
 Default off; opt-in via `-manifest-consumer-enabled`. See the
-[Automatic Shard Configuration Plan](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#automatic-shard-configuration)
+[Automatic Shard Configuration design](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#automatic-shard-configuration)
 for the system-level design.
 
 ### `-manifest-consumer-enabled` / `MANIFEST_CONSUMER_ENABLED` (default: `false`)
 
 Master switch. When false, the beacon listener drops any
-`MsgType=0x40` (ShardManifest) datagram it sees and behavior matches
-today exactly. When true, manifests are decoded, upserted into a
+`MsgType=0x40` (ShardManifest) datagram it sees; nothing else changes.
+When true, manifests are decoded, upserted into a
 `shard-common/manifest.Registry`, and evaluated on a 1 s tick.
 
 ### `-manifest-beacon-port` / `MANIFEST_BEACON_PORT` (default: `9001`)
 
 UDP port on the beacon group that carries BRC-139 manifests. It is **not**
-`-beacon-port`: the beacon group carries two conversations on two ports —
+`-beacon-port`: the beacon group carries two conversations on two ports,
 retry-endpoint ADVERTs on `-beacon-port` (9300) and shard-manifest
 announcements on the announcer's `-port` (9001). When the manifest consumer is
 enabled the listener opens a second socket on this port and joins the same
@@ -654,7 +648,7 @@ the receive loop demuxes ADVERT from manifest on the MsgType byte.
 
 Under `-source-mode ssm` this port joins the sources from
 `-ssm-bootstrap-manifest` (the announcers), while `-beacon-port` keeps the
-`-ssm-bootstrap-beacon` sources (the retry endpoints) — the two publishers are
+`-ssm-bootstrap-beacon` sources (the retry endpoints); the two publishers are
 different hosts, so one shared (S,G) roster would filter one of them out.
 
 > **Firewall:** the input chain must accept UDP on this port from `ff00::/8`
@@ -702,7 +696,7 @@ dedup can absorb the duplicate frames a bridging proxy emits.
 
 ### `-bridging-window` / `BRIDGING_WINDOW` (default: `0`)
 
-Local floor on the bridging duration. `0` ⇒ honour the pilot's
+Local floor on the bridging duration. `0` ⇒ honor the pilot's
 `TransitionEpoch` verbatim; nonzero ⇒ `MAX(pilot, this)`.
 
 ---
@@ -738,23 +732,21 @@ scope used by the proxy's multicast egress for the control-plane group.
 
 | Value | ASM prefix | SSM prefix | Reach |
 |--------|-----------|------------|--------------------------------------|
-| `link` | `FF02` | — | Same L2 segment only |
+| `link` | `FF02` | none | Same L2 segment only |
 | `site` | `FF05` | `FF35` | Site-local; crosses routers within a site |
-| `org` | `FF08` | — | Organisation-wide |
+| `org` | `FF08` | none | Organization-wide |
 | `global` | `FF0E` | `FF3E` | Internet-wide |
 
 As for the beacon group, the prefix depends on `-source-mode` and on
 `-control-group-compat`: `0xFFFC` is a control-plane group and BRC-129's
 prefix rule covers it. `link` and `org` have no SSM control group, so
 combining either with `-source-mode ssm` and `-control-group-compat derived`
-is a startup error; `asm-only` and `both` keep working as today.
+is a startup error; `asm-only` and `both` keep working.
 
-Unlike the beacon, this side was the **only** non-conformant one: the proxy
-already emits announcements via its `-source-mode`-derived prefix, so a
-listener that joined `FF05::B:FFFC` on an SSM fabric never saw an
-announcement at all. There is no flag day here, only a mismatch to close —
-the default (`both`) closes it without assuming which prefix a given proxy
-uses.
+The proxy emits announcements via its `-source-mode`-derived prefix, so a
+listener that joined only `FF05::B:FFFC` on an SSM fabric would never see an
+announcement; the default (`both`) covers both forms without assuming which
+prefix a given proxy uses.
 
 ### `-sender-include` / `SENDER_INCLUDE`
 
@@ -775,10 +767,9 @@ Comma-separated IPv6/IPv4 addresses or CIDRs to reject. Checked before
 `-sender-include` and applied to both announcements and data-plane frames.
 Empty means exclude nothing.
 
-> **Upgrade note:** prior releases applied `-sender-include` /
-> `-sender-exclude` only to BRC-127 announcements. They now also gate
-> data-plane frames. If you already configured an include list, ensure
-> your proxy / source IP is covered before upgrading.
+> Because the include list also gates data-plane frames, it must cover the
+> proxy / source addresses this listener receives from, or every data frame
+> is dropped.
 
 ---
 
@@ -796,14 +787,9 @@ Enable BRC-132 subtree data reception. When `true`, the listener joins
 `GroupSubtreeDataAnnounce` (`0xFFFB`) in addition to its shard groups and `GroupBlockBroadcast`.
 When `false` (the default), the group is not joined and BRC-132 frames are never received.
 
-### `-subtree-data-verify-merkle` (REMOVED)
-
-This flag is gone. It parsed and threaded through to the reassembly buffer, where nothing
-read it: no listener build ever verified a Merkle root. A subtree's root is now checked where
-the subtree ENTERS the fabric, by `shard-proxy`'s `-verify-subtree-root` (on by default),
+The listener does not verify subtree Merkle roots. A subtree's root is checked where
+the subtree enters the fabric, by `shard-proxy`'s `-verify-subtree-root` (on by default),
 which sees the whole object before it is framed and drops a mismatch before it is multicast.
-A listener passing this flag on the command line will fail to start; remove it. The
-environment variable is simply ignored.
 
 ---
 
@@ -811,18 +797,20 @@ environment variable is simply ignored.
 
 ### `-workers` / `NUM_WORKERS` (default: `runtime.NumCPU()`)
 
-Number of SO_REUSEPORT receive worker goroutines.
+Number of SO_REUSEPORT receive worker goroutines, each with its own socket. A
+worker processes each datagram inline in its receive loop (decode, reassembly,
+delivery) before reading the next.
 
-> **Critical — multicast receive:** Linux does **not** load-balance multicast
+> **Critical for multicast receive:** Linux does **not** load-balance multicast
 > datagrams across SO_REUSEPORT sockets. Every socket that has joined a
 > multicast group receives a copy of each datagram, so `num_workers > 1`
 > causes every frame to be processed and forwarded that many times, inflating
 > all metrics and producing duplicate egress datagrams.
 > **Always set `NUM_WORKERS=1` when receiving multicast.**
 >
-> SO_REUSEPORT load balancing applies to unicast UDP only (e.g. the E2E test
-> path or a future unicast ingress mode). For the normal multicast-receive
-> deployment path, a single worker is correct.
+> SO_REUSEPORT load balancing applies to unicast UDP only: the E2E test
+> path and the `-mode delivery` unicast ingest. For the multicast-receive
+> roles (`collapsed`, `receiver`), a single worker is correct.
 
 ### `-debug` / `DEBUG` (default: `false`)
 
@@ -831,8 +819,8 @@ Enable per-frame debug logging (decode errors, forwarded frames, gap events).
 ### `-verify-payload-hash` / `VERIFY_PAYLOAD_HASH` (default: `false`)
 
 When `true`, verify that the TxID field in BRC-124/BRC-128 frames matches the
-canonical transaction id of its payload: `objfmt.TxID` — SHA256d over the
-standard serialization, EF extras excluded — for both raw and Extended Format
+canonical transaction id of its payload: `objfmt.TxID` (SHA256d over the
+standard serialization, EF extras excluded) for both raw and Extended Format
 payloads. This is the same id producers stamp and consumers dedup on, so honest
 EF lanes verify cleanly; hashing the raw EF bytes instead would drop every
 honest EF frame.
@@ -853,12 +841,11 @@ junk" verifies against the honest id and carries the tail downstream.
 BRC-12 (V1) legacy frames are forwarded verbatim regardless of this setting.
 BRC-130 reassembled payloads run the identical check on completion.
 
-> **Behaviour change.** Verification previously accepted *any* payload whose
-> raw SHA256d matched the frame's TxID, so a non-transaction payload could
-> verify. It now requires the payload to be exactly one well-formed
-> transaction. Honest traffic is unaffected — for a payload that really is one
-> transaction the derived id is identical — but a synthetic load generator that
-> stamps `SHA256d(arbitrary bytes)` will be dropped when this flag is on.
+> A payload that is not exactly one well-formed transaction fails even when
+> its raw SHA256d matches the frame's TxID. Honest traffic passes (for a payload
+> that really is one transaction the derived id is identical), but a synthetic
+> load generator that stamps `SHA256d(arbitrary bytes)` is dropped when this
+> flag is on.
 
 There is no listener equivalent of the proxy's `-allow-stamped-ingress`: every
 frame a listener receives was stamped by a proxy, so stamping carries no
@@ -867,11 +854,11 @@ admission signal here.
 ### `-require-block-pow` / `REQUIRE_BLOCK_POW` (default: `true`)
 
 Validate block control frames before fan-out. Inter-domain block announcements
-reach the listener over the multicast fabric without passing our proxy, so the
-listener must independently validate them — this is the permissionless gate
+reach the listener over the multicast fabric without passing this operator's
+proxy, so the listener must independently validate them; this is the permissionless gate
 (validate the artifact, not the emitter):
 
-- **BRC-131 block announce** — the in-frame 80-byte header must satisfy proof
+- **BRC-131 block announce**: the in-frame 80-byte header must satisfy proof
   of work: `hash(header) ≤ target(nBits)`, and that target must be at least as
   hard as `-min-pow-bits`. Failing frames are dropped
   (`bsl_frames_dropped_total{reason="block_pow"}`) and not gap-tracked.
@@ -891,7 +878,7 @@ consuming node does full validation. BRC-134 anchors are deliberately ungated.
 
 PoW difficulty floor for `-require-block-pow`, in Bitcoin compact `nBits` form
 (e.g. `0x1d00ffff`). `0` checks only that the header is self-consistent, which
-a forger satisfies by claiming trivial difficulty — set a real floor in
+a forger satisfies by claiming trivial difficulty; set a real floor in
 production.
 
 
@@ -909,9 +896,10 @@ for rolling restarts behind a load balancer.
 ### `-metrics-addr` / `METRICS_ADDR` (default: `:9200`)
 
 HTTP bind address for:
-- `GET /metrics` — Prometheus scrape endpoint
-- `GET /healthz` — always `200 OK` while the process is running
-- `GET /readyz` — `200` when all workers are ready; `503` while starting or draining
+- `GET /metrics`: Prometheus scrape endpoint
+- `GET /healthz`: always `200 OK` while the process is running
+- `GET /readyz`: `200` when all workers are ready; `503` while starting or draining
+- `GET` / `PUT` / `POST /loglevel`: read or set the runtime log level (see `-log-level`)
 
 ### `-instance` / `INSTANCE_ID` (default: hostname)
 
@@ -980,7 +968,7 @@ only). Aerospike seed nodes are set with `-egress-dedup-aerospike-hosts`
 ### `-egress-dedup-redis-addr` / `EGRESS_DEDUP_REDIS_ADDR`
 
 Redis-protocol address (Redis/Valkey/Dragonfly) for the per-deployment egress
-TxID dedup. Empty falls back to a tier-1 in-process LRU only — useful for
+TxID dedup. Empty falls back to a tier-1 in-process LRU only, useful for
 single-listener deployments or when the backend is unavailable.
 
 Final key shape: `<EGRESS_DEDUP_PREFIX><DEPLOYMENT_ID>:<hex-txid>`.
@@ -1036,9 +1024,9 @@ writes for repeated TxIDs).
 
 The old `-txid-dedup-addr` / `-txid-dedup-prefix` / `-txid-dedup-ttl`
 remain accepted as aliases for the corresponding `-egress-dedup-*` flags
-and trigger a startup warning. They will be removed in a future release.
-A single-listener deployment that previously set these flags continues to
-work without changes (deployment-id defaults to hostname).
+(`-txid-dedup-ttl` maps to `-egress-dedup-ttl-redis`) and trigger a startup
+warning. A single-listener deployment that sets only these flags works
+unchanged (deployment-id defaults to hostname).
 
 ---
 
@@ -1056,53 +1044,53 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_frames_received_total` | `worker`, `network_interface_name`, `version` | Multicast frames received |
 | `bsl_frames_forwarded_total` | `worker`, `proto` | Frames forwarded to downstream unicast |
 | `bsl_frames_dropped_total` | `worker`, `reason` | Frames dropped before egress |
-| `bsl_frames_invalid_payload_total` | `worker` | BRC-124/BRC-128 frames dropped because SHA256d(payload) != TxID |
+| `bsl_frames_invalid_payload_total` | `worker` | BRC-124/BRC-128 frames dropped because the payload's canonical TxID != the frame's TxID (`-verify-payload-hash`) |
 | `bsl_frames_deduped_total` | `worker` | BRC-124/BRC-128 retransmits suppressed before egress (egress dedup) |
-| `bsl_frames_tx_deduped_total` | `worker` | Frames suppressed by Redis TxID claim (cross-listener dedup) |
+| `bsl_frames_tx_deduped_total` | `worker` | Frames suppressed by a shared-backend TxID claim (cross-listener dedup) |
 | `bsl_egress_errors_total` | `worker` | Errors sending to downstream |
 | `bsl_mc_egress_errors_total` | `worker` | Errors sending to multicast egress |
 | `bsl_retry_tee_frames_total` | `worker` | Received data frames mirrored to the co-resident retry-endpoint tee ingest (`-retry-tee`) |
-| `bsl_retry_tee_errors_total` | `worker` | Retry-tee mirror writes that failed (frame not cached locally; repair for it falls to other endpoints). Never retried — the mirror is deliberately lossy |
+| `bsl_retry_tee_errors_total` | `worker` | Retry-tee mirror writes that failed (frame not cached locally; repair for it falls to other endpoints). Never retried; the mirror is deliberately lossy |
 
 ### Gap recovery (BRC-126)
 
 | Metric | Labels | Meaning |
 |---|---|---|
 | `bsl_gaps_detected_total` | `flow`, `source` | Sequence gaps detected (missing frames) |
-| `bsl_gaps_suppressed_total` | `flow`, `source` | Gaps cancelled by retransmit fill or ACK response |
+| `bsl_gaps_suppressed_total` | `flow`, `source` | Gaps canceled by retransmit fill or ACK response |
 | `bsl_gaps_unrecovered_total` | `flow`, `source` | Gaps evicted after retries exhausted or TTL exceeded |
 | `bsl_gaps_abandoned_total` | `flow`, `source`, `reason` | The same events, with the why: `ttl`, `retries`, `restart` (proxy restart evicted the flow's gaps), `rejected` (a repair the pipeline refused), `no_recover` (unicast-only repair with no re-injection path) |
-| `bsl_gaps_late_filled_total` | `flow`, `source` | Frames that arrived for a gap after it was abandoned — a multicast retransmit that outran the NACK deadline. A flow's real loss is `unrecovered − late_filled`; an abandoned seqNum is remembered for two minutes for this |
+| `bsl_gaps_late_filled_total` | `flow`, `source` | Frames that arrived for a gap after it was abandoned: a multicast retransmit that outran the NACK deadline. A flow's real loss is `unrecovered − late_filled`; an abandoned seqNum is remembered for two minutes for this |
 | `bsl_nacks_dispatched_total` | `flow`, `source` | NACK datagrams sent to retry endpoints |
-| `bsl_nack_send_errors_total` | `endpoint` | NACK datagrams that failed to send (`WriteTo` error) — that walk tier was never asked |
+| `bsl_nack_send_errors_total` | `endpoint` | NACK datagrams that failed to send (`WriteTo` error); that walk tier was never asked |
 | `bsl_nacks_throttled_total` | `flow`, `source` | Gaps held after a THROTTLED congestion signal |
 | `bsl_nack_flows_refused_total` | `flow` | New per-source flows skipped at the MaxFlows flood-guard cap |
 | `bsl_seq_rebaselines_total` | `flow`, `source` | Flows re-baselined on an implausible SeqNum jump (emitter change, e.g. anycast failover) |
 | `bsl_tail_probes_sent_total` | `flow`, `source` | speculative NACKs for the next expected SeqNum on an idle flow (BRC-126 tail-loss probe) |
-| `bsl_tail_probes_recovered_total` | `flow`, `source` | tail probes that returned a real frame — loss that no successor frame would ever have revealed |
-| `bsl_tail_probes_miss_total` | `flow`, `source` | tail probes answered MISS — the flow was genuinely idle, not lossy |
+| `bsl_tail_probes_recovered_total` | `flow`, `source` | tail probes that returned a real frame: loss that no successor frame would ever have revealed |
+| `bsl_tail_probes_miss_total` | `flow`, `source` | tail probes answered MISS: the flow was genuinely idle, not lossy |
 
 ### Reassembly (BRC-130)
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `bsl_reassembly_started_total` | — | BRC-130 reassembly slots opened (first fragment of a TxID received) |
-| `bsl_reassembly_completed_total` | — | BRC-130 reassemblies that produced a complete payload |
-| `bsl_reassembly_abandoned_total` | — | BRC-130 reassembly slots evicted before completion (TTL expired or buffer full) |
+| `bsl_reassembly_started_total` | none | BRC-130 reassembly slots opened (first fragment of a TxID received) |
+| `bsl_reassembly_completed_total` | none | BRC-130 reassemblies that produced a complete payload |
+| `bsl_reassembly_abandoned_total` | none | BRC-130 reassembly slots evicted before completion (TTL expired or buffer full) |
 | `bsl_reassembly_abandoned_reason_total` | `reason` | Abandoned slots by reason: `expired` (TTL reached with no repair of the missing fragments in progress, after the repair path gave up: real loss), `repair_timeout` (`-reassembly-max-age` reached while repair was still in progress: repair timing, not loss), `capacity` (slot cap). Sums to `bsl_reassembly_abandoned_total` |
-| `bsl_reassembly_repair_wait_total` | — | Slots held past `-reassembly-ttl` because repair of their missing fragments was in progress |
-| `bsl_reassembly_repair_wait_completed_total` | — | Slots held past their TTL for repair that then completed: objects a fixed TTL would have abandoned |
-| `bsl_reassembly_hash_mismatch_total` | — | Completed reassemblies dropped because SHA256d(payload) != TxID |
-| `bsl_reassembly_late_fragments_total` | — | Fragments dropped because their object already completed (multicast repair copies); a rate approaching bsl_reassembly_completed_total means repair is serving the group far more than the losses justify |
-| `bsl_reassembly_bad_fragment_total` | — | Objects dropped because a fragment's data length is inconsistent with `OrigPayloadLen`/`FragTotal` — it cannot sit at the offset BRC-130 implies (`FragIndex × fragSize`). Non-zero means a sender or path is emitting fragments that cannot be reassembled: corruption, a mis-sized fragmenter, or injection |
-| `bsl_reassembly_oversize_fragments_total` | — | Fragments dropped because their object's declared `OrigPayloadLen` exceeds the reassembly bound (`-beef-max-object-bytes` for `OrigFrameVer 0x09`, 64 MiB otherwise). Every fragment of such an object counts, so this is fragments, not objects. Non-zero on the BEEF plane means some ingress admits objects larger than this listener reassembles: the fabric carries them and no subscriber receives them |
+| `bsl_reassembly_repair_wait_total` | none | Slots held past `-reassembly-ttl` because repair of their missing fragments was in progress |
+| `bsl_reassembly_repair_wait_completed_total` | none | Slots held past their TTL for repair that then completed: objects a fixed TTL would have abandoned |
+| `bsl_reassembly_hash_mismatch_total` | none | Completed reassemblies dropped because the payload's canonical TxID != the frame's TxID |
+| `bsl_reassembly_late_fragments_total` | none | Fragments dropped because their object already completed (multicast repair copies); a rate approaching bsl_reassembly_completed_total means repair is serving the group far more than the losses justify |
+| `bsl_reassembly_bad_fragment_total` | none | Objects dropped because a fragment's data length is inconsistent with `OrigPayloadLen`/`FragTotal`: it cannot sit at the offset BRC-130 implies (`FragIndex × fragSize`). Non-zero means a sender or path is emitting fragments that cannot be reassembled: corruption, a mis-sized fragmenter, or injection |
+| `bsl_reassembly_oversize_fragments_total` | none | Fragments dropped because their object's declared `OrigPayloadLen` exceeds the reassembly bound (`-beef-max-object-bytes` for `OrigFrameVer 0x09`, 64 MiB otherwise). Every fragment of such an object counts, so this is fragments, not objects. Non-zero on the BEEF plane means some ingress admits objects larger than this listener reassembles: the fabric carries them and no subscriber receives them |
 
 ### Bundles (BRC-142)
 
 | Metric | Labels | Meaning |
 |---|---|---|
 | `bsl_bundles_rebucketed_total` | `worker` | BRC-142 bundles re-bucketed to the local ShardBits generation before delivery (cross-generation/re-shard) |
-| `bsl_rebucket_unguarded_total` | `worker` | Bundles re-bucketed on a listener NOT configured as a re-bucket relay (-rebucket-relay) — a generation-mismatch alarm: parent-stream recovery is active, but re-multicast children are unrecoverable without a child-generation retry. Alert on rate > 0. |
+| `bsl_rebucket_unguarded_total` | `worker` | Bundles re-bucketed on a listener NOT configured as a re-bucket relay (-rebucket-relay), a generation-mismatch alarm: parent-stream recovery is active, but re-multicast children are unrecoverable without a child-generation retry. Alert on rate > 0. |
 
 ### Block header lane (BRC-135)
 
@@ -1115,32 +1103,32 @@ auto-config) is documented in the BRC-139 spec instead.
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `bsl_egress_claim_won_total` | — | Per-deployment egress claim SETNX wins (frame forwarded) |
-| `bsl_egress_claim_lost_total` | — | Per-deployment egress claim SETNX losses (HA sibling already forwarded) |
-| `bsl_egress_claim_local_hit_total` | — | Tier-1 local LRU short-circuit on per-deployment egress claim |
-| `bsl_egress_claim_errors_total` | — | Redis errors during egress claim (fail-open: frame was forwarded) |
-| `bsl_txid_dedup_errors_total` | — | Redis errors during TxID dedup claim (fail-open: frame was forwarded) |
-| `bsl_ingress_mark_set_total` | — | Courtesy SETNX into the proxy's ingress namespace that created a new key |
-| `bsl_ingress_mark_existed_total` | — | Courtesy SETNX into the proxy's ingress namespace where the key already existed |
-| `bsl_ingress_mark_dropped_total` | — | Ingress-set courtesy marks dropped because the async queue was full or local-only mode is active |
-| `bsl_ingress_mark_errors_total` | — | Redis errors during ingress-set courtesy mark (best-effort) |
+| `bsl_egress_claim_won_total` | none | Per-deployment egress claim SETNX wins (frame forwarded) |
+| `bsl_egress_claim_lost_total` | none | Per-deployment egress claim SETNX losses (HA sibling already forwarded) |
+| `bsl_egress_claim_local_hit_total` | none | Tier-1 local LRU short-circuit on per-deployment egress claim |
+| `bsl_egress_claim_errors_total` | none | Backend errors during egress claim (fail-open: frame was forwarded) |
+| `bsl_txid_dedup_errors_total` | none | Backend errors during TxID dedup claim (fail-open: frame was forwarded) |
+| `bsl_ingress_mark_set_total` | none | Courtesy SETNX into the proxy's ingress namespace that created a new key |
+| `bsl_ingress_mark_existed_total` | none | Courtesy SETNX into the proxy's ingress namespace where the key already existed |
+| `bsl_ingress_mark_dropped_total` | none | Ingress-set courtesy marks dropped because the async queue was full or local-only mode is active |
+| `bsl_ingress_mark_errors_total` | none | Backend errors during ingress-set courtesy mark (best-effort) |
 
 ### Discovery (BRC-126 / BRC-127)
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `bsl_beacon_adverts_received_total` | — | Valid ADVERT beacon datagrams upserted into the endpoint registry |
-| `bsl_beacon_registry_endpoints` | — | Number of endpoints currently in the beacon discovery registry |
-| `bsl_subtree_group_announces_received_total` | — | Valid SubtreeGroupAnnounce datagrams processed (BRC-127) |
+| `bsl_beacon_adverts_received_total` | none | Valid ADVERT beacon datagrams upserted into the endpoint registry |
+| `bsl_beacon_registry_endpoints` | none | Number of endpoints currently in the beacon discovery registry |
+| `bsl_subtree_group_announces_received_total` | none | Valid SubtreeGroupAnnounce datagrams processed (BRC-127) |
 | `bsl_subtree_group_announces_rejected_total` | `reason` | SubtreeGroupAnnounce datagrams rejected before registry update |
-| `bsl_subtree_group_entries` | — | Live (groupID, subtreeID) pairs in the subtree group registry |
-| `bsl_subtree_group_evictions_total` | — | Subtree group registry entries removed by TTL expiry |
+| `bsl_subtree_group_entries` | none | Live (groupID, subtreeID) pairs in the subtree group registry |
+| `bsl_subtree_group_evictions_total` | none | Subtree group registry entries removed by TTL expiry |
 
 ### Process
 
 | Metric | Labels | Meaning |
 |---|---|---|
-| `bsl_uptime_seconds` | — | Seconds elapsed since the listener process started |
+| `bsl_uptime_seconds` | none | Seconds elapsed since the listener process started |
 | `bsl_host_info` | `hostname`, `kernel_version`, `cpu_logical`, `mem_bytes`, `rmem_max`, `nic`, `speed_mbps`, `version` | Static host facts (value always 1); join with the `host.inventory` log event |
 
 ---
@@ -1164,7 +1152,7 @@ shard-listener \
   -egress-addr consumer.local:9100 \
   -egress-proto tcp \
   -retry-endpoints retry1.local:9300,retry2.local:9300,retry3.local:9300 \
-  -beacon-enabled true \
+  -beacon-enabled=true \
   -beacon-port 9300 \
   -nack-jitter-max 100ms \
   -nack-max-retries 8 \
@@ -1175,7 +1163,7 @@ shard-listener \
 
 Every flag documented in this file is exposed under `.config` in the corresponding Helm chart's `values.yaml`. See the chart repository for installation snippets and the `values.schema.json` for validation rules.
 
-Chart: [`charts/shard-listener`](https://github.com/lightwebinc/charts/tree/main/charts/shard-listener) — supports `workloadType=Deployment | DaemonSet`; hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication.
+Chart: [`charts/shard-listener`](https://github.com/lightwebinc/charts/tree/main/charts/shard-listener). Supports `workloadType=Deployment | DaemonSet`; hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication.
 
 ## BRC-148 BEEF object plane
 
@@ -1187,11 +1175,11 @@ filter → version filter → delivery. Canonical spec:
 
 | Flag / Env | Default | Description |
 |------------|---------|-------------|
-| `-beef-topics` / `BEEF_TOPICS` | — | Comma-separated elected topics (names, or 64-hex TopicIDs verbatim); derives band joins + the worker topic filter |
-| `-beef-groups` / `BEEF_GROUPS` | — | Plane-relative group indices to join (aggregator mode: no topic restriction) |
+| `-beef-topics` / `BEEF_TOPICS` | empty | Comma-separated elected topics (names, or 64-hex TopicIDs verbatim); derives band joins + the worker topic filter |
+| `-beef-groups` / `BEEF_GROUPS` | empty | Plane-relative group indices to join (aggregator mode: no topic restriction) |
 | `-beef-shard-bits` / `BEEF_SHARD_BITS` | `0` | Plane width (`0` = single group); must match the proxy |
 | `-beef-versions` / `BEEF_VERSIONS` | all | Accepted encodings: comma of `beef`\|`beefv2`\|`atomic` (capability gate on payload word) |
-| `-beef-verify-content` / `BEEF_VERIFY_CONTENT` | `false` | Debug: verify ContentID == SHA-256d(object) before fan-out (BEEF analogue of `-verify-payload-hash`) |
+| `-beef-verify-content` / `BEEF_VERIFY_CONTENT` | `false` | Debug: verify ContentID == SHA-256d(object) before fan-out (BEEF analog of `-verify-payload-hash`) |
 | `-beef-max-object-bytes` / `BEEF_MAX_OBJECT_BYTES` | `1048576` | Per-object byte bound applied to `OrigFrameVer 0x09` fragment reassembly (declared OrigPayloadLen). Must be at least the largest object any ingress admits, including any per-source uplift above the proxies' `-beef-max-object-bytes`; a lower value drops those objects here (`bsl_reassembly_oversize_fragments_total`) |
 
 Join/emit sites: `buildGroups` (band joins; SSM inherits the global source

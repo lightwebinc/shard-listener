@@ -17,11 +17,11 @@
 // # Hot path per frame
 //
 //  1. ReadFrom (per-worker receive buffer)
-//  2. frame.Decode — extract TxID, Version, HashKey, SeqNum
-//  3. shard.Engine.GroupIndex — derive groupIdx from TxID
-//  4. filter.Filter.Allow — shard/subtree gating
-//  5. egress.Sender.Send — unicast forward to downstream
-//  6. nack.Tracker.Observe — gap detection (BRC-124/BRC-128 only, non-zero SeqNum)
+//  2. frame.Decode: extract TxID, Version, HashKey, SeqNum
+//  3. shard.Engine.GroupIndex: derive groupIdx from TxID
+//  4. filter.Filter.Allow: shard/subtree gating
+//  5. egress.Sender.Send: unicast forward to downstream
+//  6. nack.Tracker.Observe: gap detection (BRC-124/BRC-128 only, non-zero SeqNum)
 package listener
 
 import (
@@ -122,7 +122,7 @@ type Worker struct {
 	// set under procMu before processFrame so the gap tracker can attribute
 	// per-source loss. nil for tracker-reinjected (recovered) frames. Kept as
 	// net.IP (not a string) so the hot RX path does no per-frame stringification
-	// — the address is stringified only at the rare gap/NACK metric-emit sites.
+	// (the address is stringified only at the rare gap/NACK metric-emit sites).
 	curSource net.IP
 
 	// Runtime join management for BRC-139 auto-join and live-resharding
@@ -135,7 +135,7 @@ type Worker struct {
 	joinFd       int                     // -1 when worker is not running
 	joinedGroups map[netip.Addr]struct{} // currently-joined data-plane groups
 
-	// procMu serialises processFrame so a recovered frame re-injected by the
+	// procMu serializes processFrame so a recovered frame re-injected by the
 	// NACK tracker (via Reinject, on the tracker goroutine) is mutually
 	// exclusive with the Run receive loop. The lock is uncontended on the hot
 	// path (single-worker receive) and only meets the rare unicast-recovery
@@ -172,9 +172,6 @@ type Worker struct {
 	warnedRebucket bool
 }
 
-// SetGroupSources configures per-group SSM source lists for the data-plane
-// join. Must be called before [Worker.Run]. Groups absent from src (or
-// with empty source lists) are joined ASM-style.
 // SetRecvQueueDepth pipelines the worker's receive path: the serve loop reads
 // each datagram into a pooled buffer and queues it, and one processing
 // goroutine drains the queue in arrival order under procMu, so the socket is
@@ -194,6 +191,9 @@ func (w *Worker) SetRecvQueueDepth(depth int) {
 	w.recvQueue = depth
 }
 
+// SetGroupSources configures per-group SSM source lists for the data-plane
+// join. Must be called before [Worker.Run]. Groups absent from src (or
+// with empty source lists) are joined ASM-style.
 func (w *Worker) SetGroupSources(src GroupSources) {
 	w.groupSources = src
 }
@@ -279,7 +279,7 @@ func (w *Worker) SetHeaderMCastEgress(s *egress.MCastSender) { w.headerMCastEgr 
 // than by an operator flag: whether a header crosses any consumer wire is the
 // consumer's election, decided downstream in the class router, not the node's
 // configuration. The cost of feeding it when nobody has elected is one 172-byte
-// encode per block announce — roughly one per ten minutes — which is why it
+// encode per block announce (roughly one per ten minutes), which is why it
 // needs no enabling flag of its own.
 //
 // It is attached separately from the main egress sink because a sink may
@@ -295,7 +295,7 @@ func (w *Worker) SetRebucketRelay(relay bool) { w.relay = relay }
 
 // SetHeaderEmitterIdentity sets the BRC-135 emitter HashKey for block
 // header egress. HashKey is the stable per-emitter flow identifier
-// computed once as XXH64(emitterIPv6 ∥ 0xFFFA ∥ zeros[32]) — the
+// computed once as XXH64(emitterIPv6 ∥ 0xFFFA ∥ zeros[32]); the
 // GroupBlockHeader index matches the actual BRC-135 egress group.
 // It is stamped into every BRC-135 frame emitted by this worker. The
 // companion SeqNum counter is reset to start at 1 on the next emission.
@@ -327,8 +327,8 @@ func (w *Worker) SetVerifyPayloadHash(v bool) {
 // reports whether the payload is exactly one well-formed transaction.
 //
 // This is deliberately the same derivation and the same bound the ingress
-// proxy applies (forwarder.Forwarder.SetVerifyPayloadHash): objfmt.TxID —
-// SHA256d over the standard serialization, EF extras excluded — for both raw
+// proxy applies (forwarder.Forwarder.SetVerifyPayloadHash): objfmt.TxID,
+// SHA256d over the standard serialization, EF extras excluded, for both raw
 // and Extended Format payloads, over a payload that must be exactly one
 // transaction. For an honest payload the result is unchanged; what changes is
 // that a payload which is not a single transaction (unwalkable, truncated, or
@@ -352,7 +352,7 @@ func payloadTxID(p []byte) (id [32]byte, oneTx bool) {
 }
 
 // SetBEEF wires the BRC-148 BEEF object plane: the plane-aware derivation
-// engine, the worker-level topic election (TopicIDs; empty = admit all —
+// engine, the worker-level topic election (TopicIDs; empty = admit all,
 // aggregator mode), the accepted encoding version words (empty = admit all),
 // and the optional ContentID verification (debug/test support, the BEEF
 // analogue of SetVerifyPayloadHash). Call before Run.
@@ -489,7 +489,7 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 // RunUnicastIngest is the delivery-mode receive loop (P3b): it binds the same
-// SO_REUSEPORT UDP socket but does NOT join any multicast group — a delivery
+// SO_REUSEPORT UDP socket but does NOT join any multicast group: a delivery
 // worker receives raw frames UNICAST from a receiver that already joined fabric
 // (S,G) and ran gap/NACK/dedup. Each datagram is fed through the normal frame
 // dispatch (processFrame) so the egress fan-out sink, per-consumer filtering,
@@ -504,12 +504,12 @@ func (w *Worker) RunUnicastIngest(ctx context.Context) error {
 	return w.serve(ctx, fd, "unicast ingest ready", true)
 }
 
-// RunUnicastIngestOn is RunUnicastIngest on an explicit port instead of w.port —
+// RunUnicastIngestOn is RunUnicastIngest on an explicit port instead of w.port,
 // used for the collapsed-edge LOCAL MIRROR: the co-located proxy unicasts this
 // node's own egress frames to a dedicated loopback port (own-source frames the
 // listener cannot SSM-join), and this worker receives them on that port through
 // the same processFrame path. The port must be listener-exclusive (not the retry
-// cache's port). No multicast join — it is a pure unicast ingest.
+// cache's port). No multicast join: it is a pure unicast ingest.
 //
 // This path never feeds the receive-side retry tee: mirror frames are this
 // node's OWN egress, and the co-located proxy's -retry-tee already mirrors
@@ -603,7 +603,7 @@ func (w *Worker) handleDatagram(raw []byte, from unix.Sockaddr, tee bool) {
 	}
 	// Mirror the raw wire bytes to the co-resident retry cache BEFORE
 	// local processing: what the cache must hold is exactly what a NACK
-	// will ask for — the datagram as received, pre-dedup and
+	// will ask for: the datagram as received, pre-dedup and
 	// pre-reassembly (fragments and bundles are cached as wire frames).
 	if tee && w.retryTee != nil {
 		w.teeToRetry(raw, from)
@@ -642,7 +642,7 @@ func (w *Worker) servePipelined(ctx context.Context, fd int, tee bool) error {
 // permanent hole into a phantom "repaired" statistic.
 func (w *Worker) Reinject(raw []byte) bool {
 	w.procMu.Lock()
-	w.curSource = nil // recovered frame: no live source — don't clobber per-flow source attribution
+	w.curSource = nil // recovered frame: no live source; don't clobber per-flow source attribution
 	accepted := w.processFrame(raw)
 	w.procMu.Unlock()
 	return accepted
@@ -690,17 +690,18 @@ func (w *Worker) processFrame(raw []byte) bool {
 		w.reassemBuf.Observe(ff)
 		// Fragment-level gap tracking: feed each fragment's (HashKey,
 		// SeqNum) to the NACK tracker so interior fragment loss within an
-		// object's flow is detected and recovered — the retry endpoint
+		// object's flow is detected and recovered; the retry endpoint
 		// caches fragments under the same (HashKey, SeqNum) key. This is
 		// essential for pushed objects (subtree/block/BEEF), where each
 		// object is its own single-object flow with no successor whole
 		// frame to reveal a gap between reassembled objects. Tail-only loss
 		// (the highest fragment index, with no later fragment to expose the
-		// gap) still relies on reassembly timeout.
+		// gap) is detected at the reassembly TTL, when the slot asks the
+		// tracker for its missing fragments (SetIncompleteHook).
 		if w.tracker != nil && ff.SeqNum != 0 {
 			// BRC-148 §Frame carriage: object-plane NACKs carry a ZERO
 			// SubtreeID. A BEEF fragment's SubtreeID slot holds the TopicID,
-			// so it must be zeroed here — fragments and whole frames share a
+			// so it must be zeroed here: fragments and whole frames share a
 			// HashKey (one flow), and emitting two different SubtreeID values
 			// on one flow's NACKs is a wire inconsistency.
 			sub := ff.SubtreeID
@@ -744,8 +745,8 @@ func (w *Worker) processFrame(raw []byte) bool {
 	}
 
 	// Courtesy ingress-set mark: best-effort SETNX into the local proxy's
-	// namespace so sibling proxies treat this TxID as "already on the network"
-	// — useful when a frame arrived via a cross-site bridge or a path the
+	// namespace so sibling proxies treat this TxID as "already on the network",
+	// useful when a frame arrived via a cross-site bridge or a path the
 	// local proxy itself did not observe. Async; never affects forward path.
 	if w.txDedup != nil && w.txDedup.HasIngressMark() && f.Version == frame.FrameVerV2 {
 		w.txDedup.Mark(f.TxID)
@@ -756,7 +757,7 @@ func (w *Worker) processFrame(raw []byte) bool {
 	// verbatim regardless). The check verifies the CANONICAL TxID: for a
 	// BRC-12 raw payload that is SHA256d over the payload bytes; for a
 	// BRC-30 EF payload (BRC-128 frame) it is SHA256d over the STANDARD
-	// serialization (objfmt.TxID — EF extras excluded), which is the id
+	// serialization (objfmt.TxID, EF extras excluded), which is the id
 	// every producer stamps and every consumer derives. Hashing the raw EF
 	// bytes here instead would drop 100% of honest EF frames. When
 	// disabled, this branch is skipped entirely.
@@ -936,13 +937,13 @@ func (w *Worker) processBundle(raw []byte) {
 	// group at the bundle's own ShardBits; if that differs from this listener's
 	// generation, delivering the bundle as-is would route/filter against the
 	// wrong (cross-generation) groups and over-deliver a coarser parent bundle to
-	// a finer subscriber. Re-bucket to the local ShardBits first — split the
-	// bundle and re-coalesce each member into its correct local-generation group
-	// — then deliver each re-bucketed bundle through the normal path. ShardBits 0
+	// a finer subscriber. Re-bucket to the local ShardBits first (split the
+	// bundle and re-coalesce each member into its correct local-generation
+	// group), then deliver each re-bucketed bundle through the normal path. ShardBits 0
 	// (unset) and the same-generation common case skip this entirely.
 	//
 	// The re-bucketed children are re-stamped on a fresh flow keyed by the parent
-	// HashKey, so their SeqNum streams are LOCALLY monotonic — which is NOT usable
+	// HashKey, so their SeqNum streams are LOCALLY monotonic, which is NOT usable
 	// for upstream-loss gap detection: the child counter advances only for parents
 	// that arrive, so a dropped parent bundle leaves no hole in any child stream.
 	// Upstream loss is detected on the PARENT stream instead (the identity the
@@ -950,7 +951,7 @@ func (w *Worker) processBundle(raw []byte) {
 	// survivorship-gated. Caveat: own-traffic exclusion keys on
 	// HashKey = hash(originalSenderIP, group, subtree), which cannot be recomputed
 	// at the local groups from the opaque parent HashKey, so own-traffic exclusion
-	// does not apply to re-bucketed (cross-generation) flows — a documented
+	// does not apply to re-bucketed (cross-generation) flows, a documented
 	// re-shard-boundary limitation, not a per-tx regression in the common path.
 	if b.ShardBits != 0 && uint(b.ShardBits) != w.engine.ShardBits() {
 		if w.rebucketer == nil {
@@ -1020,7 +1021,7 @@ func (w *Worker) processBundle(raw []byte) {
 func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 	groupIdx := uint32(b.GroupIdx)
 
-	// Filter at bundle granularity — a bundle is one (group, subtree).
+	// Filter at bundle granularity: a bundle is one (group, subtree).
 	probe := &frame.Frame{Version: frame.FrameVerV2, SubtreeID: b.SubtreeID}
 	if allow, reason := w.filt.Allow(groupIdx, probe); !allow {
 		if w.rec != nil {
@@ -1168,9 +1169,9 @@ func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 // control frame. A BRC-133 coinbase shares GroupBlockBroadcast as its egress
 // group but the proxy stamps its HashKey against GroupCoinbaseFlow, so it owns
 // an independent SeqNum stream; tracking it under the announce index reports
-// its gaps as brc131. The index is process-local — it is never encoded on the
+// its gaps as brc131. The index is process-local; it is never encoded on the
 // NACK wire (which carries only HashKey and the seq range), so this affects
-// metric labelling only, never recovery routing.
+// metric labeling only, never recovery routing.
 //
 // Standalone BRC-133 coinbase carriage is deprecated and retained: the
 // block-control gate drops those frames by default, so brc133 only appears
@@ -1184,7 +1185,7 @@ func blockFlowIdx(msgType byte) uint32 {
 
 // processBlockFrame handles a BRC-131 block control frame and reports whether it
 // was ACCEPTED. A frame the block-control gate rejects returns false so a
-// recovered retransmit is not booked as a repair — re-requesting it can never
+// recovered retransmit is not booked as a repair; re-requesting it can never
 // succeed.
 func (w *Worker) processBlockFrame(raw []byte) bool {
 	bf, err := frame.DecodeBlock(raw)
@@ -1670,12 +1671,12 @@ func openRawSocket(port int) (int, error) {
 	// when they have the SAME EUID (the kernel anti-hijack rule), so on a COLLAPSED node a
 	// co-resident retry-endpoint running as a different user cannot also join this multicast
 	// group. SO_REUSEADDR uses the sk_reuse bind path, which permits two UDP sockets to share
-	// the port regardless of EUID — the classic multiple-receivers-per-multicast-group pattern.
+	// the port regardless of EUID, the classic multiple-receivers-per-multicast-group pattern.
 	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
 		_ = unix.Close(fd)
 		return -1, fmt.Errorf("SO_REUSEADDR: %w", err)
 	}
-	// Receive buffer: ignore error — kernel silently caps at rmem_max.
+	// Receive buffer: ignore error; the kernel silently caps at rmem_max.
 	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, socketRecvBuf)
 	sa := &unix.SockaddrInet6{Port: port}
 	if err := unix.Bind(fd, sa); err != nil {
