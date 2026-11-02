@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/shard-common/frame"
@@ -42,11 +43,13 @@ import (
 // writes the queue in order. A 4 MiB BEEF record is 477 datagrams, and
 // writing their copies over loopback synchronously cost the processing
 // goroutine a loopback send per datagram on top of reassembly and delivery;
-// the copy costs it a fraction of that. The queue is bounded (teeQueueDepth
-// datagrams): a tee that falls behind drops datagrams and counts them
-// (bsl_retry_tee_dropped_total), since the cache is an optimization and the
-// receive path never waits on it. close drains what is queued, then closes
-// the socket.
+// the copy costs it a fraction of that. The sender writes what is queued in
+// batches of up to teeBatch datagrams through WriteBatch (one sendmmsg on
+// Linux; elsewhere x/net writes a message per call and the sender loops). The
+// queue is bounded (teeQueueDepth datagrams): a tee that falls behind drops
+// datagrams and counts them (bsl_retry_tee_dropped_total), since the cache is
+// an optimization and the receive path never waits on it. close drains what
+// is queued, then closes the socket.
 type retryTeeSender struct {
 	conn *net.UDPConn
 	rec  *metrics.Recorder // nil = no counters
@@ -72,11 +75,12 @@ type retryTeeSender struct {
 
 const (
 	// teeQueueDepth bounds the datagrams the tee holds for its sender. At a
-	// 9000-byte fragment MTU and 200 MB/s it is some 45 ms of receive; the
-	// sender's loopback write runs far ahead of that, so the queue absorbs
-	// scheduling jitter and a full queue means the tee's peer, not the tee,
-	// is the bottleneck.
-	teeQueueDepth = 1024
+	// 9000-byte fragment MTU it is some 90 ms of receive at 400 MB/s, 64 MiB
+	// of pooled copies at worst: the queue absorbs scheduling jitter on a
+	// busy host, and a full queue means the tee's peer is the bottleneck.
+	teeQueueDepth = 4096
+	// teeBatch bounds the datagrams one send takes off the queue.
+	teeBatch = 32
 	// teeBufSize is the pooled copy buffer: the teewire envelope plus any
 	// datagram up to a jumbo-frame fragment.
 	teeBufSize = 16 << 10
@@ -146,30 +150,73 @@ func (t *retryTeeSender) start() {
 	go t.run()
 }
 
-// run is the sender: one connected-socket Write per queued datagram, in queue
-// order, until the queue is closed.
+// run is the sender: it takes what is queued, up to teeBatch datagrams, and
+// writes them in queue order, until the queue is closed.
 func (t *retryTeeSender) run() {
 	defer close(t.done)
+	pc := ipv6.NewPacketConn(t.conn)
+	batch := make([]teeMsg, 0, teeBatch)
+	msgs := make([]ipv6.Message, teeBatch)
+	for i := range msgs {
+		msgs[i].Buffers = make([][]byte, 1)
+	}
 	for m := range t.q {
-		t.write(m)
+		batch = append(batch[:0], m)
+	fill:
+		for len(batch) < teeBatch {
+			select {
+			case m, ok := <-t.q:
+				if !ok {
+					break fill
+				}
+				batch = append(batch, m)
+			default:
+				break fill
+			}
+		}
+		t.writeBatch(pc, msgs, batch)
 	}
 }
 
-// write sends one mirror datagram, counts the outcome and releases its buffer.
-func (t *retryTeeSender) write(m teeMsg) {
-	if _, err := t.conn.Write(m.buf); err != nil {
-		if t.rec != nil {
-			t.rec.RetryTeeError(t.id)
-		}
-		if t.loggedErr.CompareAndSwap(false, true) {
-			t.log.Warn("retry tee write failed — the co-resident cache will MISS frames this node received; repair coverage narrows to other endpoints (logged once; see bsl_retry_tee_errors_total)",
-				"err", err, "target", t.conn.RemoteAddr())
-		}
-	} else if t.rec != nil {
-		t.rec.RetryTeeFrame(t.id)
+// writeBatch sends the mirror datagrams of batch, counts the outcomes and
+// releases their buffers. A failed send costs the datagram at its head and
+// the rest are tried again, so one refused send is one error, as a write per
+// datagram made it.
+func (t *retryTeeSender) writeBatch(pc *ipv6.PacketConn, msgs []ipv6.Message, batch []teeMsg) {
+	for i, m := range batch {
+		msgs[i].Buffers[0] = m.buf
 	}
-	if m.pooled != nil {
-		t.pool.Put(m.pooled)
+	for sent := 0; sent < len(batch); {
+		n, err := pc.WriteBatch(msgs[sent:len(batch)], 0)
+		if err != nil || n <= 0 {
+			t.writeFailed(err)
+			sent++
+			continue
+		}
+		sent += n
+		if t.rec != nil {
+			for range n {
+				t.rec.RetryTeeFrame(t.id)
+			}
+		}
+	}
+	for i := range batch {
+		if batch[i].pooled != nil {
+			t.pool.Put(batch[i].pooled)
+		}
+		msgs[i].Buffers[0] = nil
+		batch[i] = teeMsg{}
+	}
+}
+
+// writeFailed counts one failed send and logs the first.
+func (t *retryTeeSender) writeFailed(err error) {
+	if t.rec != nil {
+		t.rec.RetryTeeError(t.id)
+	}
+	if t.loggedErr.CompareAndSwap(false, true) {
+		t.log.Warn("retry tee write failed — the co-resident cache will MISS frames this node received; repair coverage narrows to other endpoints (logged once; see bsl_retry_tee_errors_total)",
+			"err", err, "target", t.conn.RemoteAddr())
 	}
 }
 

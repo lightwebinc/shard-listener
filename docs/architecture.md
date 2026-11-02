@@ -166,9 +166,9 @@ Placement in the loop is deliberate and load-bearing:
 The mirror is lossy by design and runs on a goroutine of its own: the
 processing goroutine copies each eligible frame into a pooled buffer and
 queues it without blocking, and the tee's sender writes the queue in order
-(one connected-socket `Write` per frame). Write errors are counted
+(up to 32 frames per `sendmmsg`). Write errors are counted
 (`bsl_retry_tee_errors_total`) and logged once, never retried. The queue is
-bounded (1024 datagrams); a tee that falls behind drops frames, counted in
+bounded (4096 datagrams); a tee that falls behind drops frames, counted in
 `bsl_retry_tee_dropped_total` and logged once, and the receive path never
 waits on it. Shutdown drains the queue before the socket closes. The receive
 path pays one copy per frame; the loopback send no longer sits between a

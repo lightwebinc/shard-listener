@@ -370,7 +370,7 @@ Failure posture: dial errors **fail startup closed** (a tee-only cache
 depending on this feed must not silently lose it), but per-frame write errors
 are counted (`bsl_retry_tee_errors_total`) and never retried; a missed mirror
 only narrows repair to the other endpoints a listener walks on MISS. The
-mirror runs on its own goroutine behind a bounded queue (1024 datagrams): the
+mirror runs on its own goroutine behind a bounded queue (4096 datagrams): the
 receive path copies the frame and never waits on the send, and a tee that
 falls behind drops frames, counted in `bsl_retry_tee_dropped_total`.
 Mirrored frames are counted in `bsl_retry_tee_frames_total`.

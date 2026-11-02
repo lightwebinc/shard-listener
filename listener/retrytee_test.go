@@ -415,3 +415,34 @@ func TestRetryTee_CloseDrainsQueue(t *testing.T) {
 		t.Fatalf("second close: %v", err)
 	}
 }
+
+// TestRetryTee_BurstKeepsOrder queues more than a batch before the sender
+// starts, so it writes full batches: every datagram arrives, in queue order.
+func TestRetryTee_BurstKeepsOrder(t *testing.T) {
+	const n = teeBatch*3 + 5
+	teeAddr, ch, stop := newTeeSinkDepth(t, n)
+	defer stop()
+	tee := newRetryTeeSender(dialTee(t, teeAddr), nil, 0, slog.Default(), n)
+	src := netip.MustParseAddrPort("[2001:db8::1]:9000")
+	for i := range n {
+		tee.mirror(src, []byte{byte(i), byte(i >> 8), 0xaa})
+	}
+	tee.start()
+	for i := range n {
+		select {
+		case got := <-ch:
+			_, payload, err := teewire.Decap(got)
+			if err != nil {
+				t.Fatalf("datagram %d: %v", i, err)
+			}
+			if payload[0] != byte(i) || payload[1] != byte(i>>8) {
+				t.Fatalf("datagram %d out of order: %x", i, payload)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("datagram %d did not arrive", i)
+		}
+	}
+	if err := tee.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
