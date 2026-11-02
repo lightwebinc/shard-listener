@@ -163,11 +163,16 @@ Placement in the loop is deliberate and load-bearing:
 - **Not on the local-mirror ingest** (`RunUnicastIngestOn`): mirror frames
   are this node's own egress, which the proxy's tee already covers.
 
-The mirror is lossy by design: one connected-socket `Write` per eligible
-frame, errors counted (`bsl_retry_tee_errors_total`) and logged once, never
-retried, never blocking the receive path. Enabling it costs one extra syscall
-per received frame, acceptable at edge listener rates; the proxy's batched
-tee remains the model if a Mpps-class receive path ever needs one.
+The mirror is lossy by design and runs on a goroutine of its own: the
+processing goroutine copies each eligible frame into a pooled buffer and
+queues it without blocking, and the tee's sender writes the queue in order
+(one connected-socket `Write` per frame). Write errors are counted
+(`bsl_retry_tee_errors_total`) and logged once, never retried. The queue is
+bounded (1024 datagrams); a tee that falls behind drops frames, counted in
+`bsl_retry_tee_dropped_total` and logged once, and the receive path never
+waits on it. Shutdown drains the queue before the socket closes. The receive
+path pays one copy per frame; the loopback send no longer sits between a
+datagram and its reassembly or delivery.
 
 The canonical 92-byte header layout is specified in
 [BRC-124](https://github.com/lightwebinc/bsv-multicast/blob/main/docs/brc-124-frame-format.md)

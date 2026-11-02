@@ -2,11 +2,14 @@ package listener
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"net/netip"
 	"strconv"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/teewire"
@@ -18,11 +21,18 @@ import (
 // -tee-listen socket.
 func newTeeSink(t *testing.T) (string, <-chan []byte, func()) {
 	t.Helper()
+	return newTeeSinkDepth(t, 16)
+}
+
+// newTeeSinkDepth is newTeeSink with a receive channel of the given depth, for
+// tests that send more datagrams than they drain at once.
+func newTeeSinkDepth(t *testing.T, depth int) (string, <-chan []byte, func()) {
+	t.Helper()
 	pc, err := net.ListenPacket("udp6", "[::1]:0")
 	if err != nil {
 		t.Skipf("no IPv6 loopback: %v", err)
 	}
-	ch := make(chan []byte, 16)
+	ch := make(chan []byte, depth)
 	done := make(chan struct{})
 	go func() {
 		buf := make([]byte, 65536)
@@ -253,5 +263,155 @@ func TestTeeEligible(t *testing.T) {
 	junk[0] = 0x00
 	if teeEligible(junk) {
 		t.Error("teeEligible(bad magic) = true, want false")
+	}
+}
+
+// dialTee connects a tee socket to the sink at addr, the way SetRetryTee does.
+func dialTee(t *testing.T, addr string) *net.UDPConn {
+	t.Helper()
+	ua, err := net.ResolveUDPAddr("udp6", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.DialUDP("udp6", nil, ua)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+// teeSource is a kernel source address of the shape handleDatagram passes.
+func teeSource(port int) *unix.SockaddrInet6 {
+	sa := &unix.SockaddrInet6{Port: port}
+	sa.Addr[15] = 1 // ::1
+	return sa
+}
+
+// decapSeq decodes a mirrored datagram and returns its frame's SeqNum and the
+// envelope's source port.
+func decapSeq(t *testing.T, pkt []byte) (uint64, uint16) {
+	t.Helper()
+	src, payload, err := teewire.Decap(pkt)
+	if err != nil {
+		t.Fatalf("Decap: %v", err)
+	}
+	f, err := frame.Decode(payload)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	return f.SeqNum, src.Port()
+}
+
+// With the sender keeping up, every eligible frame is mirrored exactly once:
+// the hand-off to the tee goroutine loses nothing on its own.
+func TestRetryTee_AllFramesArriveWhenQueueKeepsUp(t *testing.T) {
+	const n = 200
+	teeAddr, teeCh, teeCleanup := newTeeSinkDepth(t, n)
+	defer teeCleanup()
+
+	const ingestPort = 39044
+	w := startIngestWorker(t, ingestPort, teeAddr, func(w *Worker, ctx context.Context) error {
+		return w.RunUnicastIngest(ctx)
+	})
+	client := dialIngest(t, ingestPort)
+	for i := 1; i <= n; i++ {
+		raw := buildSequencedFrame(t, sha256d([]byte("all")), []byte("all"), uint64(i))
+		if _, err := client.Write(raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seen := make(map[uint64]int, n)
+	for i := 0; i < n; i++ {
+		seq, _ := decapSeq(t, waitTee(t, teeCh))
+		seen[seq]++
+	}
+	for i := uint64(1); i <= n; i++ {
+		if seen[i] != 1 {
+			t.Fatalf("frame %d mirrored %d times, want once", i, seen[i])
+		}
+	}
+	assertNoTee(t, teeCh)
+	if got := w.retryTee.dropped.Load(); got != 0 {
+		t.Fatalf("tee dropped %d datagrams with an idle sender", got)
+	}
+}
+
+// A full queue drops the datagram and counts it; the queued ones still go
+// out, in order and with their source, once the sender runs. The sender is
+// held back by not starting it, the one deterministic way to fill the queue.
+func TestRetryTee_FullQueueDropsAndCounts(t *testing.T) {
+	teeAddr, teeCh, teeCleanup := newTeeSinkDepth(t, 16)
+	defer teeCleanup()
+
+	const depth = 4
+	tee := newRetryTeeSender(dialTee(t, teeAddr), nil, 0, slog.Default(), depth)
+	w := &Worker{retryTee: tee}
+	from := teeSource(4321)
+	const sent = 10
+	for i := 1; i <= sent; i++ {
+		w.teeToRetry(buildSequencedFrame(t, sha256d([]byte("full")), []byte("full"), uint64(i)), from)
+	}
+	if got := tee.dropped.Load(); got != sent-depth {
+		t.Fatalf("dropped = %d, want %d (queue depth %d, %d offered)", got, sent-depth, depth, sent)
+	}
+	assertNoTee(t, teeCh) // nothing is written before the sender runs
+
+	tee.start()
+	for i := 1; i <= depth; i++ {
+		seq, port := decapSeq(t, waitTee(t, teeCh))
+		if seq != uint64(i) {
+			t.Fatalf("mirrored frame %d has SeqNum %d: the queue reordered or lost the first frames", i, seq)
+		}
+		if port != 4321 {
+			t.Fatalf("envelope source port = %d, want 4321", port)
+		}
+	}
+	assertNoTee(t, teeCh)
+
+	// Once drained the queue takes datagrams again, and they are not counted.
+	w.teeToRetry(buildSequencedFrame(t, sha256d([]byte("full")), []byte("full"), 99), from)
+	if seq, _ := decapSeq(t, waitTee(t, teeCh)); seq != 99 {
+		t.Fatalf("post-drain frame has SeqNum %d, want 99", seq)
+	}
+	if got := tee.dropped.Load(); got != sent-depth {
+		t.Fatalf("dropped = %d after the queue drained, want still %d", got, sent-depth)
+	}
+	if err := tee.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// A closed tee drops and counts; it must not panic on the closed queue.
+	w.teeToRetry(buildSequencedFrame(t, sha256d([]byte("full")), []byte("full"), 100), from)
+	if got := tee.dropped.Load(); got != sent-depth+1 {
+		t.Fatalf("dropped = %d after close, want %d", got, sent-depth+1)
+	}
+	assertNoTee(t, teeCh)
+}
+
+// close writes what is queued before the socket goes: the cache gets the tail
+// of the receive stream on shutdown, started sender or not.
+func TestRetryTee_CloseDrainsQueue(t *testing.T) {
+	teeAddr, teeCh, teeCleanup := newTeeSinkDepth(t, 16)
+	defer teeCleanup()
+
+	tee := newRetryTeeSender(dialTee(t, teeAddr), nil, 0, slog.Default(), 8)
+	w := &Worker{retryTee: tee}
+	from := teeSource(5555)
+	for i := 1; i <= 3; i++ {
+		w.teeToRetry(buildSequencedFrame(t, sha256d([]byte("drain")), []byte("drain"), uint64(i)), from)
+	}
+	if err := tee.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		if seq, _ := decapSeq(t, waitTee(t, teeCh)); seq != uint64(i) {
+			t.Fatalf("drained frame %d has SeqNum %d", i, seq)
+		}
+	}
+	if got := tee.dropped.Load(); got != 0 {
+		t.Fatalf("close dropped %d queued datagrams instead of draining them", got)
+	}
+	if err := tee.close(); err != nil {
+		t.Fatalf("second close: %v", err)
 	}
 }

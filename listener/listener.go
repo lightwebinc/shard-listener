@@ -550,6 +550,13 @@ func (w *Worker) serve(ctx context.Context, fd int, readyMsg string, tee bool) e
 		_ = unix.Close(fd)
 	}()
 
+	// The tee is fed only by this loop (inline, or through its processing
+	// goroutine, which servePipelined joins before returning), so once the
+	// loop is done the tee can drain what it still holds and close.
+	if tee && w.retryTee != nil {
+		defer func() { _ = w.retryTee.close() }()
+	}
+
 	if w.recvQueue > 0 {
 		return w.servePipelined(ctx, fd, tee)
 	}

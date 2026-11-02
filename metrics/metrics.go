@@ -69,6 +69,7 @@ type Recorder struct {
 	promMCEgressErrors       *promclient.CounterVec // worker
 	promRetryTeeFrames       *promclient.CounterVec // worker
 	promRetryTeeErrors       *promclient.CounterVec // worker
+	promRetryTeeDropped      *promclient.CounterVec // worker
 
 	// BRC-130 reassembly counters — cold path (only fires on > MTU frames).
 	frameReassemblyStarted      metric.Int64Counter
@@ -273,11 +274,16 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		Name: "bsl_retry_tee_errors_total",
 		Help: "Retry-tee mirror writes that failed (frame NOT cached locally; repair for it falls to other endpoints). Never retried — the mirror is deliberately lossy.",
 	}, []string{"worker"})
+	r.promRetryTeeDropped = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_retry_tee_dropped_total",
+		Help: "Received data frames the retry tee dropped because its sender queue was full (frame NOT cached locally; repair for it falls to other endpoints). The receive path never waits on the tee.",
+	}, []string{"worker"})
 	for _, c := range []promclient.Collector{
 		r.promFramesReceived, r.promFramesDropped, r.promFramesForwarded,
 		r.promFramesInvalidPayload, r.promFramesDeduped, r.promFramesTxDeduped,
 		r.promEgressErrors, r.promMCEgressErrors, r.promBundlesRebucketed,
 		r.promRebucketUnguarded, r.promRetryTeeFrames, r.promRetryTeeErrors,
+		r.promRetryTeeDropped,
 	} {
 		if regErr := reg.Register(c); regErr != nil {
 			return nil, fmt.Errorf("metrics: register hot-path counter: %w", regErr)
@@ -567,6 +573,13 @@ func (r *Recorder) RetryTeeFrame(workerID int) {
 // the local cache; a NACK for it will MISS here and escalate.
 func (r *Recorder) RetryTeeError(workerID int) {
 	r.promRetryTeeErrors.WithLabelValues(strconv.Itoa(workerID)).Inc()
+}
+
+// RetryTeeDropped records a received data frame the retry tee dropped because
+// its sender queue was full. The frame is NOT in the local cache; a NACK for
+// it will MISS here and escalate.
+func (r *Recorder) RetryTeeDropped(workerID int) {
+	r.promRetryTeeDropped.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
 
 // BundleRebucketed records one BRC-142 bundle re-bucketed to the local ShardBits

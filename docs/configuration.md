@@ -369,7 +369,10 @@ Scope of the mirror (deliberate, all four matter for cache correctness):
 Failure posture: dial errors **fail startup closed** (a tee-only cache
 depending on this feed must not silently lose it), but per-frame write errors
 are counted (`bsl_retry_tee_errors_total`) and never retried; a missed mirror
-only narrows repair to the other endpoints a listener walks on MISS.
+only narrows repair to the other endpoints a listener walks on MISS. The
+mirror runs on its own goroutine behind a bounded queue (1024 datagrams): the
+receive path copies the frame and never waits on the send, and a tee that
+falls behind drops frames, counted in `bsl_retry_tee_dropped_total`.
 Mirrored frames are counted in `bsl_retry_tee_frames_total`.
 
 ### `-nack-jitter-max` / `NACK_JITTER_MAX` (default: `200ms`)
@@ -1051,6 +1054,7 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_mc_egress_errors_total` | `worker` | Errors sending to multicast egress |
 | `bsl_retry_tee_frames_total` | `worker` | Received data frames mirrored to the co-resident retry-endpoint tee ingest (`-retry-tee`) |
 | `bsl_retry_tee_errors_total` | `worker` | Retry-tee mirror writes that failed (frame not cached locally; repair for it falls to other endpoints). Never retried; the mirror is deliberately lossy |
+| `bsl_retry_tee_dropped_total` | `worker` | Received data frames the retry tee dropped because its sender queue was full (frame not cached locally; repair for it falls to other endpoints). The receive path never waits on the tee |
 
 ### Gap recovery (BRC-126)
 
