@@ -697,7 +697,7 @@ func run() error {
 			buf.SetOversizeHook(rec.ReassemblyOversize)
 			buf.SetBlockCallback(wLocal.DeliverReassembledBlock)
 			buf.SetSubtreeDataCallback(wLocal.DeliverReassembledSubtreeData)
-			buf.SetBEEFCallback(wLocal.DeliverReassembledBeef)
+			buf.SetBEEFFrameCallback(wLocal.DeliverReassembledBeefFrame)
 			w.SetReassemblyBuffer(buf)
 			wg.Add(1)
 			go func(b *reassembly.Buffer) {

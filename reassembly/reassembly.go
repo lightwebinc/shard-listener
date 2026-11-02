@@ -181,8 +181,11 @@ type Buffer struct {
 	onCompleteBlock   BlockCallback       // V4 (FrameVerV4) completion
 	onCompleteSubtree SubtreeDataCallback // V5 (FrameVerV5) completion
 	onCompleteBEEF    BEEFCallback        // V9 (FrameVerV9) completion
-	onAbandoned       func()              // metrics hook: one call per evicted slot
-	onAbandonedReason func(reason string) // metrics hook: one call per evicted slot, with its reason
+	// onCompleteBEEFFrame, when set, is called instead, with the object's
+	// whole buffer (SetBEEFFrameCallback).
+	onCompleteBEEFFrame BEEFCallback
+	onAbandoned         func()              // metrics hook: one call per evicted slot
+	onAbandonedReason   func(reason string) // metrics hook: one call per evicted slot, with its reason
 	// repairPending reports whether repair of any of a slot's missing SeqNums is
 	// still in progress (nil = no repair wait: a slot is evicted at its TTL).
 	repairPending func(hashKey uint64, missing []uint64) bool
@@ -275,6 +278,10 @@ type slot struct {
 	// fragment declaring a large object does not cost its whole buffer.
 	payload []byte
 	early   []earlyFrag
+	// whole is the buffer payload sits in: frame.HeaderSize bytes of room and
+	// the payload behind them, for an object delivered as a frame (V9), so its
+	// header is written in front of it rather than the object copied again.
+	whole []byte
 	// fragSeq holds each received fragment's own SeqNum, indexed by FragIndex
 	// (0 = not received). Without it an incomplete slot knows WHICH FragIndex is
 	// missing but has no way back to the SeqNum a NACK must name — the slot's
@@ -327,7 +334,12 @@ func (s *slot) store(index uint16, data []byte) {
 
 // promote moves the fragments held so far into the object's buffer.
 func (s *slot) promote() {
-	s.payload = make([]byte, s.origPayloadLen)
+	room := 0
+	if s.origFrameVer == frame.FrameVerV9 {
+		room = frame.HeaderSize
+	}
+	s.whole = make([]byte, room+int(s.origPayloadLen))
+	s.payload = s.whole[room:]
 	for _, f := range s.early {
 		copy(s.payload[int(f.index)*s.fragSize:], f.data)
 	}
@@ -487,6 +499,12 @@ func (b *Buffer) SetOversizeHook(fn func()) { b.onOversize = fn }
 // SetBlockCallback registers the callback invoked on successful V4 (BRC-131)
 // reassembly. If nil, completed V4 slots are silently discarded.
 func (b *Buffer) SetBlockCallback(cb BlockCallback) { b.onCompleteBlock = cb }
+
+// SetBEEFFrameCallback registers a callback for a completed BEEF object that
+// is handed the object's whole buffer: frame.HeaderSize bytes of room, then
+// the payload bf.Payload points into. Writing the frame into it costs the
+// header alone (frame.EncodeBEEF copies the payload onto itself).
+func (b *Buffer) SetBEEFFrameCallback(cb BEEFCallback) { b.onCompleteBEEFFrame = cb }
 
 // SetBEEFCallback registers the callback invoked on successful V9 (BRC-148)
 // completion. Without it, reassembled BEEF objects are dropped.
@@ -758,8 +776,12 @@ func (b *Buffer) complete(s *slot) {
 		}
 		copy(bf.ContentID[:], s.txID[:])
 		copy(bf.TopicID[:], s.subtreeID[:])
+		whole := s.whole
 		b.removeSlot(s.key)
-		if b.onCompleteBEEF != nil {
+		switch {
+		case b.onCompleteBEEFFrame != nil:
+			b.onCompleteBEEFFrame(whole, bf)
+		case b.onCompleteBEEF != nil:
 			b.onCompleteBEEF(payload, bf)
 		}
 

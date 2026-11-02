@@ -48,7 +48,14 @@ func (w *Worker) processBeefFrame(raw []byte) {
 // [reassembly.Buffer.SetBEEFCallback]. The payload argument is the callback
 // contract's reassembled bytes; it aliases bf.Payload.
 func (w *Worker) DeliverReassembledBeef(_ []byte, bf *frame.BEEFFrame) {
-	buf := make([]byte, frame.HeaderSize+len(bf.Payload))
+	w.DeliverReassembledBeefFrame(make([]byte, frame.HeaderSize+len(bf.Payload)), bf)
+}
+
+// DeliverReassembledBeefFrame is DeliverReassembledBeef over the object's own
+// buffer ([reassembly.Buffer.SetBEEFFrameCallback]): the frame is written into
+// buf, the header in the room in front of the payload, so a record is not
+// allocated and copied a second time at the end of its reassembly.
+func (w *Worker) DeliverReassembledBeefFrame(buf []byte, bf *frame.BEEFFrame) {
 	n, err := frame.EncodeBEEF(bf, buf)
 	if err != nil {
 		if w.rec != nil {

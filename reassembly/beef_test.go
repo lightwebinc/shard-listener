@@ -71,3 +71,28 @@ func TestReassembly_V9HashMismatchDropped(t *testing.T) {
 		t.Fatalf("hash mismatch hook fired %d times, want 1", mismatches)
 	}
 }
+
+// The frame callback gets the object's own buffer: room for the header, then
+// the payload bf points into, so writing the frame copies nothing.
+func TestBEEFFrameCallbackHeaderRoom(t *testing.T) {
+	payload := []byte("a beef object of some bytes")
+	b := New(4, time.Second, false, nil)
+	var whole []byte
+	var gotBF *frame.BEEFFrame
+	b.SetBEEFFrameCallback(func(w []byte, bf *frame.BEEFFrame) { whole, gotBF = w, bf })
+	b.Observe(&frame.FragFrame{TxID: [32]byte{1}, OrigFrameVer: frame.FrameVerV9, FragIndex: 0, FragTotal: 1,
+		OrigPayloadLen: uint32(len(payload)), FragData: payload})
+	if gotBF == nil {
+		t.Fatal("no delivery")
+	}
+	if len(whole) != frame.HeaderSize+len(payload) || &whole[frame.HeaderSize] != &gotBF.Payload[0] {
+		t.Fatalf("the payload is not at the buffer's header room: %d bytes", len(whole))
+	}
+	n, err := frame.EncodeBEEF(gotBF, whole)
+	if err != nil || n != len(whole) {
+		t.Fatalf("EncodeBEEF: %d, %v", n, err)
+	}
+	if string(whole[frame.HeaderSize:]) != string(payload) {
+		t.Fatal("writing the frame changed the payload")
+	}
+}
