@@ -41,6 +41,7 @@ package reassembly
 import (
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -262,8 +263,18 @@ type slot struct {
 	// every fragment must agree on one fragSize or the concatenation lands
 	// bytes at the wrong offsets. See checkFragLen.
 	fragSize int
-	received uint16   // count of distinct fragments received
-	frags    [][]byte // indexed by FragIndex; nil = not yet received
+	received uint16 // count of distinct fragments received
+	// have marks the fragments received, by FragIndex.
+	have []bool
+	// payload is the assembled object once the slot is promoted: each fragment
+	// lands at FragIndex × fragSize, one copy, and completion hands the buffer
+	// on. A fragment used to be copied into a slice of its own, zeroed first,
+	// and all of them copied again on completion, which at 477 fragments and
+	// 4 MiB a record was the listener's receive goroutine's largest cost.
+	// Until promotion the fragments wait in early, so that one forged
+	// fragment declaring a large object does not cost its whole buffer.
+	payload []byte
+	early   []earlyFrag
 	// fragSeq holds each received fragment's own SeqNum, indexed by FragIndex
 	// (0 = not received). Without it an incomplete slot knows WHICH FragIndex is
 	// missing but has no way back to the SeqNum a NACK must name — the slot's
@@ -286,6 +297,41 @@ type slot struct {
 	extended     bool
 	origFrameVer byte // from the first fragment received (0/2=V2, 4=V4, 5=V5)
 	msgType      byte // frame-type-specific message type preserved from byte 7
+}
+
+// earlyFrag is a fragment held until its slot is promoted.
+type earlyFrag struct {
+	index uint16
+	data  []byte
+}
+
+// promoteAfter is how many fragments an object shows before its whole buffer
+// is allocated: a sixteenth of them, and at least eight. So what a forger can
+// make the listener allocate is bounded at sixteen times what it sent.
+func promoteAfter(total uint16) uint16 {
+	return min(total, max(8, total/16))
+}
+
+// store keeps one fragment's bytes, already validated against the slot's
+// shape, and promotes the slot when it has shown enough of the object.
+func (s *slot) store(index uint16, data []byte) {
+	if s.payload != nil {
+		copy(s.payload[int(index)*s.fragSize:], data)
+		return
+	}
+	s.early = append(s.early, earlyFrag{index: index, data: slices.Clone(data)})
+	if uint16(len(s.early)) >= promoteAfter(s.fragTotal) {
+		s.promote()
+	}
+}
+
+// promote moves the fragments held so far into the object's buffer.
+func (s *slot) promote() {
+	s.payload = make([]byte, s.origPayloadLen)
+	for _, f := range s.early {
+		copy(s.payload[int(f.index)*s.fragSize:], f.data)
+	}
+	s.early = nil
 }
 
 // New creates a Buffer.
@@ -524,7 +570,7 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 			seqNum:         ff.SeqNum,
 			origPayloadLen: ff.OrigPayloadLen,
 			fragTotal:      ff.FragTotal,
-			frags:          make([][]byte, ff.FragTotal),
+			have:           make([]bool, ff.FragTotal),
 			fragSeq:        make([]uint64, ff.FragTotal),
 			groupIdx:       groupIdxOf(b.groupIdxFn, ff),
 			deadline:       now.Add(b.ttl),
@@ -543,7 +589,7 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 	if ff.FragTotal != s.fragTotal || ff.FragIndex >= s.fragTotal {
 		return
 	}
-	if s.frags[ff.FragIndex] != nil {
+	if s.have[ff.FragIndex] {
 		return // duplicate
 	}
 
@@ -565,11 +611,10 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 	}
 	s.fragSize = fragSize
 
-	// Store a copy of the fragment data (the source buffer is reused by the
-	// receive loop between calls).
-	cp := make([]byte, len(ff.FragData))
-	copy(cp, ff.FragData)
-	s.frags[ff.FragIndex] = cp
+	// The source buffer is reused by the receive loop between calls: the
+	// fragment's bytes are copied here, once.
+	s.store(ff.FragIndex, ff.FragData)
+	s.have[ff.FragIndex] = true
 	s.fragSeq[ff.FragIndex] = ff.SeqNum
 	s.received++
 
@@ -648,10 +693,11 @@ func (b *Buffer) complete(s *slot) {
 		b.onLateDone()
 	}
 
-	payload := make([]byte, 0, s.origPayloadLen)
-	for _, frag := range s.frags {
-		payload = append(payload, frag...)
+	if s.payload == nil {
+		s.promote()
 	}
+	payload := s.payload
+	s.payload = nil
 
 	switch s.origFrameVer {
 	case frame.FrameVerV4:
@@ -785,17 +831,17 @@ func (s *slot) missingSeqNums() []uint64 {
 	}
 	out := make([]uint64, 0, int(s.fragTotal)-int(s.received))
 	for i := 0; i < int(s.fragTotal); i++ {
-		if s.frags[i] != nil {
+		if s.have[i] {
 			continue
 		}
 		// Nearest received neighbour, preferring the closest on either side.
 		best := -1
 		for d := 1; d < int(s.fragTotal); d++ {
-			if i-d >= 0 && s.frags[i-d] != nil {
+			if i-d >= 0 && s.have[i-d] {
 				best = i - d
 				break
 			}
-			if i+d < int(s.fragTotal) && s.frags[i+d] != nil {
+			if i+d < int(s.fragTotal) && s.have[i+d] {
 				best = i + d
 				break
 			}

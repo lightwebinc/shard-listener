@@ -2,7 +2,9 @@ package reassembly
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"testing"
 	"time"
 
@@ -597,5 +599,78 @@ func TestReassembly_EvictSweepThrottled(t *testing.T) {
 	b.Observe(buildFragFrame(other, 16, 0, 2, payload[:8])) // past the TTL and the interval: the first slot goes
 	if abandoned != 1 {
 		t.Fatalf("abandoned hook called %d times, want 1", abandoned)
+	}
+}
+
+// An object is the same whatever order its fragments land in, on either side
+// of the slot's promotion, the final (short) fragment first included.
+func TestReassembly_InPlaceAnyOrder(t *testing.T) {
+	const total, size = 200, 16
+	payload := make([]byte, (total-1)*size+5)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatal(err)
+	}
+	txid := txIDOf(payload)
+	frames := make([]*frame.FragFrame, total)
+	for i := range frames {
+		end := min((i+1)*size, len(payload))
+		frames[i] = &frame.FragFrame{TxID: txid, FragIndex: uint16(i), FragTotal: total,
+			OrigPayloadLen: uint32(len(payload)), FragData: payload[i*size : end]}
+	}
+	orders := map[string]func(i int) int{
+		"forward": func(i int) int { return i },
+		"reverse": func(i int) int { return total - 1 - i },
+		"shuffle": func(i int) int { return (i*73 + 11) % total },
+	}
+	for name, at := range orders {
+		t.Run(name, func(t *testing.T) {
+			var got []byte
+			b := New(0, 0, false, func(p []byte, _ *frame.Frame) { got = p })
+			for i := range total {
+				b.Observe(frames[at(i)])
+				b.Observe(frames[at(i)]) // a duplicate changes nothing
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("assembled %d bytes differ from the %d sent", len(got), len(payload))
+			}
+		})
+	}
+}
+
+// A forged first fragment declaring a large object costs its own bytes, not
+// the object's buffer.
+func TestReassembly_NoBufferBeforePromotion(t *testing.T) {
+	b := New(0, 0, false, func([]byte, *frame.Frame) {})
+	ff := &frame.FragFrame{TxID: [32]byte{1}, FragIndex: 0, FragTotal: 1000,
+		OrigPayloadLen: 8000, FragData: make([]byte, 8)}
+	b.Observe(ff)
+	for _, s := range b.slots {
+		if s.payload != nil {
+			t.Fatal("one fragment allocated the object")
+		}
+		if len(s.early) != 1 {
+			t.Fatalf("%d fragments held", len(s.early))
+		}
+	}
+}
+
+func BenchmarkObserveObject(b *testing.B) {
+	const total, size = 477, 8800
+	payload := make([]byte, total*size)
+	frames := make([]*frame.FragFrame, total)
+	for i := range frames {
+		frames[i] = &frame.FragFrame{FragIndex: uint16(i), FragTotal: total,
+			OrigPayloadLen: uint32(len(payload)), FragData: payload[i*size : (i+1)*size]}
+	}
+	buf := New(0, 0, false, func([]byte, *frame.Frame) {})
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	for n := 0; b.Loop(); n++ {
+		var id [32]byte
+		binary.BigEndian.PutUint64(id[:], uint64(n))
+		for _, f := range frames {
+			f.TxID = id
+			buf.Observe(f)
+		}
 	}
 }
