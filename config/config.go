@@ -322,6 +322,7 @@ type Config struct {
 
 	// Runtime
 	NumWorkers        int
+	RecvQueueDepth    int // datagrams queued between a worker's socket read and its processing; 0 = inline
 	Debug             bool
 	VerifyPayloadHash bool
 	EgressDedupCap    int           // 0 = disabled
@@ -532,6 +533,8 @@ func Load() (*Config, error) {
 		"comma-separated IPv6/IPv4 addresses/CIDRs to reject; checked before include and applied to both BRC-127 announcements and data-plane frames")
 	flag.IntVar(&c.NumWorkers, "workers", envInt("NUM_WORKERS", runtime.NumCPU()),
 		"number of worker goroutines (0 = runtime.NumCPU)")
+	flag.IntVar(&c.RecvQueueDepth, "recv-queue-depth", envInt("RECV_QUEUE_DEPTH", 1024),
+		"datagrams queued between each worker's socket read (recvmmsg) and its processing goroutine, so the socket drains while the previous datagram is decoded, reassembled and delivered; 0 = inline processing")
 	flag.BoolVar(&c.Debug, "debug", envBool("DEBUG", false),
 		"enable per-frame debug logging; deprecated alias for -log-level=debug")
 	flag.StringVar(&c.LogFormat, "log-format", envStr("LOG_FORMAT", "text"),
