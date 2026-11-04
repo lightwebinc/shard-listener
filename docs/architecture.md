@@ -107,8 +107,7 @@ Each worker:
 2. Joins all configured multicast groups on the configured interface (shard groups +
    `GroupBlockBroadcast` always; `GroupSubtreeDataAnnounce` when `-subtree-data-enabled`;
    `GroupSubtreeGroupAnnounce` when `-subtree-groups` is set).
-3. Reads datagrams in batches (`recvmmsg`) and queues them to one processing goroutine
-   (`-recv-queue-depth`, `0` = inline), which dispatches each via `processFrame`, which branches on the frame
+3. Dispatches each received datagram via `processFrame`, which branches on the frame
    version byte before decode:
    - `FrameVerV4` (0x04) → `processBlockFrame` (BRC-131)
    - `FrameVerV5` (0x05) → `processSubtreeDataFrame` (BRC-132)

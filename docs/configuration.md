@@ -801,8 +801,8 @@ which sees the whole object before it is framed and drops a mismatch before it i
 ### `-workers` / `NUM_WORKERS` (default: `runtime.NumCPU()`)
 
 Number of SO_REUSEPORT receive worker goroutines, each with its own socket. A
-worker reads its socket on one goroutine and processes on another (see
-`-recv-queue-depth`).
+worker processes each datagram inline in its receive loop (decode, reassembly,
+delivery) before reading the next.
 
 > **Critical for multicast receive:** Linux does **not** load-balance multicast
 > datagrams across SO_REUSEPORT sockets. Every socket that has joined a
@@ -814,18 +814,6 @@ worker reads its socket on one goroutine and processes on another (see
 > SO_REUSEPORT load balancing applies to unicast UDP only: the E2E test
 > path and the `-mode delivery` unicast ingest. For the multicast-receive
 > roles (`collapsed`, `receiver`), a single worker is correct.
-
-
-### `-recv-queue-depth` / `RECV_QUEUE_DEPTH` (default: `1024`)
-
-Datagrams queued between each worker's socket read and its processing
-goroutine. The read side takes up to 32 datagrams per `recvmmsg`; the
-processing side decodes, reassembles and delivers them in arrival order. The
-socket then drains at the slower of the two costs instead of their sum, which
-matters because a whole multicast group lands on one worker. A full queue
-blocks the reader and the kernel's receive buffer absorbs the burst; nothing is
-dropped in the queue. `0` processes each datagram inline in the receive loop
-(one `recvfrom` per datagram), the behavior before this flag.
 
 ### `-debug` / `DEBUG` (default: `false`)
 

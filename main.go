@@ -632,7 +632,6 @@ func run() error {
 			}
 		}
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
-		w.SetRecvQueueDepth(cfg.RecvQueueDepth)
 		w.SetBEEF(beefEngine, beefTopicSet, beefVersionSet, cfg.BEEFVerifyContent)
 		w.SetRebucketRelay(cfg.RebucketRelay)
 		// Receive-side retry tee: fail closed on error — when configured, a
