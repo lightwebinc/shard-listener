@@ -26,6 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           path: shard-listener
 
       - name: Resolve shard-common ref
@@ -54,12 +55,14 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: lightwebinc/shard-common
           ref: ${{ steps.common_ref.outputs.ref }}
           path: shard-common
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: lightwebinc/shard-proxy
           ref: ${{ steps.proxy_ref.outputs.ref }}
           path: shard-proxy
@@ -124,6 +127,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           path: shard-listener
 
       - name: Resolve shard-common ref
@@ -140,6 +144,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: lightwebinc/shard-common
           ref: ${{ steps.common_ref.outputs.ref }}
           path: shard-common
