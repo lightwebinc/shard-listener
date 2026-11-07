@@ -93,7 +93,7 @@ func TestClaim_TTLExpiry(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	mr.FastForward(200 * time.Millisecond)
 
-	// After TTL, the key has expired — new claim should succeed.
+	// After TTL, the key has expired: new claim should succeed.
 	if ok, err := s.Claim(id); err != nil || !ok {
 		t.Fatalf("Claim after TTL: got (%v, %v), want (true, nil)", ok, err)
 	}

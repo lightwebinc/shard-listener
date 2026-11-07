@@ -36,7 +36,7 @@ func TestReassembly_ShortInteriorFragmentDropsObject(t *testing.T) {
 	}
 }
 
-// The same object, correctly fragmented, still completes — the check must not
+// The same object, correctly fragmented, still completes, the check must not
 // cost a legitimate reassembly.
 func TestReassembly_UniformFragmentsStillComplete(t *testing.T) {
 	payload := bytes.Repeat([]byte{0xA5}, 90)

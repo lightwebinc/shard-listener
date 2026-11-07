@@ -25,18 +25,18 @@ type TrackerConfig struct {
 	SeqResetThreshold uint64        // If seqNum <= threshold on an established flow, treat as proxy restart (default 100)
 	// MaxFlows caps the per-source flow table so a burst of thousands of DISTINCT new
 	// sources (a flood, before the idle-age-out sweep frees slots) cannot exhaust memory.
-	// At the cap, a NEW source is not gap-tracked (its frames still forward — only NACK
+	// At the cap, a NEW source is not gap-tracked (its frames still forward, only NACK
 	// recovery is skipped for it) until a slot frees via age-out. 0 = unbounded (legacy).
 	MaxFlows int
 	// MaxForwardJump bounds a plausible in-flow burst: a forward SeqNum jump LARGER
 	// than this on an established flow is an EMITTER CHANGE (e.g. anycast spine
 	// failover between long-lived proxies with divergent in-memory counters), not
-	// loss — the flow re-baselines instead of registering (and NACK-storming) a
+	// loss, the flow re-baselines instead of registering (and NACK-storming) a
 	// phantom gap range. 0 = default 4096.
 	MaxForwardJump uint64
 	// TailProbe enables speculative probing of the next expected SeqNum on a flow
-	// that has gone quiet. Gap detection is otherwise INFERENTIAL — frame N is only
-	// known lost when N+1 arrives — so the last frames before a sender goes idle,
+	// that has gone quiet. Gap detection is otherwise INFERENTIAL: frame N is only
+	// known lost when N+1 arrives, so the last frames before a sender goes idle,
 	// and losses on very low-rate flows, are invisible no matter how good the
 	// retry path is. A probe asks the question the missing successor frame would
 	// have answered. It needs no protocol addition: BRC-126 already defines a MISS
@@ -51,13 +51,13 @@ type TrackerConfig struct {
 	// inter-arrival) does not probe continuously. 0 = default 500ms.
 	TailProbeMinIdle time.Duration
 	// TailProbeMaxMisses stops probing a flow after this many consecutive MISS
-	// answers — the sender is genuinely idle, not lossy. Reset by new traffic.
+	// answers, the sender is genuinely idle, not lossy. Reset by new traffic.
 	// 0 = default 3.
 	TailProbeMaxMisses int
 }
 
 // Tail-probe defaults. Chosen so a probe costs at most a handful of 64-byte
-// NACKs per flow per idle period and then stops — the mechanism must not turn
+// NACKs per flow per idle period and then stops, the mechanism must not turn
 // every idle flow into standing traffic.
 const (
 	defaultTailProbeIdleFactor = 4.0
@@ -75,7 +75,7 @@ const groupSubtreeDataAnnounce uint32 = 0xFFFB
 
 // groupCoinbaseFlow is the virtual group index for BRC-133 coinbase frames.
 // Like groupAnchorFlow it never appears in an IPv6 address and is not carried
-// on the NACK wire — it exists so a coinbase flow is counted separately from
+// on the NACK wire: it exists so a coinbase flow is counted separately from
 // the block announces it shares GroupBlockBroadcast with. Standalone BRC-133
 // coinbase carriage is deprecated and retained, and the block-control gate
 // (default on) drops those frames, so this label only appears when an operator
@@ -108,7 +108,7 @@ func flowLabel(groupIdx uint32) string {
 }
 
 // srcStr renders a source IP as a metric label value, lazily (only at the rare
-// gap/NACK emit sites — never on the per-frame hot path). "" for a nil source.
+// gap/NACK emit sites, never on the per-frame hot path). "" for a nil source.
 func srcStr(ip net.IP) string {
 	if ip == nil {
 		return ""
@@ -135,10 +135,10 @@ type flowState struct {
 	// abandonedMax, purged by the sweep.
 	abandoned map[uint64]time.Time
 	// ewmaIPG is a smoothed inter-arrival estimate (per OBSERVED frame) used to judge
-	// whether a seq jump is plausible for the elapsed silence — the emitter-change
+	// whether a seq jump is plausible for the elapsed silence, the emitter-change
 	// discriminator that works at any traffic rate. 0 until two frames seen.
 	ewmaIPG time.Duration
-	// contiguous counts consecutive in-order frames — how settled ewmaIPG is. A
+	// contiguous counts consecutive in-order frames: how settled ewmaIPG is. A
 	// re-baseline only NACK-recovers its transition tail once the rate estimate is
 	// trustworthy (contiguous >= minContiguousForRecover); reset on any gap/re-baseline.
 	contiguous uint64
@@ -163,7 +163,7 @@ type flowState struct {
 	owner int
 }
 
-// ownerUnknown marks a flow whose observing worker is not known — a gap
+// ownerUnknown marks a flow whose observing worker is not known, a gap
 // registered through the legacy [Tracker.Observe] entry point. Such gaps fall
 // back to the single callback set by [Tracker.SetRecoverFunc]; with neither,
 // unicast recovery is off for that gap and the gap is booked unrecovered rather
@@ -182,8 +182,8 @@ const minContiguousForRecover = 16
 // retries and failRounds track two different things. retries counts every NACK
 // attempt (including the immediate tier-escalation hops that walk retry1 →
 // retry2 → retry3 on a MISS) and is used only for observability. failRounds
-// counts consecutive *failed recovery rounds* — a timeout, or a MISS once the
-// deepest tier has been reached — and drives both the exponential backoff
+// counts consecutive *failed recovery rounds*, a timeout, or a MISS once the
+// deepest tier has been reached, and drives both the exponential backoff
 // magnitude and the unrecoverable cap. Escalating through tiers is free: it
 // does not grow the backoff or consume the retry budget, so a deep topology
 // gets the same number of real retries at the warm cache as a shallow one.
@@ -200,7 +200,7 @@ type gapEntry struct {
 	endpointIdx int       // index into registry snapshot, clamped to the deepest tier
 	// speculative marks a tail probe: a NACK for a SeqNum that may never have been
 	// emitted. It is a QUESTION, not an observed loss, so it must never count as a
-	// detected gap — otherwise every idle flow inflates the unrecovered ratio with
+	// detected gap, otherwise every idle flow inflates the unrecovered ratio with
 	// phantom losses and the repair alerts fire on healthy fabrics.
 	speculative bool
 	// owner is copied from the flow at registration so the dispatch goroutine
@@ -229,12 +229,12 @@ type Tracker struct {
 	// recovers holds the same callback per listener worker, indexed by worker
 	// id (set via RegisterRecover). A multi-worker listener must register per
 	// worker rather than set one global callback: reassembly is per-worker
-	// state, so the recovered frame has exactly one correct destination — the
+	// state, so the recovered frame has exactly one correct destination, the
 	// worker that observed the flow.
 	//
 	// Both are guarded by mu. They are written at wiring time and read once per
 	// NACK dispatch, so the lock costs nothing, and it is what makes the wiring
-	// safe AFTER Start — which is the order both listener binaries actually use
+	// safe AFTER Start, which is the order both listener binaries actually use
 	// (the workers that own the callbacks are built well after the tracker is
 	// started).
 	recoverFn func(raw []byte) bool
@@ -262,7 +262,7 @@ type Tracker struct {
 
 // demoteSelf moves this node's OWN retry endpoint to the END of the seed list.
 // A retry co-located with the listener sits behind the SAME link and therefore
-// missed exactly the frames the listener missed — it cannot repair link loss,
+// missed exactly the frames the listener missed: it cannot repair link loss,
 // only the listener's own local drops (socket overflow, where the separate retry
 // process did receive). The tracker escalates ONE endpoint per retry with
 // backoff, so leaving self first spends a gap's whole retry budget on the one
@@ -354,7 +354,7 @@ func (t *Tracker) SetRecoverFunc(f func(raw []byte) bool) {
 //
 // Registering is what makes unicast recovery live at all: with no callback for a
 // gap, the drained data frame has nowhere to go, so it is dropped and the gap is
-// booked UNRECOVERED rather than cancelled — the loss stays visible instead of
+// booked UNRECOVERED rather than cancelled, the loss stays visible instead of
 // being papered over by an ACK that promised a frame the listener discarded.
 // Safe to call after Start.
 func (t *Tracker) RegisterRecover(id int, f func(raw []byte) bool) {
@@ -391,7 +391,7 @@ func (t *Tracker) FlowCount() int {
 }
 
 // FlowsRefused returns the cumulative count of new flows skipped at MaxFlows (the flood
-// guard) — a non-zero value signals sustained source-flood pressure.
+// guard), a non-zero value signals sustained source-flood pressure.
 func (t *Tracker) FlowsRefused() uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -448,7 +448,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 
 	fs, ok := t.flows[hashKey]
 	if !ok {
-		// Flood guard: at the cap, do NOT create a new flow — the frame still forwards
+		// Flood guard: at the cap, do NOT create a new flow, the frame still forwards
 		// (the caller egresses independently), only gap/NACK recovery is skipped for this
 		// source until an idle flow ages out and frees a slot.
 		if t.cfg.MaxFlows > 0 && len(t.flows) >= t.cfg.MaxFlows {
@@ -485,10 +485,10 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 
 	// A frame for a gap already given up on: the hole closed after all. Book
 	// it so unrecovered minus late-filled reads as real loss, then fall through
-	// — it is an old seqNum and step 4 treats it as the retransmit it is.
+	//: it is an old seqNum and step 4 treats it as the retransmit it is.
 	t.noteLateFill(fs, seqNum)
 
-	// Step 3: auto-fill — close any pending gap whose seqNum matches.
+	// Step 3: auto-fill, close any pending gap whose seqNum matches.
 	if e, found := fs.pending[seqNum]; found {
 		delete(fs.pending, seqNum)
 		t.bookFill(fs, e)
@@ -496,7 +496,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		// must NOT fall through to step 4: a repaired early-flow seqNum (≤ the
 		// reset threshold) otherwise reads as a proxy restart, flushing every
 		// other pending gap to unrecovered and re-baselining the flow to the
-		// repair's seqNum — from where the next wire frame's "jump" triggers
+		// repair's seqNum: from where the next wire frame's "jump" triggers
 		// the emitter-change path and NACKs a tail of already-received frames.
 		if seqNum <= fs.lastSeqNum {
 			return
@@ -522,7 +522,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		}
 		// Only a LIVE wire frame can signal a proxy restart. A recovered frame
 		// re-injected off the unicast NACK channel carries no source (see
-		// Worker.Reinject) — a late repair of an early-flow seqNum, e.g. one
+		// Worker.Reinject), a late repair of an early-flow seqNum, e.g. one
 		// arriving after its gap was abandoned, is history replayed, not a
 		// restarted proxy, and must not reset the flow.
 		if source != nil && seqNum <= threshold && fs.lastSeqNum > threshold {
@@ -542,7 +542,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 	}
 
 	if seqNum == fs.lastSeqNum+1 {
-		// Step 5: contiguous — update the inter-arrival estimate (the emitter-change
+		// Step 5: contiguous, update the inter-arrival estimate (the emitter-change
 		// discriminator's rate input). EWMA α=1/8, integer-friendly.
 		if elapsed > 0 {
 			if fs.ewmaIPG == 0 {
@@ -559,7 +559,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 
 	// Emitter change: a forward jump IMPLAUSIBLE for the elapsed silence means a
 	// DIFFERENT proxy now stamps this flow (anycast failover between long-lived
-	// emitters with divergent in-memory counters) — the intermediate range was never
+	// emitters with divergent in-memory counters), the intermediate range was never
 	// emitted toward this listener. Re-baseline: drop pending phantoms silently
 	// (artifacts of the old emitter's numbering, not losses) and track from here.
 	// Plausibility is RATE-AWARE (a fixed jump cap cannot separate a real loss
@@ -581,7 +581,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		fs.pending = make(map[uint64]*gapEntry)
 		// Anycast-failover recovery: the jump itself is the two emitters' divergent
 		// counters, but a REAL transition outage of `elapsed` still lost ≈ elapsed/ewmaIPG
-		// frames — and the NEW emitter stamped those just before `seqNum` (they were
+		// frames, and the NEW emitter stamped those just before `seqNum` (they were
 		// RPF-dropped in the ~sub-second reconvergence) and holds them in ITS retry cache.
 		// NACK that rate-plausible TAIL (bounded, so no storm) so the existing retry path
 		// recovers the transition instead of it vanishing silently inside the phantom
@@ -612,7 +612,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 			}
 		}
 		fs.lastSeqNum = seqNum
-		fs.ewmaIPG = 0    // new emitter, new cadence — re-learn
+		fs.ewmaIPG = 0    // new emitter, new cadence: re-learn
 		fs.contiguous = 0 // rate estimate is stale across the emitter change
 		fs.samples = 0
 		if t.rec != nil {
@@ -621,7 +621,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		return
 	}
 
-	// Step 6: gap — register each missing seqNum in (lastSeqNum, seqNum).
+	// Step 6: gap, register each missing seqNum in (lastSeqNum, seqNum).
 	for missing := fs.lastSeqNum + 1; missing < seqNum; missing++ {
 		if _, exists := fs.pending[missing]; !exists {
 			jitter := time.Duration(rand.Int64N(int64(t.cfg.JitterMax) + 1))
@@ -651,7 +651,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 // A recovered PROBE is booked as detected AND suppressed at the same instant:
 // detection is deliberately never booked at probe issue, so a MISS leaves no
 // phantom loss behind, which means success is the only place the real loss it
-// uncovered can be counted. Every fill path must go through here — an earlier
+// uncovered can be counted. Every fill path must go through here, an earlier
 // version accounted only in the ACK path, so a probe whose frame returned via the
 // DATA path incremented suppressed without detected and drove the repair ratio
 // above 1.0. Caller must hold t.mu.
@@ -814,7 +814,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 		for seq, e := range fs.pending {
 			if now.After(e.deadline) {
 				delete(fs.pending, seq)
-				// An unanswered PROBE is not a lost frame — it is an unanswered
+				// An unanswered PROBE is not a lost frame: it is an unanswered
 				// question. Counting it as unrecovered would manufacture loss on
 				// every quiet flow and make the repair-ratio alerts unusable.
 				if e.speculative {
@@ -851,7 +851,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 				select {
 				case t.nackQueue <- &entry:
 				default:
-					// Queue full — reset so this gap is retried next tick.
+					// Queue full: reset so this gap is retried next tick.
 					e.nextAttempt = now
 				}
 			}
@@ -878,7 +878,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 // (ewmaIPG) rather than a fixed timeout, because a "long silence" means nothing
 // in absolute terms: 200ms is unremarkable on a 1-per-second flow and a total
 // stall on a 10k/s one. That is also why the probe waits for the estimate to
-// settle (minContiguousForRecover samples) — until it has, silence cannot be
+// settle (minContiguousForRecover samples): until it has, silence cannot be
 // distinguished from an unestablished rate. The gate counts the estimate's
 // samples, not the contiguous run the re-baseline path uses: a gap shortly
 // before the flow went quiet leaves the estimate intact, and gating on the run
@@ -943,7 +943,7 @@ func (t *Tracker) maybeProbeTail(hashKey uint64, fs *flowState, now time.Time) {
 	select {
 	case t.nackQueue <- &entry:
 	default:
-		// Queue full — drop the probe entirely rather than let speculative work
+		// Queue full: drop the probe entirely rather than let speculative work
 		// displace real gap recovery. It will be reconsidered next sweep.
 		delete(fs.pending, seq)
 		fs.probing = 0
@@ -960,7 +960,7 @@ func (t *Tracker) retireProbe(fs *flowState, seq uint64) {
 }
 
 // probeMissed retires a tail probe that was answered MISS: the SeqNum was never
-// emitted, so the flow was simply idle. No gap is recorded — nothing was lost.
+// emitted, so the flow was simply idle. No gap is recorded: nothing was lost.
 func (t *Tracker) probeMissed(e *gapEntry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -1030,7 +1030,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	//
 	// Bind to nackSrc when set so the NACK (and the retry's return traffic) uses
 	// a globally routable identity. Otherwise the kernel picks a per-route
-	// source — on a tunnelled fabric that is a point-to-point /127 tunnel inner
+	// source: on a tunnelled fabric that is a point-to-point /127 tunnel inner
 	// address, and the retry's reply (a unicast retransmit) is then misrouted
 	// off the tunnel and lost.
 	laddr := "[::]:0"
@@ -1056,7 +1056,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	if _, werr := conn.WriteTo(buf[:], addr); werr != nil {
 		// A failed send is NOT a dispatched NACK: the tier was never asked.
 		// Swallowing this is how a firewall EPERM on every remote endpoint
-		// stayed invisible for the repair plane's entire life — dispatched
+		// stayed invisible for the repair plane's entire life: dispatched
 		// counted 3 per gap while 2 of 3 datagrams died in the sender's own
 		// output hook, and the only surviving tier shared fate with the loss.
 		// Count + log, then advance exactly like a timeout so the walk still
@@ -1082,7 +1082,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 
 	// Drain the NACK socket until respTimeout. The retry endpoint may return up
 	// to two datagrams: a unicast retransmit of the missing frame (the data
-	// return channel) and a small ACK/MISS/THROTTLED control response — in
+	// return channel) and a small ACK/MISS/THROTTLED control response: in
 	// either order. A data frame is re-injected through the listener pipeline
 	// (recoverFn), which repairs the gap for downstream consumers without any
 	// client logic; the control response drives tier/backoff state. The buffer
@@ -1102,13 +1102,13 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 
 		// A data frame (the unicast retransmit) confirms recovery: re-inject it
 		// through the listener pipeline (Observe auto-fills the gap and fans it
-		// out downstream), cancel, and return — regardless of whether the ACK
+		// out downstream), cancel, and return: regardless of whether the ACK
 		// arrived first or not.
 		if reinject != nil && nr >= minRetransmitFrame && binary.BigEndian.Uint32(rbuf[0:4]) == nackMagic {
 			cp := make([]byte, nr)
 			copy(cp, rbuf[:nr])
 			if !reinject(cp) {
-				// The pipeline REJECTED the frame — a BRC-131 announce that
+				// The pipeline REJECTED the frame, a BRC-131 announce that
 				// fails the block-control gate is the case. Asking again cannot
 				// help: the retry endpoint holds exactly this frame and the gate
 				// will reject it every time. Stop retrying, but do NOT book a
@@ -1131,7 +1131,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 				// A unicast-flagged ACK only promises a retransmit; recovery is
 				// confirmed solely when the data frame itself arrives, because
 				// the retransmit can be lost on the same lossy path. So do NOT
-				// cancel on the ACK alone — keep draining for the data, and on
+				// cancel on the ACK alone: keep draining for the data, and on
 				// timeout escalate to another cache. A non-unicast
 				// (multicast/legacy) ACK keeps the original trust-the-repair
 				// semantics: the data-path Fill closes the gap.
@@ -1143,7 +1143,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 					}
 					if resp.Flags&respFlagMulticastSent == 0 {
 						// The repair was sent ONLY as a unicast return this
-						// listener has no way to consume — no re-injection
+						// listener has no way to consume, no re-injection
 						// callback, so the data frame drained above was
 						// discarded. Cancelling here would book a suppression
 						// for a frame that reached no consumer, which is how a
@@ -1186,7 +1186,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	if unicastACK {
 		// The cache claimed it has the frame but the unicast retransmit never
 		// arrived (lost in transit). Escalate to another cache rather than
-		// dropping the gap — a frame lost on this path may be repairable from a
+		// dropping the gap, a frame lost on this path may be repairable from a
 		// node that received it over a clean path.
 		t.advanceEndpoint(e, true, len(snap))
 		return
@@ -1218,8 +1218,8 @@ const unicastDrainWindow = 80 * time.Millisecond
 const throttleHintBase = 125 * time.Millisecond
 
 // throttleGap parks a gap after a THROTTLED congestion signal. Unlike a failed
-// round it neither advances the endpoint nor consumes the retry budget — the
-// endpoint is healthy and a multicast repair is likely propagating — so the gap
+// round it neither advances the endpoint nor consumes the retry budget, the
+// endpoint is healthy and a multicast repair is likely propagating, so the gap
 // holds for the hinted backoff (jittered) and retries the same endpoint. GapTTL
 // remains the absolute safety net; Fill cancels the gap if the repair arrives.
 func (t *Tracker) throttleGap(e *gapEntry, flags byte) {
@@ -1390,7 +1390,7 @@ func (t *Tracker) abandonGap(e *gapEntry, reason string) {
 		fs.probing = 0
 	}
 	// A speculative tail probe that comes back rejected was never an
-	// observed loss, so it is retired silently — booking it would
+	// observed loss, so it is retired silently: booking it would
 	// manufacture phantom loss on an idle flow.
 	if !e.speculative {
 		t.bookAbandon(fs, e.seqNum, fs.source, reason)

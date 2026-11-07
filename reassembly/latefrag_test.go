@@ -12,7 +12,7 @@ import (
 // did NOT lose a fragment receives a copy of one it already consumed. Before
 // the completion memory that copy opened a fresh slot, which (a) re-delivered
 // the object once the remaining copies followed and (b) expired into an
-// onIncomplete NACK for fragments the listener already had — repair feeding
+// onIncomplete NACK for fragments the listener already had: repair feeding
 // repair.
 func TestReassembly_LateCopyDoesNotReopenCompletedSlot(t *testing.T) {
 	payload := buildEFPayloadR(t, 120)

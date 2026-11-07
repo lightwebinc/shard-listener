@@ -13,8 +13,8 @@ import (
 )
 
 // A gap given up on (here: TTL) is booked unrecovered WITH its reason, and a
-// frame that then arrives for it — a multicast retransmit that outran the
-// NACK deadline — is booked as a late fill, so unrecovered minus late-filled
+// frame that then arrives for it, a multicast retransmit that outran the
+// NACK deadline: is booked as a late fill, so unrecovered minus late-filled
 // is the flow's real loss. Measured live before this existed: 32 unrecovered
 // on a flow whose consumer received every object.
 func TestAbandonedGap_LateFillIsBooked(t *testing.T) {

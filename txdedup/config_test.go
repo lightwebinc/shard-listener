@@ -99,7 +99,7 @@ func TestClaim_DeploymentsRaceIndependently(t *testing.T) {
 	}
 	a, b := mk("depA"), mk("depB")
 	id := tid(0x10)
-	// Each deployment claims independently — both win.
+	// Each deployment claims independently, both win.
 	if ok, _ := a.Claim(id); !ok {
 		t.Error("depA should win its own namespace")
 	}

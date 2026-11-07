@@ -87,7 +87,7 @@ func upsertEndpoint(t *testing.T, r *discovery.Registry, ep *mockEndpoint, tier,
 // scenario where retry1 (T0/P128) and retry2 (T0/P64) have cold caches and
 // retry3 (T1/P128) MISSes on the first attempt (cache not yet warm) but ACKs
 // on a later attempt. The gap MUST be recovered: the tracker must not cycle
-// back to retry1/retry2 — it must stay on retry3 with backoff and retry it.
+// back to retry1/retry2: it must stay on retry3 with backoff and retry it.
 func TestTierEscalation_RecoversAfterDeepTierMiss(t *testing.T) {
 	r1 := newMockEndpoint(t, 1<<30) // always MISS
 	r2 := newMockEndpoint(t, 1<<30) // always MISS

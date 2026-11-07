@@ -82,7 +82,7 @@ jobs:
       - name: Enable IPv6 multicast on loopback
         run: |
           # The ROUTE-TYPE KEYWORD is the whole point. `route add ff00::/8 dev lo
-          # table local` — what this step ran until now — creates a UNICAST entry
+          # table local` (what this step ran until now) creates a UNICAST entry
           # (ff00::/8 dev lo metric 1024) and exits 0, so the step looked healthy
           # while test/run-e2e.sh's `route show table local type multicast` found
           # nothing and refused. The kernel never installs this route for loopback
@@ -90,7 +90,7 @@ jobs:
           # ::1/128), so CI must provision it, correctly.
           #
           # `replace` because it is idempotent; `append` returns EEXIST on a second
-          # run. No `2>/dev/null || true` — masking the failure is exactly how the
+          # run. No `2>/dev/null || true`: masking the failure is exactly how the
           # wrong route type survived here unnoticed.
           sudo ip link set lo multicast on
           sudo ip -6 route replace table local multicast ff00::/8 dev lo \
@@ -108,7 +108,7 @@ jobs:
   # the guard: it reaches FreeBSD entirely through shard-common's BSD half
   # (netjoin, hostinfo) and through the x/net and x/sys syscall surfaces, so a
   # freebsd-only break here shows up as a compile error in a dependency's other
-  # half — invisible to the linux-only Dagger pipeline.
+  # half: invisible to the linux-only Dagger pipeline.
   #
   # A linux runner can only cross-BUILD and cross-VET the freebsd target; it
   # cannot run its tests. So this is honestly a compile + type-check job, not a
@@ -117,7 +117,7 @@ jobs:
   # Mirrors the e2e job's host-Go setup rather than the dagger job's: it compiles
   # the repo itself, so the toolchain comes from go.mod (not ci/go.mod) and
   # shard-common is the usual sibling checkout + replace. shard-proxy is NOT
-  # checked out — only e2e needs that binary; go.mod requires shard-common alone.
+  # checked out, only e2e needs that binary; go.mod requires shard-common alone.
   cross-build:
     name: cross-build (freebsd)
     runs-on: ubuntu-latest

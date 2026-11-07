@@ -213,7 +213,7 @@ func TestRetryTee_SkipsControlAndHeaderFrames(t *testing.T) {
 		t.Fatalf("Decap: %v", err)
 	}
 	if len(payload) != len(raw) {
-		t.Fatalf("first mirrored datagram is %d bytes, want the %d-byte data frame — a control/header/junk datagram leaked into the tee", len(payload), len(raw))
+		t.Fatalf("first mirrored datagram is %d bytes, want the %d-byte data frame, a control/header/junk datagram leaked into the tee", len(payload), len(raw))
 	}
 	assertNoTee(t, teeCh)
 }

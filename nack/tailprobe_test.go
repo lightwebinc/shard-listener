@@ -94,7 +94,7 @@ func settleFlow(tr *Tracker) {
 	}
 }
 
-// A quiet flow must probe the next expected SeqNum — the question the absent
+// A quiet flow must probe the next expected SeqNum, the question the absent
 // successor frame would have answered.
 func TestTailProbeIssuedOnQuietFlow(t *testing.T) {
 	fr := newFakeRetry(t, false)
@@ -108,7 +108,7 @@ func TestTailProbeIssuedOnQuietFlow(t *testing.T) {
 			t.Errorf("probed seq=%d want %d (next expected)", seq, minContiguousForRecover+3)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("no tail probe issued — tail loss stays invisible on a quiet flow")
+		t.Fatal("no tail probe issued: tail loss stays invisible on a quiet flow")
 	}
 }
 
@@ -142,10 +142,10 @@ func TestTailProbeMissIsNotLoss(t *testing.T) {
 			"the entry, not leave it to expire as an unrecovered gap", pending)
 	}
 	if misses == 0 {
-		t.Error("probe misses not counted — the flow would probe forever")
+		t.Error("probe misses not counted, the flow would probe forever")
 	}
 	if misses > probeCfg().TailProbeMaxMisses {
-		t.Errorf("probeMisses=%d exceeds the cap %d — probing did not stop on a confirmed "+
+		t.Errorf("probeMisses=%d exceeds the cap %d: probing did not stop on a confirmed "+
 			"idle flow", misses, probeCfg().TailProbeMaxMisses)
 	}
 }

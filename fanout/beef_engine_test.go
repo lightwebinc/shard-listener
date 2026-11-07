@@ -12,7 +12,7 @@ import (
 
 // TestSendBeef_NoEngineIsAnError is the B3 regression: without a plane engine
 // the group index (and therefore the own-traffic HashKey) cannot be computed,
-// so SendBeef must FAIL rather than fall back to the full consumer table —
+// so SendBeef must FAIL rather than fall back to the full consumer table:
 // a fallback bypasses group election and silently disables own-traffic
 // exclusion and ingress metering.
 func TestSendBeef_NoEngineIsAnError(t *testing.T) {

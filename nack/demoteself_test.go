@@ -5,12 +5,12 @@ import "testing"
 // A retry co-located with the listener shares its loss, so it must be the LAST
 // escalation target, not the first. The tracker advances one endpoint per retry
 // with backoff, so a self-first order burns the whole retry budget on the one
-// endpoint that provably cannot repair link loss — measured live as
+// endpoint that provably cannot repair link loss: measured live as
 // gaps_unrecovered tracking gaps_detected 1:1.
 func TestDemoteSelf(t *testing.T) {
 	self := "fd00:50:0:6::1"
 	in := []string{
-		"[fd00:50:0:6::1]:9300", // self — must sink to last
+		"[fd00:50:0:6::1]:9300", // self: must sink to last
 		"[fd00:50:0:7::1]:9300",
 		"[fd00:50:0:2::1]:9300",
 	}
@@ -25,7 +25,7 @@ func TestDemoteSelf(t *testing.T) {
 	if got[0] != "[fd00:50:0:7::1]:9300" || got[1] != "[fd00:50:0:2::1]:9300" {
 		t.Errorf("remote order not preserved: %v", got)
 	}
-	// Self is DEMOTED, never dropped — it still repairs listener-local drops.
+	// Self is DEMOTED, never dropped: it still repairs listener-local drops.
 	var found bool
 	for _, e := range got {
 		if e == "[fd00:50:0:6::1]:9300" {

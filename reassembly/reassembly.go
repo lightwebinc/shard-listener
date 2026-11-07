@@ -10,10 +10,10 @@
 // # Reassembly buffer
 //
 // A [Buffer] holds at most MaxSlots reassembly slots. Each slot is keyed by a
-// [32]byte key — the fragment's offset-8 field (TxID) for non-V9 slots; V9
+// [32]byte key, the fragment's offset-8 field (TxID) for non-V9 slots; V9
 // (BRC-149 BEEF) fragments key on the (ContentID, TopicID) pair as
-// SHA-256(ContentID ∥ TopicID) — and tracks the K expected fragments. When
-// all K fragments arrive the payload is verified (canonical TxID check —
+// SHA-256(ContentID ∥ TopicID), and tracks the K expected fragments. When
+// all K fragments arrive the payload is verified (canonical TxID check:
 // SHA256d(payload) for BRC-12 raw, objfmt.TxID for BRC-30 EF; optional) and
 // delivered via the callback.
 //
@@ -53,8 +53,8 @@ import (
 // reports whether the payload is exactly one well-formed transaction.
 //
 // This is deliberately the same derivation and the same bound the ingress
-// proxy applies (forwarder.Forwarder.SetVerifyPayloadHash): objfmt.TxID —
-// SHA256d over the standard serialization, EF extras excluded — for both raw
+// proxy applies (forwarder.Forwarder.SetVerifyPayloadHash): objfmt.TxID:
+// SHA256d over the standard serialization, EF extras excluded: for both raw
 // and Extended Format payloads, over a payload that must be exactly one
 // transaction. For an honest payload the result is unchanged; what changes is
 // that a payload which is not a single transaction (unwalkable, truncated, or
@@ -107,7 +107,7 @@ const (
 	// slot TTL: the slot TTL bounds how long THIS listener waits for fragments,
 	// while a repair copy is answering some OTHER member's NACK and arrives on
 	// that member's recovery schedule (backoff rounds, then endpoint
-	// escalation) — comfortably later than the slot it would resurrect.
+	// escalation): comfortably later than the slot it would resurrect.
 	//
 	// 60 s matches the egress dedup horizon (-egress-dedup-ttl-redis), and sits
 	// an order of magnitude INSIDE the origin's ingress dedup window
@@ -120,7 +120,7 @@ const (
 	// DefaultMaxObjectBytes bounds one declared original payload (OrigPayloadLen).
 	// The field is ATTACKER-DECLARED: without a bound, one fragment claiming
 	// OrigPayloadLen≈4 GiB with FragTotal=65535 opens a slot whose frags array
-	// alone costs ~1.5 MiB — 4096 such datagrams command gigabytes of heap.
+	// alone costs ~1.5 MiB: 4096 such datagrams command gigabytes of heap.
 	// 64 MiB matches the object-stream ceiling (objfmt.DefaultMaxObject); the
 	// BEEF plane (OrigFrameVer 0x09) is separately clamped to the operator's
 	// -beef-max-object-bytes via SetMaxObjectBytesV9.
@@ -128,7 +128,7 @@ const (
 )
 
 // Callback is invoked when BRC-124/BRC-128 (OrigFrameVer V2) reassembly
-// completes successfully. payload is the reassembled bytes — a newly allocated
+// completes successfully. payload is the reassembled bytes, a newly allocated
 // slice owned by the caller. f is the synthetic [frame.Frame] built from the
 // fragment metadata (TxID, SubtreeID, HashKey, SeqNum). The callback is called
 // with the Buffer's lock held; it must not call back into the Buffer.
@@ -149,7 +149,7 @@ type SubtreeDataCallback func(payload []byte, sf *frame.SubtreeDataFrame)
 
 // BEEFCallback is invoked when BRC-148 (OrigFrameVer V9) reassembly
 // completes. payload is the reassembled BEEF object; bf carries the frame
-// metadata — ContentID from the fragment TxID slot (which is SHA-256d of
+// metadata: ContentID from the fragment TxID slot (which is SHA-256d of
 // the object by construction, so the verifyHash check applies exactly) and
 // TopicID from the fragment SubtreeID slot.
 type BEEFCallback func(payload []byte, bf *frame.BEEFFrame)
@@ -227,25 +227,25 @@ type Buffer struct {
 	// moved onto a multicast-answering cache without any change of its own.
 	//
 	// Without the memory, a repeat fragment opens a fresh slot for an object
-	// already delivered, and the consequences compound —
+	// already delivered, and the consequences compound:
 	//
 	//   - the object reassembles a SECOND time. Whether the duplicate reaches
-	//     the wire depends on the egress claim on (ContentID, TopicID) — which
-	//     caught it in the measured pre-fix run — but that claim is optional
+	//     the wire depends on the egress claim on (ContentID, TopicID), which
+	//     caught it in the measured pre-fix run, but that claim is optional
 	//     (-egress-dedup-local-cap 0 removes it) and shorter-lived than the
 	//     recovery horizon, so the duplicate delivery (and the double billing
 	//     that follows it) is one config change away. A layer must not rely on a
 	//     later one to undo duplicates it manufactured;
 	//   - the fresh slot never fills, so its TTL eviction fires onIncomplete and
 	//     NACKs the very fragments the listener already has, which the responder
-	//     answers by multicast, which opens more slots — a self-feeding loop.
+	//     answers by multicast, which opens more slots, a self-feeding loop.
 	//
 	// The memory is the same duplicate suppression the live slot already applies
 	// (frags[i] != nil), extended past completion for completionTTL. It is
 	// bounded exactly like the slot table (maxSlots keys, FIFO): under a
 	// fragment rate that overruns the cap the window shortens rather than the
-	// heap growing, and the oldest key — the one least likely to still attract a
-	// repair — is the one that goes.
+	// heap growing, and the oldest key, the one least likely to still attract a
+	// repair: is the one that goes.
 	done          map[[32]byte]time.Time
 	doneOrder     [][32]byte
 	completionTTL time.Duration
@@ -284,7 +284,7 @@ type slot struct {
 	whole []byte
 	// fragSeq holds each received fragment's own SeqNum, indexed by FragIndex
 	// (0 = not received). Without it an incomplete slot knows WHICH FragIndex is
-	// missing but has no way back to the SeqNum a NACK must name — the slot's
+	// missing but has no way back to the SeqNum a NACK must name, the slot's
 	// scalar seqNum belongs to whichever fragment happened to arrive first.
 	// Interpolating between known neighbours (below) needs only per-object SeqNum
 	// monotonicity; deriving from a single base index would additionally assume
@@ -486,7 +486,7 @@ func (b *Buffer) SetLateFragmentHook(fn func()) { b.onLateFragment = fn }
 // because a fragment's data length is inconsistent with the object's
 // OrigPayloadLen and FragTotal. Non-zero means some sender or path is
 // producing fragments that cannot be reassembled at the offsets BRC-130
-// implies — corruption, a mis-sized fragmenter, or injection.
+// implies: corruption, a mis-sized fragmenter, or injection.
 func (b *Buffer) SetBadFragmentHook(fn func()) { b.onBadFragment = fn }
 
 // SetOversizeHook sets a metrics hook called once per fragment dropped because
@@ -541,7 +541,7 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 
 	if !exists {
 		// A late copy of a fragment whose object already completed. Dropping it
-		// here — rather than opening a slot that can only ever hold duplicates —
+		// here, rather than opening a slot that can only ever hold duplicates:
 		// is what keeps multicast repair from re-delivering the object and from
 		// NACKing fragments the listener already consumed. The caller still feeds
 		// this fragment to the gap tracker, so the copy books the fill it was
@@ -616,7 +616,7 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 	// when every non-final fragment is exactly fragSize and the final one is
 	// the remainder. Without this check a short interior fragment produces a
 	// payload of the wrong length whose bytes past the short fragment are all
-	// shifted — and with -verify-payload-hash off (the default) nothing
+	// shifted, and with -verify-payload-hash off (the default) nothing
 	// downstream would notice before delivery. The object is dropped, not the
 	// fragment: the slot's contents are no longer trustworthy as a set.
 	fragSize, ok := checkFragLen(s, ff)
@@ -640,7 +640,7 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 		return // not complete yet
 	}
 
-	// All fragments arrived — reassemble.
+	// All fragments arrived: reassemble.
 	b.complete(s)
 }
 
@@ -650,7 +650,7 @@ func (b *Buffer) Observe(ff *frame.FragFrame) {
 //
 // BRC-130 carries no per-fragment offset: the K-th fragment sits at
 // K × fragSize, so an object of OrigPayloadLen bytes in FragTotal fragments
-// has exactly one legal shape — FragTotal−1 fragments of fragSize bytes each,
+// has exactly one legal shape: FragTotal−1 fragments of fragSize bytes each,
 // then a final fragment holding the rest (at least one byte). Each arriving
 // fragment implies a fragSize, and every fragment of one object must imply
 // the same one; together that makes the concatenated length exactly
@@ -702,7 +702,7 @@ func checkFragLen(s *slot, ff *frame.FragFrame) (fragSize int, ok bool) {
 //     optional Merkle root verification via verifyMerkle.
 func (b *Buffer) complete(s *slot) {
 	// Remember the key before any branch removes the slot. Every path below is
-	// terminal for this object — delivered or rejected on verification — so any
+	// terminal for this object (delivered or rejected on verification) so any
 	// further copy of its fragments is a duplicate either way. (A live slot
 	// already ignores duplicate fragments, so remembering the failed case costs
 	// no recovery that was ever available.)
@@ -734,8 +734,8 @@ func (b *Buffer) complete(s *slot) {
 
 	case frame.FrameVerV5:
 		// BRC-132 subtree data: SHA256d verification never applies. The merkle
-		// root is checked where a subtree ENTERS the fabric — shard-proxy's
-		// -verify-subtree-root, on the whole object before it is framed — not
+		// root is checked where a subtree ENTERS the fabric: shard-proxy's
+		// -verify-subtree-root, on the whole object before it is framed, not
 		// here, where only a reassembled payload is in hand.
 		sf := &frame.SubtreeDataFrame{
 			MsgType: s.msgType,
@@ -750,8 +750,8 @@ func (b *Buffer) complete(s *slot) {
 		}
 
 	case frame.FrameVerV9:
-		// BRC-148 BEEF object: the TxID slot is the ContentID —
-		// SHA-256d(object) by definition — so the verifyHash check is the
+		// BRC-148 BEEF object: the TxID slot is the ContentID:
+		// SHA-256d(object) by definition, so the verifyHash check is the
 		// spec's reassembly verification exactly. Deliver with FrameVer and
 		// TopicID preserved so the object routes down the BEEF path, not
 		// the tx path.
@@ -789,7 +789,7 @@ func (b *Buffer) complete(s *slot) {
 		// OrigFrameVer 0x00 / 0x02 (or any unrecognised value): treat as V2.
 		// Canonical-TxID verification applied when verifyHash is set:
 		// SHA256d(payload) for BRC-12 raw payloads, objfmt.TxID (standard
-		// serialization, EF extras excluded) for BRC-30 EF payloads —
+		// serialization, EF extras excluded) for BRC-30 EF payloads:
 		// hashing the raw EF bytes would reject every honest EF payload.
 		if b.verifyHash {
 			computed, oneTx := payloadTxID(payload)
@@ -843,7 +843,7 @@ func slotKey(ff *frame.FragFrame) [32]byte {
 // fragment: SeqNums within one object are monotonic in FragIndex, so for a known
 // fragment at index j with SeqNum S, the fragment at index i is S+(i-j). Scanning
 // from the nearest neighbour keeps that extrapolation as short as possible, which
-// matters if the origin ever interleaves other frames into the same flow — a long
+// matters if the origin ever interleaves other frames into the same flow, a long
 // extrapolation would drift, a short one stays exact for the common contiguous case.
 //
 // Returns nil if no fragment was ever received (nothing to anchor on).
@@ -1012,7 +1012,7 @@ func (b *Buffer) evictOldest() {
 	}
 }
 
-// removeSlot deletes a slot from the map (not from insertOrder — compact separately).
+// removeSlot deletes a slot from the map (not from insertOrder: compact separately).
 func (b *Buffer) removeSlot(txID [32]byte) {
 	delete(b.slots, txID)
 }

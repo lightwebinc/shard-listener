@@ -7,8 +7,8 @@ import (
 )
 
 // Reinject must report whether the pipeline ACCEPTED the frame. A BRC-131
-// announce rejected by the block-control gate can never be recovered — the retry
-// endpoint holds exactly that frame and the gate rejects it every time — so the
+// announce rejected by the block-control gate can never be recovered, the retry
+// endpoint holds exactly that frame and the gate rejects it every time, so the
 // tracker needs the signal to stop retrying AND to avoid booking a repair for
 // data no consumer received.
 func TestReinject_ReportsGateRejection(t *testing.T) {

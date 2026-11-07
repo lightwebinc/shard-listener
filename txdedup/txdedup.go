@@ -6,11 +6,11 @@
 //
 // The unified design splits dedup into two independent keys:
 //
-//   - bsp:tx:<hex-txid>       — proxy ingress dedup; SETNX'd by proxy on send
+//   - bsp:tx:<hex-txid>      , proxy ingress dedup; SETNX'd by proxy on send
 //     and optionally by listener on receive (courtesy mark). Used by the proxy
 //     to know whether a TxID is already on the multicast network.
 //
-//   - bsl:egr:<dep-id>:<hex>  — listener per-deployment egress dedup; SETNX'd
+//   - bsl:egr:<dep-id>:<hex> , listener per-deployment egress dedup; SETNX'd
 //     by each listener before forwarding downstream. HA siblings (same dep-id)
 //     race; only one forwards. Listeners in different deployments race
 //     independently, so each deployment forwards at most once.
@@ -57,8 +57,8 @@ type Recorder interface {
 
 // Store wraps two underlying *txidset.Store instances:
 //
-//   - egress  — per-deployment claim; key = egressPrefix + dep + ":" + hex.
-//   - ingress — optional courtesy mark of the proxy's namespace. nil when
+//   - egress : per-deployment claim; key = egressPrefix + dep + ":" + hex.
+//   - ingress: optional courtesy mark of the proxy's namespace. nil when
 //     the listener is not configured to inform the local proxy.
 type Store struct {
 	egress       *txidset.Store
@@ -184,9 +184,9 @@ func New(addr, prefix string, ttl time.Duration) (*Store, error) {
 
 // Claim races to win the per-deployment egress claim for txid. Returns:
 //
-//   - (true, nil)  — caller is the first; forward downstream.
-//   - (false, nil) — sibling already claimed; suppress.
-//   - (true, err)  — Redis error; fail-open (forward).
+//   - (true, nil) : caller is the first; forward downstream.
+//   - (false, nil): sibling already claimed; suppress.
+//   - (true, err) : Redis error; fail-open (forward).
 func (s *Store) Claim(txid [32]byte) (bool, error) {
 	if s == nil || s.egress == nil {
 		return true, nil

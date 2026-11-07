@@ -8,7 +8,7 @@ import (
 // During the BRC-126/129 transition the listener joins the any-source and
 // the source-specific form of the beacon group on the SAME UDP port. Two
 // wildcard binds on one port collide, so those two addresses must end up in
-// one bucket — one socket, two joins.
+// one bucket, one socket, two joins.
 func TestBucketByPort_FF0xAndFF3xShareOneSocket(t *testing.T) {
 	asm := net.ParseIP("ff05::b:fffd")
 	ssm := net.ParseIP("ff35::b:fffd")

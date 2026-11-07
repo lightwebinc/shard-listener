@@ -8,7 +8,7 @@ import (
 
 // The ADVERT port and the BRC-139 manifest port share the beacon GROUP but are
 // published by different senders, so under SSM each must join its own (S,G)
-// roster — a single shared list would filter one sender out completely.
+// roster, a single shared list would filter one sender out completely.
 func TestBeaconListener_SourcesForPerPort(t *testing.T) {
 	advertSrc := netip.MustParseAddr("fd00::1")
 	manifestSrc := netip.MustParseAddr("fd00::2")

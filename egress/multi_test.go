@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// A MultiSender must deliver every frame to ALL configured destinations — the
+// A MultiSender must deliver every frame to ALL configured destinations, the
 // receiver→delivery multi-destination fan-out.
 func TestMultiSender_FansOutToAll(t *testing.T) {
 	addr1, pc1, done1 := newUDPSink(t)

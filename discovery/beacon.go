@@ -26,8 +26,8 @@ import (
 //
 // Groups entries that share a UDP port share ONE socket, with a join per
 // address on it. Two wildcard binds on the same port collide, and the
-// BRC-126/129 transition config — the any-source FF0x beacon group and the
-// source-specific FF3x one, both on -beacon-port — is exactly such a pair.
+// BRC-126/129 transition config, the any-source FF0x beacon group and the
+// source-specific FF3x one, both on -beacon-port: is exactly such a pair.
 type BeaconListener struct {
 	Registry *Registry
 	Groups   []*net.UDPAddr    // beacon group addresses to join
@@ -39,7 +39,7 @@ type BeaconListener struct {
 	// SourcesByPort overrides Sources for one group port. The ADVERT port
 	// and the BRC-139 manifest port sit on the SAME beacon group address but
 	// are published by different senders (retry endpoints vs shard-manifest
-	// announcers), so under SSM each needs its own (S,G) roster — one shared
+	// announcers), so under SSM each needs its own (S,G) roster, one shared
 	// list would filter the other sender out entirely. Ports absent from the
 	// map fall back to Sources.
 	SourcesByPort map[int][]netip.Addr
@@ -99,9 +99,9 @@ func bucketByPort(groups []*net.UDPAddr) [][]*net.UDPAddr {
 // openGroupConn opens one UDP6 listener on the bucket's shared port and
 // joins every address in it. A single ASM address keeps the stdlib path
 // (net.ListenMulticastUDP: bind + IPV6_JOIN_GROUP, byte-for-byte what
-// earlier releases did). Everything else — any SSM roster, or more than
+// earlier releases did). Everything else, any SSM roster, or more than
 // one address on the port, which is what -control-group-compat=both
-// produces — binds the wildcard once and adds each membership via netjoin
+// produces: binds the wildcard once and adds each membership via netjoin
 // (MCAST_JOIN_SOURCE_GROUP per source under SSM, IPV6_JOIN_GROUP under
 // ASM).
 func (bl *BeaconListener) openGroupConn(grps []*net.UDPAddr) (*net.UDPConn, error) {
@@ -162,7 +162,7 @@ func (bl *BeaconListener) sourcesFor(grp *net.UDPAddr) []netip.Addr {
 
 // listenGroup services one socket: the bucket of beacon addresses that
 // share a UDP port. grp is the bucket's first address and is used only to
-// label logs — a datagram arriving on a socket joined to both the FF0x and
+// label logs, a datagram arriving on a socket joined to both the FF0x and
 // FF3x forms of the same group cannot be attributed to one of them without
 // IPV6_RECVPKTINFO, and nothing downstream needs that attribution.
 func (bl *BeaconListener) listenGroup(ctx context.Context, grps []*net.UDPAddr) error {

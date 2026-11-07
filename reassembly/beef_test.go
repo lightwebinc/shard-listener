@@ -10,13 +10,13 @@ import (
 )
 
 // TestReassembly_V9BeefCallback proves OrigFrameVer 0x09 fragments complete
-// through the BEEF callback with FrameVer/TopicID preserved — not re-encoded
-// as V2 down the tx path — and that the verifyHash check is exactly the
+// through the BEEF callback with FrameVer/TopicID preserved, not re-encoded
+// as V2 down the tx path, and that the verifyHash check is exactly the
 // spec's ContentID verification (SHA-256d of the object).
 func TestReassembly_V9BeefCallback(t *testing.T) {
 	payload := []byte{0x01, 0x00, 0xBE, 0xEF, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE}
 	first := sha256.Sum256(payload)
-	contentID := sha256.Sum256(first[:]) // SHA-256d — the BRC-148 ContentID
+	contentID := sha256.Sum256(first[:]) // SHA-256d, the BRC-148 ContentID
 
 	var topicID [32]byte
 	for i := range topicID {

@@ -1,6 +1,6 @@
 // Sender ACL: shared exclude→include CIDR filter applied to both the BRC-127
 // announcement listener and the data-plane workers. A nil *SenderACL accepts
-// every source — callers should keep the pointer nil when no CIDRs are
+// every source: callers should keep the pointer nil when no CIDRs are
 // configured to make the per-frame check a single nil compare.
 package filter
 

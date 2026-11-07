@@ -51,7 +51,7 @@ func TestReassembly_V9SiblingTopicsDoNotCollide(t *testing.T) {
 }
 
 // TestReassembly_NonBEEFKeyUnchanged guards that the pair key applies only to
-// V9 — other classes still key on the offset-8 field alone.
+// V9: other classes still key on the offset-8 field alone.
 func TestReassembly_NonBEEFKeyUnchanged(t *testing.T) {
 	var id, subA, subB [32]byte
 	id[0], subA[0], subB[0] = 0x11, 0x22, 0x33

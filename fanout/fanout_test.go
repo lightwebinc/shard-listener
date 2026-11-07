@@ -242,7 +242,7 @@ func TestOwnTrafficExclusion(t *testing.T) {
 
 	a := &recSink{} // opted in, own-ingress ownA
 	b := &recSink{} // opted in, own-ingress ownB
-	c := &recSink{} // opted out (zero own-ingress) — control: always receives
+	c := &recSink{} // opted out (zero own-ingress): control: always receives
 	s.Apply([]*fanout.Consumer{
 		{ID: "a", Shards: []uint32{0}, Sink: a, OwnIngressIP: ownA},
 		{ID: "b", Shards: []uint32{0}, Sink: b, OwnIngressIP: ownB},

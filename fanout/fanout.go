@@ -1,7 +1,7 @@
 // Package fanout implements decode-once, subscription-indexed egress fan-out
 // for shard-listener. One listener worker decodes each multicast frame exactly
 // once (the expensive path) and delivers it to the subset of a consumer table
-// whose subscription admits it — rather than running one listener process per
+// whose subscription admits it, rather than running one listener process per
 // consumer, which would pay full ingress + decode N times (Linux delivers each
 // multicast datagram to every SO_REUSEPORT socket).
 //
@@ -42,7 +42,7 @@ import (
 // OwnIngressIP is the consumer's own ingress identity (the tunnel-inner IPv6
 // the proxy observes on its UP path). When non-zero, a transaction frame whose
 // proxy-stamped HashKey matches seqhash.Hash(OwnIngressIP, groupIdx, SubtreeID)
-// is the consumer's own traffic returning down its egress link and is skipped —
+// is the consumer's own traffic returning down its egress link and is skipped:
 // removing own-traffic-back on metered unicast tunnels. Zero (the default) keeps
 // the original behaviour: the consumer receives its own traffic. Control frames
 // are never excluded. This is addressing-agnostic: it keys on the originating
@@ -55,7 +55,7 @@ import (
 // [egress.BundleSink]; if it does not, the bundle is decoalesced as a fallback.
 //
 // IngressObs, when non-nil, taps the frames this consumer sent up its own tunnel
-// — the own-traffic the fan-out identifies (by the OwnIngressIP HashKey match)
+// , the own-traffic the fan-out identifies (by the OwnIngressIP HashKey match)
 // and drops from egress. It is a pure measurement seam: it never changes which
 // frames are delivered. A downstream build supplies it to meter that
 // (non-billable) tunnel-bound ingress volume. It fires only when OwnIngressIP is
@@ -95,11 +95,11 @@ type Consumer struct {
 	BEEFVersions map[uint32]struct{}
 
 	// BEEFObs, when non-nil, is told about every BEEF frame this consumer's own
-	// elections EXCLUDED at fan-out — a topic it did not elect, or an encoding
+	// elections EXCLUDED at fan-out, a topic it did not elect, or an encoding
 	// it does not accept. A pure measurement seam: it never changes what is
 	// delivered. Without it a mis-specified profile (a topic name that matches
 	// nothing, a version word the publisher never emits) is indistinguishable
-	// from loss — the consumer simply receives nothing, and every counter
+	// from loss, the consumer simply receives nothing, and every counter
 	// upstream of the election says the frames arrived.
 	BEEFObs BEEFObserver
 }
@@ -118,7 +118,7 @@ const (
 	FilterVersion = "version" // BEEF version word not in the consumer's accepted set
 )
 
-// IngressObserver measures a consumer's own tunnel-bound ingress — the frames
+// IngressObserver measures a consumer's own tunnel-bound ingress, the frames
 // the fan-out matches as the consumer's own traffic (returning on the fabric)
 // and excludes from egress. A downstream build implements it to feed that
 // upstream volume into its own metering. ObserveIngress is called on the
@@ -150,13 +150,13 @@ type Sink struct {
 	beefEngine *shard.PlaneEngine
 
 	mu        sync.RWMutex
-	consumers []*Consumer            // full table — broadcast set for control frames
+	consumers []*Consumer            // full table: broadcast set for control frames
 	byShard   map[uint32][]*Consumer // shard idx -> consumers subscribed to that shard
 	allShards []*Consumer            // consumers with no shard restriction
 
 	// egressSeq re-stamps a fresh monotonic per-bundle-flow SeqNum (keyed by the
 	// bundle HashKey) onto each member when decoalescing for a non-capable
-	// consumer — the bundle SeqNum is frame-bound and does not survive the split.
+	// consumer, the bundle SeqNum is frame-bound and does not survive the split.
 	// Touched only on the single-threaded worker hot path (SendBundle), so it
 	// needs no lock beyond the worker's own serialisation.
 	egressSeq map[uint64]uint64
@@ -215,7 +215,7 @@ func (s *Sink) SetBEEFEngine(pe *shard.PlaneEngine) { s.beefEngine = pe }
 
 // SendBeef fans a BRC-148 BEEF object frame to the consumers whose group
 // election covers its domain-tagged group, then applies each consumer's
-// topic filter and BEEF-version (encoding capability) filter — group
+// topic filter and BEEF-version (encoding capability) filter: group
 // membership → topic filter → version filter → delivery, per the spec. The
 // topic filter matches the consumer's election against the frame's
 // DELIVERABLE topics (the header TopicID and, when the payload is a
@@ -224,14 +224,14 @@ func (s *Sink) SetBEEFEngine(pe *shard.PlaneEngine) { s.beefEngine = pe }
 // Names past the deliverable prefix are labels the consumer receives in the
 // payload and are never matched.
 // Own-traffic exclusion uses the BEEF flow identity: XXH64(consumer ingress
-// IP ∥ banded groupIdx ∥ zeros) — the 32-byte ingredient is ZERO (TopicID is
+// IP ∥ banded groupIdx ∥ zeros), the 32-byte ingredient is ZERO (TopicID is
 // excluded from BEEF flow keys).
 func (s *Sink) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 	// Without a plane engine there is no group index, so neither the
 	// reverse-index route nor the own-traffic HashKey comparison
 	// (XXH64(ip ∥ bandedGroupIdx ∥ zero32)) can be computed. Falling back to
 	// the full consumer table would bypass group election AND silently
-	// disable own-traffic exclusion + ingress metering — a wrong delivery
+	// disable own-traffic exclusion + ingress metering, a wrong delivery
 	// that looks like success. Drop instead; SetBEEFEngine is required
 	// wiring for any build that elects BEEF.
 	if s.beefEngine == nil {
@@ -452,7 +452,7 @@ func (s *Sink) decoalesce(b *bundle.Bundle) []encodedMember {
 }
 
 // isOwnBundle reports whether bundle b is consumer c's own traffic returning
-// down its egress link — the bundle-granularity analogue of [isOwnTraffic]. A
+// down its egress link, the bundle-granularity analogue of [isOwnTraffic]. A
 // bundle is one source flow (one HashKey), so the whole bundle is skipped when
 // its HashKey matches the one the proxy derives from c's ingress identity.
 func isOwnBundle(c *Consumer, groupIdx uint32, b *bundle.Bundle) bool {
@@ -489,7 +489,7 @@ func (s *Sink) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) error {
 // SendHeader broadcasts a BRC-135 block header frame to every consumer, exactly
 // as blocks and subtree data are broadcast: headers are fleet-global, not
 // shard-scoped, so there is no index to route on. Which consumers actually
-// receive one is decided by their own sink — a class router delivers only to a
+// receive one is decided by their own sink, a class router delivers only to a
 // consumer that elected a header lane and reports the rest as not-elected.
 //
 // A consumer whose sink does not implement [egress.HeaderSink] is skipped

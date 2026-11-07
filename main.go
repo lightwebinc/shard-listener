@@ -137,7 +137,7 @@ func run() error {
 	// Build the shard engine.
 	engine := shard.New(cfg.MCPrefix, cfg.MCGroupID, cfg.ShardBits)
 
-	// BRC-148 BEEF plane: engine (always wired — a delivery worker must be
+	// BRC-148 BEEF plane: engine (always wired, a delivery worker must be
 	// able to route forwarded V9 frames), elected topic/version sets, and the
 	// band join indices derived from the election.
 	beefEngine, beefTopicSet, beefVersionSet, beefJoinIdx, err := setupBEEF(cfg)
@@ -146,7 +146,7 @@ func run() error {
 	}
 
 	// Delivery mode (P3b) is the consumer-facing half: it does NOT join fabric
-	// (S,G) and runs no gap/NACK — a receiver already did that and forwards raw
+	// (S,G) and runs no gap/NACK, a receiver already did that and forwards raw
 	// frames unicast. The receiver-side machinery below (multicast groups, SSM
 	// bootstrap, NACK tracker, beacon/manifest discovery, cross-listener dedup,
 	// block-PoW gate, reassembly) is skipped; only the egress fan-out sink runs.
@@ -245,7 +245,7 @@ func run() error {
 		rec.Serve(cfg.MetricsAddr, done)
 	}()
 
-	// Start subtree announcement listener (BRC-127) — receiver-side discovery.
+	// Start subtree announcement listener (BRC-127): receiver-side discovery.
 	if !delivery && groupReg != nil {
 		// BRC-127 subtree group announcements sit on control-plane group
 		// index 0xFFFC, so BRC-129's prefix rule applies to them exactly as
@@ -453,8 +453,8 @@ func run() error {
 
 	// Build the shared TxID dedup store. Two independent namespaces are
 	// composed into one Store:
-	//   - egress  — per-deployment SETNX before downstream forward
-	//   - ingress — optional courtesy SETNX into the local proxy's namespace
+	//   - egress : per-deployment SETNX before downstream forward
+	//   - ingress: optional courtesy SETNX into the local proxy's namespace
 	//
 	// LocalCap=0 on the egress side disables the feature entirely.
 	var txDedupStore *txdedup.Store
@@ -602,13 +602,13 @@ func run() error {
 
 		w := listener.New(i, cfg.Iface, cfg.ListenPort, groups, engine, filt, egr, mcastEgr, tracker, rec, cfg.Debug)
 		// Unicast NACK recovery: a retry endpoint that answers on the NACK
-		// return channel (BRC-126 — the ONLY channel for a proxied cross-domain
+		// return channel (BRC-126, the ONLY channel for a proxied cross-domain
 		// repair, and the deployed default where -beacon-flags-unicast is on)
 		// hands the frame back on the tracker goroutine. Without this it has
 		// nowhere to go: the frame is dropped and the ACK still cancels the gap,
 		// so the loss reads as repaired. Registered per worker because the
 		// recovered frame must re-enter the pipeline of the worker that owns the
-		// flow — the one holding the object's other fragments.
+		// flow, the one holding the object's other fragments.
 		if tracker != nil {
 			tracker.RegisterRecover(w.ID(), w.Reinject)
 		}
@@ -634,7 +634,7 @@ func run() error {
 		w.SetVerifyPayloadHash(cfg.VerifyPayloadHash)
 		w.SetBEEF(beefEngine, beefTopicSet, beefVersionSet, cfg.BEEFVerifyContent)
 		w.SetRebucketRelay(cfg.RebucketRelay)
-		// Receive-side retry tee: fail closed on error — when configured, a
+		// Receive-side retry tee: fail closed on error, when configured, a
 		// co-resident tee-only retry cache may depend on this feed for every
 		// remote-origin frame, and starting without it would silently strand
 		// cross-node NACK repair.
@@ -757,7 +757,7 @@ func run() error {
 // falling back to any IPv6 address if no non-link-local is present. The
 // returned 16-byte value is suitable as the senderIPv6 input to seqhash.Hash.
 // Returns ok=false if iface has no IPv6 address (e.g. loopback in some test
-// environments) — callers should leave the emitter HashKey unset in that case.
+// environments): callers should leave the emitter HashKey unset in that case.
 func primaryIPv6(iface *net.Interface) (out [16]byte, ok bool) {
 	if iface == nil {
 		return out, false
@@ -892,7 +892,7 @@ func setupBEEF(cfg *config.Config) (*shard.PlaneEngine, map[[32]byte]struct{}, m
 // Returns (gs, beaconSrcs, manifestSrcs, subtreeAnnSrcs, err).
 // excludeOwnSource drops the node's own source address from a roster before
 // it feeds (S,G) joins. Joining the node's own source on the PIM interface
-// installs an iif==oif mroute on a collapsed edge — every originated frame
+// installs an iif==oif mroute on a collapsed edge: every originated frame
 // re-enters the MFC until hop-limit death (~60x egress amplification).
 // Consequence: the
 // listener does not receive own-node frames via multicast; a local mirror is
@@ -992,8 +992,8 @@ func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint
 // while retry-endpoint ADVERTs arrive on -beacon-port, default 9300). A
 // listener bound to the ADVERT port alone therefore never sees a manifest
 // at stock defaults, which is what the second port fixes. The receive loop
-// demuxes on the MsgType byte, so one socket serving both ports' traffic —
-// the case where an operator sets them equal — needs no special handling.
+// demuxes on the MsgType byte, so one socket serving both ports' traffic:
+// the case where an operator sets them equal: needs no special handling.
 //
 // beaconIPs carries one address per -control-group-compat prefix (FF0x
 // and/or FF3x, see config/controlgroup.go), so during the flag day each

@@ -10,7 +10,7 @@ import (
 )
 
 // captureHeaderSink records every BRC-135 frame offered to the per-consumer
-// header seam. It implements only egress.HeaderSink — a sink that wants headers
+// header seam. It implements only egress.HeaderSink, a sink that wants headers
 // need not be a full EgressSink.
 type captureHeaderSink struct {
 	raws     [][]byte
@@ -144,7 +144,7 @@ func TestHeaderFanout_BlockedByPoWGate(t *testing.T) {
 
 	w := newWorker(t, mainAddr, filter.New(nil, nil, nil, nil))
 	// The announce helper builds an all-but-empty 80-byte header, whose nBits
-	// is zero and therefore expands to no valid target — it cannot pass.
+	// is zero and therefore expands to no valid target: it cannot pass.
 	w.SetBlockPoW(true, 0)
 
 	cap := &captureHeaderSink{}

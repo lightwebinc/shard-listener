@@ -92,7 +92,7 @@ func TestObserveNewFlow_NoGap(t *testing.T) {
 
 func TestObserveGap_Detected(t *testing.T) {
 	tr := newTestTracker()
-	// Frame 1 establishes the flow; seqNum 3 arrives next — seqNum 2 is missing.
+	// Frame 1 establishes the flow; seqNum 3 arrives next: seqNum 2 is missing.
 	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
 	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 1 {
@@ -158,7 +158,7 @@ func TestObserveOutOfOrder_NoPhantomGap(t *testing.T) {
 		t.Fatalf("setup: PendingGaps = %d, want 1", g)
 	}
 
-	// seqNum=2 arrives late — must close gap AND not create a phantom gap.
+	// seqNum=2 arrives late: must close gap AND not create a phantom gap.
 	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Errorf("after retransmit: PendingGaps = %d, want 0 (phantom gap created)", g)
@@ -430,12 +430,12 @@ func TestSendNACK_MISS_AdvancesRetry(t *testing.T) {
 }
 
 func TestSendNACK_Timeout_BacksOff(t *testing.T) {
-	// Mock endpoint that never responds — sendNACK will hit respTimeout.
+	// Mock endpoint that never responds: sendNACK will hit respTimeout.
 	mockConn, err := net.ListenPacket("udp", "[::1]:0")
 	if err != nil {
 		t.Skipf("UDP loopback unavailable: %v", err)
 	}
-	// Don't read from mockConn — let NACKs timeout.
+	// Don't read from mockConn: let NACKs timeout.
 	defer func() { _ = mockConn.Close() }()
 
 	cfg := nack.TrackerConfig{
@@ -568,7 +568,7 @@ func TestSendNACK_UnicastRetransmit_Recovered(t *testing.T) {
 }
 
 // TestSendNACK_UnicastACK_NoData_NotCancelled: a unicast-flagged ACK with NO data
-// frame (retransmit lost in transit) must NOT cancel the gap — recovery is only
+// frame (retransmit lost in transit) must NOT cancel the gap: recovery is only
 // confirmed by the data itself, so the gap stays pending to escalate/retry.
 func TestSendNACK_UnicastACK_NoData_NotCancelled(t *testing.T) {
 	mockConn, err := net.ListenPacket("udp", "[::1]:0")
@@ -590,7 +590,7 @@ func TestSendNACK_UnicastACK_NoData_NotCancelled(t *testing.T) {
 		}
 	}()
 
-	// High retry budget so the gap keeps being retried well past the check —
+	// High retry budget so the gap keeps being retried well past the check:
 	// isolating the "ACK alone must not cancel" behaviour from MaxRetries
 	// eviction. The old bug cancelled on the first ACK (~one respTimeout).
 	cfg := nack.TrackerConfig{JitterMax: 0, BackoffBase: 50 * time.Millisecond, BackoffMax: 100 * time.Millisecond, MaxRetries: 50, GapTTL: 10 * time.Second}
@@ -613,7 +613,7 @@ func TestSendNACK_UnicastACK_NoData_NotCancelled(t *testing.T) {
 }
 
 // unicastRepairServer answers every NACK with the data frame followed by an ACK
-// carrying flags — the two-datagram exchange a retry endpoint performs when
+// carrying flags, the two-datagram exchange a retry endpoint performs when
 // -beacon-flags-unicast is on (the deployed default).
 func unicastRepairServer(t *testing.T, flags byte, withData bool) net.PacketConn {
 	t.Helper()
@@ -644,7 +644,7 @@ func unicastRepairServer(t *testing.T, flags byte, withData bool) net.PacketConn
 // registered, the recovered frame must be re-injected into the worker that
 // OBSERVED the flow. Reassembly state is per-worker, so a fragment handed to any
 // other worker lands in a buffer holding none of its siblings and the object
-// never completes — the repair would be booked while the data went nowhere.
+// never completes, the repair would be booked while the data went nowhere.
 func TestSendNACK_UnicastRetransmit_RoutedToObservingWorker(t *testing.T) {
 	mockConn := unicastRepairServer(t, 0x02, true)
 
@@ -710,7 +710,7 @@ func TestRequestGapsFrom_RoutesToDiscoveringWorker(t *testing.T) {
 // TestSendNACK_UnicastOnly_NoRecoverFunc_BooksUnrecovered: with NO re-injection
 // callback the drained data frame is discarded, so a unicast-ONLY ACK must not
 // cancel the gap. Cancelling books a suppression for data that reached no
-// consumer — a dead recovery path reading as a healthy one.
+// consumer, a dead recovery path reading as a healthy one.
 func TestSendNACK_UnicastOnly_NoRecoverFunc_BooksUnrecovered(t *testing.T) {
 	mockConn := unicastRepairServer(t, 0x02, true) // unicast bit only
 
@@ -759,7 +759,7 @@ func TestSendNACK_MulticastAndUnicastACK_NoRecoverFunc_Cancels(t *testing.T) {
 
 // TestObserveEmitterChange_Rebaselines: a forward jump beyond MaxForwardJump is an
 // EMITTER CHANGE (anycast failover between long-lived proxies with divergent flow
-// counters), not loss — the flow re-baselines: no phantom gap range is registered
+// counters), not loss, the flow re-baselines: no phantom gap range is registered
 // (which would NACK-storm and pollute unrecovered counters), pending phantoms drop.
 func TestObserveEmitterChange_Rebaselines(t *testing.T) {
 	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second, MaxForwardJump: 1000}, nil, nil, nil, nil)
@@ -769,7 +769,7 @@ func TestObserveEmitterChange_Rebaselines(t *testing.T) {
 	if g := tr.PendingGaps(); g != 2 {
 		t.Fatalf("setup: PendingGaps = %d, want 2", g)
 	}
-	// New emitter takes the flow at seq 50000 — beyond any plausible burst.
+	// New emitter takes the flow at seq 50000: beyond any plausible burst.
 	tr.Observe(0, [32]byte{}, flowA, 50000, [32]byte{}, nil)
 	if g := tr.PendingGaps(); g != 0 {
 		t.Fatalf("emitter change must drop phantom pendings: PendingGaps = %d, want 0", g)
@@ -798,7 +798,7 @@ func TestObserveWithinMaxJump_StillGaps(t *testing.T) {
 }
 
 // TestObserveRateAwareRebaseline: with a learned arrival rate, a jump far beyond
-// rate×silence re-baselines (emitter divergence UNDER the absolute cap — the case a
+// rate×silence re-baselines (emitter divergence UNDER the absolute cap, the case a
 // fixed threshold cannot catch), while an outage-sized jump still registers as gaps.
 func TestObserveRateAwareRebaseline(t *testing.T) {
 	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second, MaxForwardJump: 100000}, nil, nil, nil, nil)
@@ -813,7 +813,7 @@ func TestObserveRateAwareRebaseline(t *testing.T) {
 	// ~50ms silence at ~1ms cadence ⇒ a real outage misses ~50 frames; a jump of
 	// 2000 is ~40× the plausible burst ⇒ emitter change. Re-baseline the DIVERGENT
 	// remainder, but NACK the rate-plausible tail (~50 real losses the new emitter
-	// dropped in the transition, recoverable from its retry) — not silent, not the
+	// dropped in the transition, recoverable from its retry), not silent, not the
 	// whole 2000-wide phantom range.
 	time.Sleep(50 * time.Millisecond)
 	tr.Observe(0, [32]byte{}, flowA, 2020, [32]byte{}, nil)
@@ -835,8 +835,8 @@ func TestObserveRateAwareRebaseline(t *testing.T) {
 }
 
 // TestRebaselineRecoversTransition: on an anycast failover (implausible forward jump)
-// the flow re-baselines to the new emitter's counter, but the rate-plausible TAIL — the
-// frames the new emitter lost in the ~sub-second transition — is NACKed for recovery
+// the flow re-baselines to the new emitter's counter, but the rate-plausible TAIL, the
+// frames the new emitter lost in the ~sub-second transition: is NACKed for recovery
 // (not silently dropped inside the phantom range). Bounded, so no NACK storm.
 func TestRebaselineRecoversTransition(t *testing.T) {
 	tr := newTestTracker()
@@ -851,16 +851,16 @@ func TestRebaselineRecoversTransition(t *testing.T) {
 		t.Fatalf("contiguous stream should have no gaps, got %d", g)
 	}
 	// A ~40ms "transition outage", then a huge forward jump (the new emitter's divergent
-	// counter) — implausible ⇒ re-baseline path.
+	// counter): implausible ⇒ re-baseline path.
 	time.Sleep(40 * time.Millisecond)
 	tr.Observe(0, [32]byte{}, flowA, seq+100000, [32]byte{}, nil)
 
 	g := tr.PendingGaps()
 	if g == 0 {
-		t.Fatal("re-baseline silently dropped the transition — want the rate-plausible tail NACKed")
+		t.Fatal("re-baseline silently dropped the transition: want the rate-plausible tail NACKed")
 	}
 	if g >= 100000 {
-		t.Fatalf("re-baseline NACKed the whole phantom range (%d) — want only the bounded rate-plausible tail", g)
+		t.Fatalf("re-baseline NACKed the whole phantom range (%d): want only the bounded rate-plausible tail", g)
 	}
 	// The tail should be ~ outage/IPG (≈20 at 40ms/2ms); assert generously to avoid
 	// scheduler-timing flakiness while still proving it is small + bounded.
@@ -887,7 +887,7 @@ func buildFlowTo(tr *nack.Tracker, last uint64, gaps map[uint64]bool) {
 // pending gap at a seqNum below the reset threshold must ONLY fill that gap.
 // Before the fix it fell through to the restart heuristic, which flushed every
 // other pending gap to unrecovered and re-baselined the flow to the repair's
-// seqNum — the phantom-unrecovered cascade scenario 17 measured.
+// seqNum, the phantom-unrecovered cascade scenario 17 measured.
 func TestRepairLowSeqDoesNotResetFlow(t *testing.T) {
 	tr := newTestTracker()
 	buildFlowTo(tr, 150, map[uint64]bool{60: true, 130: true})
@@ -910,7 +910,7 @@ func TestRepairLowSeqDoesNotResetFlow(t *testing.T) {
 }
 
 // TestLateReinjectLowSeqDoesNotReset: a repair arriving AFTER its gap was
-// abandoned (nothing pending) is history replayed, not a restarted proxy —
+// abandoned (nothing pending) is history replayed, not a restarted proxy:
 // it must be ignored entirely.
 func TestLateReinjectLowSeqDoesNotReset(t *testing.T) {
 	tr := newTestTracker()
@@ -924,7 +924,7 @@ func TestLateReinjectLowSeqDoesNotReset(t *testing.T) {
 	}
 }
 
-// TestWireLowSeqStillResetsFlow: the restart heuristic itself is load-bearing —
+// TestWireLowSeqStillResetsFlow: the restart heuristic itself is load-bearing:
 // a LIVE frame rolling back below the threshold on an established flow still
 // resets the flow (pending flushed, baseline moved).
 func TestWireLowSeqStillResetsFlow(t *testing.T) {

@@ -87,7 +87,7 @@ func (r *Registry) Evict() {
 //
 // Preference encodes LIST POSITION (first = highest) rather than a flat 0:
 // Snapshot's sort orders by (Tier, Preference) and is not stable, so seeds
-// with identical keys came back in unspecified order — silently undoing
+// with identical keys came back in unspecified order: silently undoing
 // demoteSelf's contract that this node's own retry is tried LAST. With a flat
 // preference the walk could spend its first attempt on the one cache that
 // shares fate with the loss it is repairing.

@@ -43,7 +43,7 @@ func TestNew_UDP_InvalidAddr(t *testing.T) {
 
 // unreachableUDP is a destination connect() always rejects: an IPv6
 // link-local address carries no zone, so it cannot be bound to an interface.
-// It stands in for the real case — an SDA reachable only through a tunnel that
+// It stands in for the real case, an SDA reachable only through a tunnel that
 // exists on another edge.
 const unreachableUDP = "[fe80::1]:9701"
 
@@ -89,7 +89,7 @@ func TestNew_UDP_UnresolvableHost(t *testing.T) {
 }
 
 // TestSend_UDP_RedialBackoff: a destination that stays down must cost one dial
-// per backoff interval, not one per frame — this sink sees the full fabric rate.
+// per backoff interval, not one per frame, this sink sees the full fabric rate.
 func TestSend_UDP_RedialBackoff(t *testing.T) {
 	s := newUnreachableUDP(t)
 	if s.udpBackoff != udpRedialMin {
@@ -108,7 +108,7 @@ func TestSend_UDP_RedialBackoff(t *testing.T) {
 
 // TestSend_UDP_ReconnectAfterPathLoss: a connected UDP socket pins its route at
 // connect time, so it stays dead once the destination's tunnel goes away. The
-// path-error branch drops it and the next frame re-connects — which is how a
+// path-error branch drops it and the next frame re-connects, which is how a
 // Sender picks up a consumer that fails over onto this edge.
 //
 // It also pins the other half: a write error that is NOT a path error must keep
@@ -471,7 +471,7 @@ func TestSendToGroup_AddressDerivation(t *testing.T) {
 }
 
 func TestMCastSender_AddressDerivation(t *testing.T) {
-	// Construct without opening a real multicast socket — we test the address-template
+	// Construct without opening a real multicast socket: we test the address-template
 	// derivation logic directly on a zero-value MCastSender.
 	s := &MCastSender{}
 	// Manually set fields as NewMCast would.

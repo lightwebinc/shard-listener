@@ -42,7 +42,7 @@ func brc135Frame(t *testing.T, blockHashByte byte, seqNum uint64) ([]byte, *fram
 
 // TestSendHeader_BroadcastsToHeaderCapableOnly is the core election property:
 // headers reach every consumer whose sink can take them, and a consumer whose
-// sink does not implement the optional seam is skipped WITHOUT an error — not
+// sink does not implement the optional seam is skipped WITHOUT an error, not
 // implementing it means "no header lane", which is the ordinary case.
 func TestSendHeader_BroadcastsToHeaderCapableOnly(t *testing.T) {
 	capable1 := &headerRecSink{}
@@ -65,7 +65,7 @@ func TestSendHeader_BroadcastsToHeaderCapableOnly(t *testing.T) {
 		t.Errorf("header-capable consumers got %d/%d, want 1/1", capable1.headers, capable2.headers)
 	}
 	// The plain sink must not have been fed through any other method as a
-	// substitute — notably not SendRaw, which would land on its tx lane.
+	// substitute: notably not SendRaw, which would land on its tx lane.
 	if plain.raw != 0 || plain.tx != 0 || plain.blocks != 0 {
 		t.Errorf("non-header consumer received traffic: raw=%d tx=%d blocks=%d", plain.raw, plain.tx, plain.blocks)
 	}

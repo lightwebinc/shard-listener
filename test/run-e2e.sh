@@ -4,7 +4,7 @@
 #
 # Frames are injected by send-test-frames as unicast UDP directly to the
 # listener's bound port ([::1]:<port>).  The listener socket is bound to
-# [::] so it receives unicast and multicast alike — this lets the suite run
+# [::] so it receives unicast and multicast alike, this lets the suite run
 # on Linux GitHub Actions runners where loopback IPv6 multicast is
 # unreliable, while still exercising the full decode→filter→forward pipeline.
 #

@@ -6,16 +6,16 @@
 //
 //	Offset  Size  Field
 //	------  ----  -----
-//	     0     4  Magic (0xE3E1F3E8) — BSV mainnet magic
+//	     0     4  Magic (0xE3E1F3E8): BSV mainnet magic
 //	     4     2  ProtoVer (0x02BF)
 //	     6     1  MsgType = 0x10 (NACK)
-//	     7     1  Flags — bit 0 (0x01) = Proxied (set by a proxying retry
+//	     7     1  Flags: bit 0 (0x01) = Proxied (set by a proxying retry
 //	               endpoint when forwarding upstream); bits 1–7 reserved (0).
 //	               The listener always sends 0x00.
-//	     8     8  HashKey (uint64 BE) — stable per-flow identifier (XXH64 of sender+group+subtree)
-//	    16     8  StartSeq (uint64 BE) — first missing sequence number (inclusive)
-//	    24     8  EndSeq (uint64 BE) — last missing sequence number (inclusive; == StartSeq for single-frame)
-//	    32    32  SubtreeID — 32-byte BRC-124 subtree identifier; all-zero = no subtree
+//	     8     8  HashKey (uint64 BE): stable per-flow identifier (XXH64 of sender+group+subtree)
+//	    16     8  StartSeq (uint64 BE): first missing sequence number (inclusive)
+//	    24     8  EndSeq (uint64 BE): last missing sequence number (inclusive; == StartSeq for single-frame)
+//	    32    32  SubtreeID: 32-byte BRC-124 subtree identifier; all-zero = no subtree
 //
 // HashKey identifies the flow (sender × group × subtree), computed by the
 // shard proxy as XXH64(senderIPv6 || groupIdx || subtreeID). It namespaces

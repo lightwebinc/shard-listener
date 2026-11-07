@@ -983,7 +983,7 @@ func (w *Worker) processBundle(raw []byte) {
 			}
 			if !w.warnedRebucket {
 				w.warnedRebucket = true
-				w.log.Warn("re-bucketing on a non-relay listener (generation mismatch): match the proxy ShardBits, or set -rebucket-relay with a co-located child-generation retry — re-multicast children are otherwise unrecoverable",
+				w.log.Warn("re-bucketing on a non-relay listener (generation mismatch): match the proxy ShardBits, or set -rebucket-relay with a co-located child-generation retry, re-multicast children are otherwise unrecoverable",
 					"bundle_shardbits", b.ShardBits, "listener_shardbits", w.engine.ShardBits())
 			}
 		}

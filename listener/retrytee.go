@@ -23,7 +23,7 @@ import (
 //
 // This is the receive-side counterpart of the proxy's -retry-tee: the proxy
 // mirrors frames this node ORIGINATES (which the retry cannot receive via
-// multicast — own-source SSM joins are structurally excluded), while this tee
+// multicast: own-source SSM joins are structurally excluded), while this tee
 // mirrors frames this node RECEIVES from the fabric. Together the two feeds
 // let a co-resident retry-endpoint fill its repair cache without any
 // multicast join of its own (retry-endpoint -mc-join-enabled=false), which
@@ -34,7 +34,7 @@ import (
 // RetryCacheSourceStarved alerting contract) attribute tee-fed frames exactly
 // as natively received ones. The mirror is deliberately lossy: a failed write
 // is counted and logged once, never retried and never allowed to slow the
-// receive loop — a missed mirror only narrows repair coverage to the other
+// receive loop, a missed mirror only narrows repair coverage to the other
 // endpoints a listener walks on MISS.
 //
 // The send runs on a goroutine of the tee's own, the shape the proxy's tee
@@ -215,7 +215,7 @@ func (t *retryTeeSender) writeFailed(err error) {
 		t.rec.RetryTeeError(t.id)
 	}
 	if t.loggedErr.CompareAndSwap(false, true) {
-		t.log.Warn("retry tee write failed — the co-resident cache will MISS frames this node received; repair coverage narrows to other endpoints (logged once; see bsl_retry_tee_errors_total)",
+		t.log.Warn("retry tee write failed, the co-resident cache will MISS frames this node received; repair coverage narrows to other endpoints (logged once; see bsl_retry_tee_errors_total)",
 			"err", err, "target", t.conn.RemoteAddr())
 	}
 }
@@ -280,7 +280,7 @@ func (t *retryTeeSender) close() error {
 
 // teeEligible reports whether a received datagram is a cacheable data frame.
 // Control datagrams (BRC-126 NACK/ADVERT, BRC-127 announces, BRC-139
-// manifests — version byte ≥ 0x10) are excluded, as the retry-endpoint would
+// manifests: version byte ≥ 0x10) are excluded, as the retry-endpoint would
 // only count them as decode-error drops. BRC-135 header frames (V7) are
 // excluded because they are outside the primary NACK repair path and the
 // retry-endpoint has no V7 handler.

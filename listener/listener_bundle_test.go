@@ -110,14 +110,14 @@ func TestProcessBundle_RebucketsCoarserGeneration(t *testing.T) {
 	}
 	for p, hk := range got {
 		if hk == b.HashKey {
-			t.Errorf("member %q kept the parent HashKey 0x%016X — was not re-bucketed onto a local flow", p, b.HashKey)
+			t.Errorf("member %q kept the parent HashKey 0x%016X: was not re-bucketed onto a local flow", p, b.HashKey)
 		}
 	}
 }
 
 // A re-bucketing listener must gap-track the PARENT bundle stream, not the
 // re-stamped child streams (whose local SeqNums are phantom). A hole in the
-// parent SeqNum sequence under a generation mismatch is therefore detected —
+// parent SeqNum sequence under a generation mismatch is therefore detected:
 // this is the re-bucket gap-detection hole the hardening closes.
 func TestProcessBundle_RebucketTracksParentStream(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
@@ -131,7 +131,7 @@ func TestProcessBundle_RebucketTracksParentStream(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = egr.Close() })
 	tr := nack.New(nack.TrackerConfig{GapTTL: time.Minute}, nil, iface, nil, nil)
-	// engine ShardBits=2, non-relay (default) — the mismatch is exercised.
+	// engine ShardBits=2, non-relay (default), the mismatch is exercised.
 	w := New(0, iface, 9999, nil, eng, filter.New(nil, nil, nil, nil), egr, nil, tr, nil, false)
 
 	// Two COARSE (ShardBits=1) parent bundles on one flow (same HashKey) with a
@@ -170,7 +170,7 @@ func TestProcessBundle_RebucketTracksParentStream(t *testing.T) {
 	if got := tr.PendingGaps(); got == 0 {
 		t.Fatal("re-bucketing listener did not gap-track the parent stream: the SeqNum-2 hole went undetected (the re-bucket gap-detection hole)")
 	}
-	// Only the PARENT flow is tracked — re-bucketed children (delivered with
+	// Only the PARENT flow is tracked: re-bucketed children (delivered with
 	// track=false) must not create their own phantom flows.
 	if flows := tr.ActiveFlows(); flows != 1 {
 		t.Errorf("tracker has %d flows, want 1 (only the parent flow; re-bucketed children must not be gap-tracked)", flows)

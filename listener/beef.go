@@ -1,5 +1,5 @@
 // BRC-148 BEEF object plane delivery: FrameVer 0x09 handling through the
-// listener's standard pipeline — election filters, cross-listener dedup,
+// listener's standard pipeline: election filters, cross-listener dedup,
 // inline-vs-retransmit suppression, egress, and NACK gap tracking.
 
 package listener
@@ -15,8 +15,8 @@ import (
 )
 
 // beefPairKey derives the cross-listener egress-dedup claim key for a BEEF
-// frame: SHA-256(ContentID ∥ TopicID). Keying the pair — never the bare
-// ContentID — keeps sibling emissions of a multi-topic submission (which
+// frame: SHA-256(ContentID ∥ TopicID). Keying the pair, never the bare
+// ContentID: keeps sibling emissions of a multi-topic submission (which
 // share a ContentID across groups) independently deliverable.
 func beefPairKey(contentID, topicID [32]byte) [32]byte {
 	h := sha256.New()
@@ -44,7 +44,7 @@ func (w *Worker) processBeefFrame(raw []byte) {
 
 // DeliverReassembledBeef re-encodes a BRC-130-reassembled BEEF object as a
 // whole FrameVer 0x09 frame and routes it through the standard BEEF delivery
-// path — filters evaluate on whole objects, per the spec. Wire it to
+// path: filters evaluate on whole objects, per the spec. Wire it to
 // [reassembly.Buffer.SetBEEFCallback]. The payload argument is the callback
 // contract's reassembled bytes; it aliases bf.Payload.
 func (w *Worker) DeliverReassembledBeef(_ []byte, bf *frame.BEEFFrame) {
@@ -69,7 +69,7 @@ func (w *Worker) DeliverReassembledBeefFrame(buf []byte, bf *frame.BEEFFrame) {
 	w.deliverBeef(buf[:n], bf)
 }
 
-// deliverBeef is the shared BEEF delivery core: group membership (implicit —
+// deliverBeef is the shared BEEF delivery core: group membership (implicit:
 // the frame arrived on a joined group) → topic filter → version filter →
 // dedup gates → egress → gap tracking. NACK observation uses a ZERO
 // SubtreeID (a BEEF flow interleaves topics, so a gap's TopicID is
@@ -85,7 +85,7 @@ func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame) {
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc148")
 	}
 
-	// Courtesy ingress-set mark (pair key — matches the proxy's claim key).
+	// Courtesy ingress-set mark (pair key: matches the proxy's claim key).
 	if w.txDedup != nil && w.txDedup.HasIngressMark() {
 		w.txDedup.Mark(beefPairKey(bf.ContentID, bf.TopicID))
 	}

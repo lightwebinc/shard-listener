@@ -36,13 +36,13 @@ func TestIncompleteSlotReportsMissingSeqNums(t *testing.T) {
 	b.Tick() // drives evictExpired
 
 	if gotMissing == nil {
-		t.Fatal("expired incomplete slot reported nothing — tail loss stays invisible")
+		t.Fatal("expired incomplete slot reported nothing: tail loss stays invisible")
 	}
 	if gotHash != hk {
 		t.Errorf("hashKey=%x want %x", gotHash, hk)
 	}
 	if gotGroup != 0x1234 {
-		t.Errorf("groupIdx=%x want 0x1234 — recovery would name the wrong flow", gotGroup)
+		t.Errorf("groupIdx=%x want 0x1234: recovery would name the wrong flow", gotGroup)
 	}
 	// Fragment i carried SeqNum 100+i, so the missing tail is 103,104.
 	want := []uint64{103, 104}
@@ -95,6 +95,6 @@ func TestEmptySlotReportsNothing(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	b.Tick()
 	if called {
-		t.Error("incomplete hook fired with no slots — would NACK invented SeqNums")
+		t.Error("incomplete hook fired with no slots: would NACK invented SeqNums")
 	}
 }

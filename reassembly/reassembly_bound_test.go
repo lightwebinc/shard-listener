@@ -34,11 +34,11 @@ func TestDeclaredLengthBounds(t *testing.T) {
 	if opened != 0 {
 		t.Fatalf("over-bound V9 opened a slot")
 	}
-	b.Observe(boundFrag(frame.FrameVerV9, 512<<10, 450, 3)) // 512 KiB — within bound
+	b.Observe(boundFrag(frame.FrameVerV9, 512<<10, 450, 3)) // 512 KiB: within bound
 	if opened != 1 {
 		t.Fatalf("in-bound V9 rejected (opened=%d)", opened)
 	}
-	b.Observe(boundFrag(frame.FrameVerV2, 32<<20, 30000, 4)) // 32 MiB tx — within general
+	b.Observe(boundFrag(frame.FrameVerV2, 32<<20, 30000, 4)) // 32 MiB tx: within general
 	if opened != 2 {
 		t.Fatalf("in-bound V2 rejected (opened=%d)", opened)
 	}

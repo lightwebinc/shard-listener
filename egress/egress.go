@@ -8,7 +8,7 @@
 // UDP datagram on a connected socket. The socket is opened on demand and
 // re-opened after a write error, so a destination that is unroutable when the
 // listener starts (or that goes away later) costs failed sends, never a failed
-// start-up — see [New].
+// start-up: see [New].
 //
 // # TCP sender
 //
@@ -67,7 +67,7 @@ type Sender struct {
 	udpBackoff time.Duration
 	// udpDialed records that this Sender has connected once, so only a
 	// RECONNECT is logged. The consumer table is rebuilt on every snapshot
-	// reload (30s), which builds a fresh Sender per consumer — logging each
+	// reload (30s), which builds a fresh Sender per consumer: logging each
 	// first connect put a line per consumer per reload into the journal.
 	udpDialed bool
 }
@@ -79,14 +79,14 @@ type Sender struct {
 // UDP construction USED to dial, and that made an unroutable destination fatal
 // at start-up. A consumer's tunnel exists only on the edge currently serving
 // it, so on that consumer's standby edge its address is unreachable by
-// design — and any restart of a standby listener (a roll, a config reload)
+// design, and any restart of a standby listener (a roll, a config reload)
 // died in New with "dial udp <sda>: network is unreachable" and crash-looped.
 // Dialing on demand also lets a Sender pick up a tunnel that appears AFTER
 // start-up, which is exactly what a failover onto the standby edge does.
 //
 // A syntactically bad address is still rejected here: that is a config error
 // no amount of retrying fixes, and it should fail the roll. Name resolution is
-// deferred with the dial — a resolver that is briefly unavailable is a
+// deferred with the dial, a resolver that is briefly unavailable is a
 // transient, not a config error.
 func New(addr, proto string, stripHeader bool) (*Sender, error) {
 	s := &Sender{
@@ -170,9 +170,9 @@ func (s *Sender) sendUDP(buf []byte) error {
 		// re-dial (on backoff): that is what re-homes this Sender when the
 		// consumer fails over onto this edge.
 		//
-		// ONLY for a path error, though. ECONNREFUSED is the common case here —
+		// ONLY for a path error, though. ECONNREFUSED is the common case here:
 		// a connected UDP socket surfaces the destination's ICMP port-unreachable
-		// on the next write — and it means the opposite: the host answered, so
+		// on the next write, and it means the opposite: the host answered, so
 		// the route and socket are healthy and only the remote port is shut.
 		// Re-dialing that is pure churn (a socket+connect and two log lines per
 		// frame, at fabric rate), and it was observed live flapping
@@ -187,7 +187,7 @@ func (s *Sender) sendUDP(buf []byte) error {
 }
 
 // isPathError reports whether err says the route to the destination changed
-// under us — the case a fresh socket can fix. Errors about the destination
+// under us, the case a fresh socket can fix. Errors about the destination
 // itself (ECONNREFUSED) or about this frame (EMSGSIZE) leave the socket alone.
 func isPathError(err error) bool {
 	return errors.Is(err, syscall.ENETUNREACH) ||
@@ -234,7 +234,7 @@ func (s *Sender) closeTCP() {
 }
 
 // SendRaw forwards an arbitrary byte buffer to the downstream. No
-// strip-header logic is applied — buf is sent verbatim.
+// strip-header logic is applied: buf is sent verbatim.
 func (s *Sender) SendRaw(buf []byte) error {
 	switch s.proto {
 	case "udp":
@@ -305,13 +305,13 @@ func (s *Sender) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) error {
 // SendBeef forwards a BRC-148 BEEF object frame (FrameVer 0x09) to the
 // downstream. When stripHeader is true the BRC-149 DELIVERY RECORD is sent
 // (matched TopicID ∥ u32 payloadLen ∥ payload, the payload being the
-// submission record with every submitted name, or a bare object) — never
+// submission record with every submitted name, or a bare object), never
 // the bare object alone, which is not self-delimiting and so cannot be
 // framed on a stream. Otherwise the full raw wire buffer is forwarded.
 func (s *Sender) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 	var buf []byte
 	if s.stripHeader {
-		// BRC-149 delivery record — NOT the bare object. A BEEF object is not
+		// BRC-149 delivery record, NOT the bare object. A BEEF object is not
 		// self-delimiting without a full structural parse, so a bare object on
 		// a persistent TCP stream cannot be split by the receiver; the record's
 		// explicit length restores framing. It also preserves the TopicID

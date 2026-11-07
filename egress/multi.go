@@ -14,8 +14,8 @@ import (
 // gap/NACK, then forwards every raw frame to each configured delivery host, and
 // the delivery hosts fan out per-consumer.
 //
-// Each destination gets EVERY frame verbatim (the full stamped envelope —
-// HashKey/SeqNum/submitter-id — is preserved so delivery-side own-traffic
+// Each destination gets EVERY frame verbatim (the full stamped envelope:
+// HashKey/SeqNum/submitter-id: is preserved so delivery-side own-traffic
 // exclusion and metering still work). A send failure to one destination does
 // not stop the others; the joined error is returned.
 type MultiSender struct {
@@ -72,7 +72,7 @@ func (m *MultiSender) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) er
 }
 
 // SendBeef forwards a BRC-148 BEEF object frame to every destination
-// (whole-frame, envelope-preserving — strip is forced off in this sink).
+// (whole-frame, envelope-preserving: strip is forced off in this sink).
 func (m *MultiSender) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 	return m.fanout(func(s *Sender) error { return s.SendBeef(raw, bf) })
 }

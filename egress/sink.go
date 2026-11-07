@@ -14,8 +14,8 @@ import (
 // A class-routing sink must return an error (rather than nil) for an unelected
 // class, or a metering wrapper keyed on "err == nil" would bill a delivery that
 // never happened. But an aggregating fan-out must NOT surface it as the batch's
-// error, or the worker books an egress failure — and skips its "forwarded"
-// counter — on ordinary traffic. Wrapping this sentinel is what lets both hold
+// error, or the worker books an egress failure, and skips its "forwarded"
+// counter: on ordinary traffic. Wrapping this sentinel is what lets both hold
 // at once: the biller still sees a non-nil error, while the fan-out recognises
 // it with [errors.Is] and keeps aggregating.
 //
@@ -23,14 +23,14 @@ import (
 // so the specific message survives for logs.
 var ErrNotElected = errors.New("egress: class not elected by consumer")
 
-// IsNotElected reports whether err is (or wraps) [ErrNotElected] — i.e. the
+// IsNotElected reports whether err is (or wraps) [ErrNotElected], i.e. the
 // frame was withheld by election rather than lost.
 func IsNotElected(err error) bool { return errors.Is(err, ErrNotElected) }
 
 // EgressSink is the forwarding contract the listener worker delivers decoded
 // frames through. The default single-destination [Sender] satisfies it; an
-// alternative sink — for example a multi-consumer fan-out in a downstream
-// build — implements the same methods to receive every frame the worker would
+// alternative sink: for example a multi-consumer fan-out in a downstream
+// build: implements the same methods to receive every frame the worker would
 // otherwise unicast to one downstream.
 //
 // The interface mirrors *Sender's surface exactly, so the default forwarding
@@ -70,7 +70,7 @@ var _ EgressSink = (*Sender)(nil)
 // base seam would force a no-op method onto every implementation of a contract
 // that is deliberately small.
 //
-// SendRaw is NOT this seam. It is class-agnostic — a fan-out sink cannot tell a
+// SendRaw is NOT this seam. It is class-agnostic, a fan-out sink cannot tell a
 // header from any other buffer, so it can neither route on election nor meter
 // under the right class, and a class router forwarding it would have to guess a
 // lane. Headers therefore get their own typed method, exactly as blocks,
@@ -79,7 +79,7 @@ type HeaderSink interface {
 	// SendHeader forwards one BRC-135 block header frame. raw is the whole
 	// 172-byte frame (92-byte header + the 80-byte block header); hf is the
 	// decoded view (Version FrameVerV7, TxID = the block hash) whose Payload
-	// aliases raw's 80-byte block header — the form a subscriber that wants
+	// aliases raw's 80-byte block header, the form a subscriber that wants
 	// merkle roots actually consumes. Neither buffer may be retained after the
 	// call returns.
 	SendHeader(raw []byte, hf *frame.Frame) error
@@ -90,7 +90,7 @@ type HeaderSink interface {
 // header actually reached.
 //
 // A plain HeaderSink returning nil means "no error", which in a per-class
-// fan-out ALSO covers "nobody had elected this lane" — so a caller that books a
+// fan-out ALSO covers "nobody had elected this lane", so a caller that books a
 // forwarded-counter on a nil return counts emissions that never crossed a wire.
 // Measured live: bsl_header_forwarded_total advancing on an edge where no
 // consumer had a header lane. A sink that can distinguish the two implements
@@ -99,6 +99,6 @@ type HeaderFanoutSink interface {
 	HeaderSink
 	// SendHeaderN forwards the header and returns the number of consumers it
 	// was delivered to, plus the first real delivery error (election is not an
-	// error — see [ErrNotElected]).
+	// error: see [ErrNotElected]).
 	SendHeaderN(raw []byte, hf *frame.Frame) (int, error)
 }

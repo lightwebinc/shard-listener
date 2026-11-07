@@ -28,7 +28,7 @@ func buildFragFrame(txID [32]byte, origLen uint32, idx, total uint16, data []byt
 }
 
 // txIDOf returns raw SHA256d over the payload bytes. This is NOT the canonical
-// TxID for an EF payload — TestReassembly_EFPayload_VerifyAccepts uses it to
+// TxID for an EF payload: TestReassembly_EFPayload_VerifyAccepts uses it to
 // prove the two differ. Use canonicalID for a payload that must verify.
 func txIDOf(payload []byte) [32]byte {
 	first := sha256.Sum256(payload)
@@ -144,7 +144,7 @@ func TestReassembly_Duplicate(t *testing.T) {
 	ff1 := buildFragFrame(txID, uint32(len(payload)), 1, 2, payload[half:])
 
 	b.Observe(ff0)
-	b.Observe(ff0) // duplicate — must be ignored
+	b.Observe(ff0) // duplicate: must be ignored
 	b.Observe(ff1)
 
 	if calls != 1 {
@@ -156,7 +156,7 @@ func TestReassembly_Duplicate(t *testing.T) {
 // TxID is dropped and the hash-mismatch hook is called.
 func TestReassembly_HashMismatch(t *testing.T) {
 	payload := []byte("correct-payload")
-	var badTxID [32]byte // all zeros — will not match SHA256d(payload)
+	var badTxID [32]byte // all zeros: will not match SHA256d(payload)
 
 	calls := 0
 	mismatches := 0
@@ -245,7 +245,7 @@ func TestReassembly_EFPayload_VerifyAccepts(t *testing.T) {
 }
 
 // TestReassembly_EFPayload_RawHashRejected: sha256d over the EF bytes is the
-// pre-fix identity no producer stamps — such a slot must be dropped.
+// pre-fix identity no producer stamps: such a slot must be dropped.
 func TestReassembly_EFPayload_RawHashRejected(t *testing.T) {
 	payload := buildEFPayloadR(t, 100)
 
@@ -402,7 +402,7 @@ func TestReassembly_MetadataMismatch_Ignored(t *testing.T) {
 	ff0 := buildFragFrame(txID, uint32(len(payload)), 0, 2, payload[:7])
 	b.Observe(ff0)
 
-	// Second fragment: FragTotal=3 (different — should be ignored).
+	// Second fragment: FragTotal=3 (different, should be ignored).
 	ffBad := &frame.FragFrame{
 		TxID:           txID,
 		OrigPayloadLen: uint32(len(payload)),

@@ -196,7 +196,7 @@ func TestRegistry_SeedRetainedBehindBeacons(t *testing.T) {
 
 func TestRegistry_SeedDedupedAgainstBeacon(t *testing.T) {
 	// A cache that both beacons and appears in the static list must appear once,
-	// at its real (beacon) tier — not twice.
+	// at its real (beacon) tier, not twice.
 	r := NewRegistry()
 	adv := makeAdvert(0, 128, 1)
 	advAddr := fmt.Sprintf("[%s]:%d", adv.NACKAddr, adv.NACKPort)
@@ -232,7 +232,7 @@ func TestRegistry_SeedFallbackOnly(t *testing.T) {
 }
 
 // TestRegistry_SeedOrderIsDeterministic: seeds share Tier 0xFF and the snapshot
-// sort is not stable, so equal-preference seeds came back in unspecified order —
+// sort is not stable, so equal-preference seeds came back in unspecified order:
 // silently undoing the caller's demoteSelf contract (own retry LAST). Position
 // now encodes preference; the snapshot must reproduce the seeded order exactly,
 // every rebuild.
@@ -253,7 +253,7 @@ func TestRegistry_SeedOrderIsDeterministic(t *testing.T) {
 		}
 		for i, e := range snap {
 			if e.Addr != want[i] {
-				t.Fatalf("round %d: snapshot[%d] = %s, want %s — seeded order not preserved (demoteSelf undone)",
+				t.Fatalf("round %d: snapshot[%d] = %s, want %s, seeded order not preserved (demoteSelf undone)",
 					round, i, e.Addr, want[i])
 			}
 		}

@@ -23,7 +23,7 @@ import (
 //
 // This previously ran through a CoinbaseCorrelator that was meant to admit a
 // coinbase whose TxID a PoW-valid announce had recorded. That correlator was
-// never populated — its Add method had no caller — so it could only ever say
+// never populated (its Add method had no caller) so it could only ever say
 // "no", and the -coinbase-corr-cap flag's effect was the inverse of its
 // documentation: a non-zero cap dropped EVERY coinbase frame and zero
 // forwarded every one, unvalidated. Both flags and the type are gone; the drop

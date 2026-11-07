@@ -9,8 +9,8 @@ import (
 // [EgressSink] to receive BRC-142 bundle (coalescing) frames INTACT rather than
 // as decoalesced individual frames.
 //
-// A bundle-aware sink — a fan-out that delivers whole bundles end-to-end to
-// bundle-capable consumers and decoalesces for the rest — implements SendBundle
+// A bundle-aware sink, a fan-out that delivers whole bundles end-to-end to
+// bundle-capable consumers and decoalesces for the rest: implements SendBundle
 // so the listener worker can hand it the parsed bundle without splitting it
 // first. A sink that does NOT implement BundleSink is handed the bundle's
 // members as individual frames via [EgressSink.Send], exactly as before, so the
@@ -32,7 +32,7 @@ type BundleSink interface {
 //
 // The decoalesced fallback leaves each member's SeqNum at 0 (the bundle SeqNum
 // is frame-bound and does not survive a split); a sink that re-stamps per-flow
-// egress sequences — the fan-out — implements BundleSink and so takes the intact
+// egress sequences (the fan-out) implements BundleSink and so takes the intact
 // path, never this fallback.
 func DeliverBundle(sink EgressSink, raw []byte, b *bundle.Bundle) error {
 	if bs, ok := sink.(BundleSink); ok {

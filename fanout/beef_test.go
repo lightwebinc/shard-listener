@@ -64,7 +64,7 @@ func TestSendBeef_TopicAndVersionElection(t *testing.T) {
 	}
 
 	// The observer sees exactly what each consumer's OWN election excluded,
-	// with the reason and the wire size — and nothing for a delivered frame.
+	// with the reason and the wire size, and nothing for a delivered frame.
 	if otherObs.n != 1 || otherObs.reason != fanout.FilterTopic || otherObs.wire != len(raw) {
 		t.Errorf("topic-filtered observer: %+v, want 1×%s of %d bytes", *otherObs, fanout.FilterTopic, len(raw))
 	}

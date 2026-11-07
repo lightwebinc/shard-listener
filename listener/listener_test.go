@@ -150,7 +150,7 @@ func newWorker(t *testing.T, addr string, filt *filter.Filter) *Worker {
 // TestRunUnicastIngest_DeliveryForwardsToSink exercises delivery mode (P3b): a
 // worker with NO multicast join and none of the receiver-side stages (tracker,
 // dedup, reassembly all nil) reads a raw frame off a UNICAST socket and forwards
-// it through the egress sink — the receiver→delivery handoff, envelope preserved.
+// it through the egress sink, the receiver→delivery handoff, envelope preserved.
 func TestRunUnicastIngest_DeliveryForwardsToSink(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
 	defer cleanup()
@@ -405,7 +405,7 @@ func TestProcessFrame_EgressDedup_Disabled_ForwardsBoth(t *testing.T) {
 	defer cleanup()
 	filt := filter.New(nil, nil, nil, nil)
 	w := newWorker(t, addr, filt)
-	// No dedup set — both copies must reach downstream.
+	// No dedup set, both copies must reach downstream.
 
 	raw := buildBRC124Frame(t, [32]byte{0x11}, []byte("no-dedup"))
 	w.processFrame(raw)
@@ -551,7 +551,7 @@ func TestProcessFrame_VerifyEnabled_RejectsTrailingBytes(t *testing.T) {
 
 	select {
 	case <-ch:
-		t.Fatal("payload must be exactly one transaction — trailing bytes must be dropped")
+		t.Fatal("payload must be exactly one transaction: trailing bytes must be dropped")
 	case <-time.After(150 * time.Millisecond):
 	}
 }
@@ -583,7 +583,7 @@ func buildEFPayload(t *testing.T, total int) []byte {
 
 // TestProcessFrame_VerifyEnabled_AcceptsValidEF proves the verify gate is
 // EF-aware: an honest BRC-128 frame stamps the canonical objfmt.TxID (EF
-// extras excluded), which is NOT sha256d over the payload bytes — the frame
+// extras excluded), which is NOT sha256d over the payload bytes, the frame
 // must still forward.
 func TestProcessFrame_VerifyEnabled_AcceptsValidEF(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
@@ -614,7 +614,7 @@ func TestProcessFrame_VerifyEnabled_AcceptsValidEF(t *testing.T) {
 }
 
 // TestProcessFrame_VerifyEnabled_RejectsRawHashStampedEF: sha256d over the
-// EF bytes is the pre-fix identity no producer stamps — such a frame carries
+// EF bytes is the pre-fix identity no producer stamps: such a frame carries
 // an id no consumer would ever derive and must be dropped.
 func TestProcessFrame_VerifyEnabled_RejectsRawHashStampedEF(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
@@ -636,7 +636,7 @@ func TestProcessFrame_VerifyEnabled_RejectsRawHashStampedEF(t *testing.T) {
 }
 
 // TestProcessFrame_VerifyEnabled_RejectsUnwalkableEF: an EF-marked payload
-// that does not walk as a transaction is structurally invalid — even a
+// that does not walk as a transaction is structurally invalid, even a
 // matching raw hash must not admit it.
 func TestProcessFrame_VerifyEnabled_RejectsUnwalkableEF(t *testing.T) {
 	addr, ch, cleanup := newSink(t)
@@ -805,7 +805,7 @@ func TestProcessBlockFrame_HeaderEgress_SkipsCoinbase(t *testing.T) {
 	t.Cleanup(func() { _ = hdrEgr.Close() })
 	w.SetHeaderEgress(hdrEgr)
 
-	// Send a coinbase frame — should NOT produce header egress.
+	// Send a coinbase frame: should NOT produce header egress.
 	raw := buildBlockCoinbaseFrame(t, 0xBB)
 	w.processBlockFrame(raw)
 
@@ -823,11 +823,11 @@ func TestProcessBlockFrame_HeaderEgress_Disabled(t *testing.T) {
 
 	filt := filter.New(nil, nil, nil, nil)
 	w := newWorker(t, mainAddr, filt)
-	// No header egress set — should not panic or produce errors.
+	// No header egress set: should not panic or produce errors.
 
 	raw := buildBlockAnnounceFrame(t, 0xCC, 0, 1)
 	w.processBlockFrame(raw)
-	// No assertion needed — just verify no panic.
+	// No assertion needed: just verify no panic.
 }
 
 func TestDeliverReassembledBlock_HeaderEgress(t *testing.T) {
@@ -1013,7 +1013,7 @@ func TestProcessAnchorFrame_BypassesShardFilter(t *testing.T) {
 	defer cleanup()
 
 	// shard-include only allows group 0; an anchor TxID with top bits 0xC0
-	// would hash to group 3 with shardBits=2 — filtered for ordinary tx.
+	// would hash to group 3 with shardBits=2: filtered for ordinary tx.
 	filt := filter.New([]uint32{0}, nil, nil, nil)
 	w := newWorker(t, addr, filt)
 
@@ -1028,7 +1028,7 @@ func TestProcessAnchorFrame_BypassesShardFilter(t *testing.T) {
 			t.Fatalf("got %d bytes, want %d", len(got), len(raw))
 		}
 	case <-time.After(time.Second):
-		t.Fatal("anchor frame must bypass shard filter — timeout waiting for frame")
+		t.Fatal("anchor frame must bypass shard filter: timeout waiting for frame")
 	}
 }
 
@@ -1038,7 +1038,7 @@ func TestProcessAnchorFrame_DecodeError_Drops(t *testing.T) {
 	filt := filter.New(nil, nil, nil, nil)
 	w := newWorker(t, addr, filt)
 
-	// Bad magic — DecodeAnchor will fail; frame must be dropped silently.
+	// Bad magic: DecodeAnchor will fail; frame must be dropped silently.
 	bad := make([]byte, frame.HeaderSize)
 	bad[6] = frame.FrameVerV6
 	w.processAnchorFrame(bad)
@@ -1135,7 +1135,7 @@ func TestProcessFrame_TxDedup_SecondSuppressed(t *testing.T) {
 		t.Fatal("w1: first claim must forward")
 	}
 
-	// w2 loses the race — must suppress.
+	// w2 loses the race: must suppress.
 	w2.processFrame(raw)
 	select {
 	case <-ch:
@@ -1224,7 +1224,7 @@ func TestProcessAnchorFrame_TxDedup_SecondSuppressed(t *testing.T) {
 		t.Fatal("w1: anchor first claim must forward")
 	}
 
-	// w2 loses the race — must suppress.
+	// w2 loses the race: must suppress.
 	w2.processAnchorFrame(raw)
 	select {
 	case <-ch:
@@ -1239,7 +1239,7 @@ func TestProcessFrame_TxDedup_Disabled_ForwardsBoth(t *testing.T) {
 	defer cleanup()
 	filt := filter.New(nil, nil, nil, nil)
 	w := newWorker(t, addr, filt)
-	// No txDedup set — both copies must reach downstream.
+	// No txDedup set, both copies must reach downstream.
 
 	payload := []byte("no-txdedup")
 	txid := sha256d(payload)

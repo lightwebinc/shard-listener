@@ -1,4 +1,4 @@
-// Package egress — multicast sender.
+// Package egress: multicast sender.
 //
 // MCastSender re-emits filtered frames onto a configurable IPv6 multicast
 // group address space, enabling bridging between multicast domains with
@@ -9,15 +9,15 @@
 // At construction time bytes 0-13 of an address template are pre-filled
 // (scope prefix + zero IANA boundary + 16-bit IANA group-id). Per-frame,
 // only bytes 14-15 are overwritten with the 16-bit shard group index
-// supplied by the caller — the same index already computed by the ingress
+// supplied by the caller, the same index already computed by the ingress
 // worker. No heap allocations occur on the hot path.
 //
 // # Socket options
 //
-//   - IPV6_MULTICAST_IF  — binds send to the configured egress interface.
-//   - IPV6_MULTICAST_HOPS — controls how far re-emitted frames travel.
-//   - IPV6_MULTICAST_LOOP = 0 — prevents re-ingestion on the sending host.
-//   - SO_SNDBUF = 16 MiB   — absorbs short bursts (kernel caps at wmem_max).
+//   - IPV6_MULTICAST_IF : binds send to the configured egress interface.
+//   - IPV6_MULTICAST_HOPS: controls how far re-emitted frames travel.
+//   - IPV6_MULTICAST_LOOP = 0: prevents re-ingestion on the sending host.
+//   - SO_SNDBUF = 16 MiB  : absorbs short bursts (kernel caps at wmem_max).
 package egress
 
 import (
@@ -60,7 +60,7 @@ type MCastSender struct {
 func NewMCast(
 	mcPrefix uint16,
 	groupID uint16,
-	_ uint, // shardBits — reserved for future group-subset egress
+	_ uint, // shardBits: reserved for future group-subset egress
 	port int,
 	iface *net.Interface,
 	hopLimit int,
@@ -109,7 +109,7 @@ func NewMCast(
 //
 // groupIdx must be the value already computed by shard.Engine.GroupIndex in
 // the calling worker; it is not re-derived here. The SockaddrInet6 is built
-// on the stack — no heap allocations occur.
+// on the stack, no heap allocations occur.
 func (s *MCastSender) Send(raw []byte, _ *frame.Frame, groupIdx uint32) error {
 	// Write the 16-bit group index into bytes 14-15 of the address template.
 	s.addrTemplate[14] = byte(groupIdx >> 8)
@@ -123,7 +123,7 @@ func (s *MCastSender) Send(raw []byte, _ *frame.Frame, groupIdx uint32) error {
 
 // SendToGroup forwards buf to the multicast group at the given control
 // group index. Unlike Send, no frame decoding or strip-header logic is
-// applied — buf is sent verbatim. The destination address is derived
+// applied: buf is sent verbatim. The destination address is derived
 // from the pre-filled template with groupIdx in bytes 14-15.
 func (s *MCastSender) SendToGroup(buf []byte, groupIdx uint16) error {
 	s.addrTemplate[14] = byte(groupIdx >> 8)

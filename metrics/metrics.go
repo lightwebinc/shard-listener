@@ -3,7 +3,7 @@
 // (for push-based delivery to any OTel-compatible backend).
 //
 // All instrument handles are allocated once at [New] time. Record methods use
-// them directly — no map lookups on the critical path.
+// them directly, no map lookups on the critical path.
 package metrics
 
 import (
@@ -56,7 +56,7 @@ type Recorder struct {
 	draining   atomic.Bool
 	shutdownFn func(context.Context) error
 
-	// ── Hot-path counters — direct prometheus client_golang ──
+	// ── Hot-path counters: direct prometheus client_golang ──
 	promFramesReceived       *promclient.CounterVec // worker, iface, version
 	promFramesDropped        *promclient.CounterVec // worker, reason
 	promBundlesRebucketed    *promclient.CounterVec // worker
@@ -71,7 +71,7 @@ type Recorder struct {
 	promRetryTeeErrors       *promclient.CounterVec // worker
 	promRetryTeeDropped      *promclient.CounterVec // worker
 
-	// BRC-130 reassembly counters — cold path (only fires on > MTU frames).
+	// BRC-130 reassembly counters: cold path (only fires on > MTU frames).
 	frameReassemblyStarted      metric.Int64Counter
 	frameReassemblyCompleted    metric.Int64Counter
 	frameReassemblyAbandoned    metric.Int64Counter
@@ -133,7 +133,7 @@ type Recorder struct {
 	manifestPilotsKnown   atomic.Int64
 	manifestQuorumMetBits atomic.Int32 // bitmap: bit0 shard_bits, bit1 source_mode, bit2 successor
 	// Unix seconds of the most recent divergence per field. Read by an
-	// observable gauge, so a stale timestamp is the signal — a field that
+	// observable gauge, so a stale timestamp is the signal, a field that
 	// stops diverging keeps its last value rather than disappearing.
 	lastDivergenceMu       sync.Mutex
 	lastDivergence         map[string]int64
@@ -584,13 +584,13 @@ func (r *Recorder) RetryTeeDropped(workerID int) {
 
 // BundleRebucketed records one BRC-142 bundle re-bucketed to the local ShardBits
 // generation (its members re-coalesced into local-generation groups) before
-// delivery — the cross-generation / re-shard relay operation.
+// delivery, the cross-generation / re-shard relay operation.
 func (r *Recorder) BundleRebucketed(workerID int) {
 	r.promBundlesRebucketed.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
 
 // RebucketUnguarded records a re-bucket on a listener not configured as a
-// relay (-rebucket-relay) — the generation-mismatch alarm signal.
+// relay (-rebucket-relay), the generation-mismatch alarm signal.
 func (r *Recorder) RebucketUnguarded(workerID int) {
 	r.promRebucketUnguarded.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }
@@ -625,14 +625,14 @@ func (r *Recorder) ReassemblyHashMismatch() {
 }
 
 // ReassemblyLateFragment records a fragment dropped because its object had
-// already completed — a multicast repair copy answering someone else's loss.
+// already completed, a multicast repair copy answering someone else's loss.
 func (r *Recorder) ReassemblyLateFragment() {
 	r.frameReassemblyLateFragment.Add(context.Background(), 1)
 }
 
 // ReassemblyBadFragment records an object dropped because one of its
 // fragments had a data length inconsistent with the object's OrigPayloadLen
-// and FragTotal — the fragment cannot be placed at the offset BRC-130 implies.
+// and FragTotal, the fragment cannot be placed at the offset BRC-130 implies.
 func (r *Recorder) ReassemblyBadFragment() {
 	r.frameReassemblyBadFragment.Add(context.Background(), 1)
 }
@@ -744,7 +744,7 @@ func (r *Recorder) GapDetected(flow, source string) {
 		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 
-// SeqRebaselined counts a flow re-baselined on an implausible forward SeqNum jump —
+// SeqRebaselined counts a flow re-baselined on an implausible forward SeqNum jump:
 // an emitter change (e.g. anycast spine failover between long-lived proxies whose
 // in-memory flow counters diverged), NOT data loss: the intermediate range was never
 // emitted toward this listener, so it must not be registered (or NACKed) as gaps.
@@ -772,7 +772,7 @@ func (r *Recorder) NACKDispatched(flow, source string) {
 		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 
-// NACKSendError records a NACK datagram whose WriteTo failed — the tier it
+// NACKSendError records a NACK datagram whose WriteTo failed, the tier it
 // targeted was never asked, which is invisible to the walk (a timeout and an
 // unsendable packet look identical downstream). endpoint labels the target so
 // a systematically unreachable tier stands out from a transient error.
@@ -945,7 +945,7 @@ func (r *Recorder) Shutdown(ctx context.Context) {
 }
 
 // PromHandler serves the Prometheus exposition of every counter this recorder
-// owns — what Serve mounts at /metrics, exposed so a composing build (or a
+// owns: what Serve mounts at /metrics, exposed so a composing build (or a
 // test) can read the counters back without a listening socket.
 func (r *Recorder) PromHandler() http.Handler {
 	return promhttp.HandlerFor(r.promReg, promhttp.HandlerOpts{})
@@ -1002,7 +1002,7 @@ func (r *Recorder) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 
 // TailProbeSent records a speculative NACK issued for the next expected SeqNum
 // on a flow that has gone quiet. Unlike a gap, a probe is a QUESTION, not an
-// observed loss — it must never be counted as a detected gap or the unrecovered
+// observed loss: it must never be counted as a detected gap or the unrecovered
 // ratio inflates with phantom losses on every idle flow.
 func (r *Recorder) TailProbeSent(flow, source string) {
 	r.tailProbesSent.Add(context.Background(), 1,

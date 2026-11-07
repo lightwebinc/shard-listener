@@ -126,7 +126,7 @@ func TestGroupRegistryAllows(t *testing.T) {
 func TestGroupRegistryAndStaticIncludeUnion(t *testing.T) {
 	reg := subtreegroup.New([][16]byte{makeGroupID(1)}, 900*time.Second)
 	reg.Add(makeGroupID(1), subtreeID(0x10), 10*time.Second)
-	// Static include has 0x20, group has 0x10 — both should pass
+	// Static include has 0x20, group has 0x10, both should pass
 	f := filter.New(nil, [][32]byte{subtreeID(0x20)}, nil, reg)
 	if ok, _ := f.Allow(0, makeFrame(subtreeID(0x10))); !ok {
 		t.Error("subtree in group should pass even when not in static include")
@@ -143,7 +143,7 @@ func TestGroupExcludeOverridesGroup(t *testing.T) {
 	reg := subtreegroup.New([][16]byte{makeGroupID(1)}, 900*time.Second)
 	id := subtreeID(0xCC)
 	reg.Add(makeGroupID(1), id, 10*time.Second)
-	// Same id is in the group but also in exclude — exclude wins
+	// Same id is in the group but also in exclude: exclude wins
 	f := filter.New(nil, nil, [][32]byte{id}, reg)
 	if ok, reason := f.Allow(0, makeFrame(id)); ok {
 		t.Error("exclude should win over group membership")
