@@ -240,7 +240,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}, []string{"worker"})
 	r.promRebucketUnguarded = promclient.NewCounterVec(promclient.CounterOpts{
 		Name: "bsl_rebucket_unguarded_total",
-		Help: "Bundles re-bucketed on a listener NOT configured as a re-bucket relay (-rebucket-relay) — a generation-mismatch alarm: parent-stream recovery is active, but re-multicast children are unrecoverable without a child-generation retry. Alert on rate > 0.",
+		Help: "Bundles re-bucketed on a listener NOT configured as a re-bucket relay (-rebucket-relay), a generation-mismatch alarm: parent-stream recovery is active, but re-multicast children are unrecoverable without a child-generation retry. Alert on rate > 0.",
 	}, []string{"worker"})
 	r.promFramesForwarded = promclient.NewCounterVec(promclient.CounterOpts{
 		Name: "bsl_frames_forwarded_total",
@@ -272,7 +272,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}, []string{"worker"})
 	r.promRetryTeeErrors = promclient.NewCounterVec(promclient.CounterOpts{
 		Name: "bsl_retry_tee_errors_total",
-		Help: "Retry-tee mirror writes that failed (frame NOT cached locally; repair for it falls to other endpoints). Never retried — the mirror is deliberately lossy.",
+		Help: "Retry-tee mirror writes that failed (frame NOT cached locally; repair for it falls to other endpoints). Never retried; the mirror is deliberately lossy.",
 	}, []string{"worker"})
 	r.promRetryTeeDropped = promclient.NewCounterVec(promclient.CounterOpts{
 		Name: "bsl_retry_tee_dropped_total",
@@ -380,11 +380,11 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 	if r.tailProbesRecovered, err = meter.Int64Counter("bsl_tail_probes_recovered_total",
-		metric.WithDescription("tail probes that returned a real frame — loss that no successor frame would ever have revealed")); err != nil {
+		metric.WithDescription("tail probes that returned a real frame: loss that no successor frame would ever have revealed")); err != nil {
 		return nil, err
 	}
 	if r.tailProbesMiss, err = meter.Int64Counter("bsl_tail_probes_miss_total",
-		metric.WithDescription("tail probes answered MISS — the flow was genuinely idle, not lossy")); err != nil {
+		metric.WithDescription("tail probes answered MISS: the flow was genuinely idle, not lossy")); err != nil {
 		return nil, err
 	}
 	if r.gapsDetected, err = meter.Int64Counter("bsl_gaps_detected_total",
@@ -408,7 +408,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 	if r.nackSendErrors, err = meter.Int64Counter("bsl_nack_send_errors_total",
-		metric.WithDescription("NACK datagrams that failed to send (WriteTo error) — that walk tier was never asked")); err != nil {
+		metric.WithDescription("NACK datagrams that failed to send (WriteTo error); that walk tier was never asked")); err != nil {
 		return nil, err
 	}
 	if r.nacksThrottled, err = meter.Int64Counter("bsl_nacks_throttled_total",
@@ -424,7 +424,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 	if r.gapsLateFilled, err = meter.Int64Counter("bsl_gaps_late_filled_total",
-		metric.WithDescription("Frames that arrived for a gap AFTER it was abandoned (a multicast retransmit outran the NACK deadline) — subtract from unrecovered to read real loss")); err != nil {
+		metric.WithDescription("Frames that arrived for a gap AFTER it was abandoned (a multicast retransmit outran the NACK deadline); subtract from unrecovered to read real loss")); err != nil {
 		return nil, err
 	}
 
@@ -1016,7 +1016,7 @@ func (r *Recorder) TailProbeRecovered(flow, source string) {
 		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 
-// TailProbeMiss records a probe answered MISS — the flow was simply idle. This
+// TailProbeMiss records a probe answered MISS: the flow was simply idle. This
 // is the expected steady-state outcome and is the cost of the mechanism.
 func (r *Recorder) TailProbeMiss(flow, source string) {
 	r.tailProbesMiss.Add(context.Background(), 1,

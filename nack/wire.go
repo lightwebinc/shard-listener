@@ -88,7 +88,7 @@ type NACK struct {
 	SubtreeID [32]byte // BRC-124 subtree namespace; all-zero = no subtree
 }
 
-// Encode serialises n into buf (must be at least [NACKSize] bytes).
+// Encode serializes n into buf (must be at least [NACKSize] bytes).
 func Encode(n *NACK, buf []byte) {
 	_ = buf[NACKSize-1] // bounds check
 	binary.BigEndian.PutUint32(buf[0:4], nackMagic)
@@ -132,7 +132,7 @@ type Response struct {
 	SeqNum  uint64 // SeqNum of the retrieved frame; 0 for MISS
 }
 
-// EncodeResponse serialises r into buf (must be at least [ResponseSize] bytes).
+// EncodeResponse serializes r into buf (must be at least [ResponseSize] bytes).
 func EncodeResponse(r *Response, buf []byte) {
 	_ = buf[ResponseSize-1] // bounds check
 	binary.BigEndian.PutUint32(buf[0:4], nackMagic)

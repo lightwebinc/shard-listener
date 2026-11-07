@@ -638,7 +638,7 @@ func (w *Worker) servePipelined(ctx context.Context, fd int, tee bool) error {
 // if it had arrived on the wire. It is called by the NACK tracker when a retry
 // endpoint returns a frame over the unicast NACK return channel, so a
 // gap-repaired frame reaches downstream consumers without any client logic.
-// Serialised against the Run loop via procMu.
+// Serialized against the Run loop via procMu.
 // Reinject re-injects a frame recovered over the unicast NACK return channel and
 // reports whether the pipeline ACCEPTED it.
 //

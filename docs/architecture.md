@@ -11,7 +11,7 @@
 - **Beacon discovery**: dynamic retry endpoint registry via BRC-126 ADVERT beacons
 - **Receive-side retry tee**: `-retry-tee` mirrors every received data frame to a co-resident retry-endpoint's loopback tee ingest (source-preserving `teewire` envelope), so the cache learns remote-origin frames without a multicast join of its own (see [configuration.md](configuration.md))
 - **Tier escalation**: MISS → immediate advance to next endpoint; bare ACK → gap canceled on trust; unicast-flagged ACK → wait for the data frame, escalate on timeout
-- **Semaphore-bounded dispatch**: concurrent NACK goroutines with configurable limit
+- **Semaphore-bounded dispatch**: at most 64 concurrent NACK goroutines (fixed in `nack.New`)
 - **Egress UDP or TCP**: strip-header (payload-only) by default, since a downstream node reads a raw BSV tx, not a multicast frame; disable for frame-aware downstreams (domain bridging)
 - **Multicast egress**: optional domain bridging; re-emits filtered frames onto a separate multicast address space with configurable scope, interface, port, and hop limit
 - **BRC-135 header egress**: optional; re-emits the 80-byte block header carried in BRC-131 BlockAnnounce frames as a 172-byte BRC-135 frame on a dedicated egress group (`0xFFFA`) for SPV-style consumers

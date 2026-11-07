@@ -44,7 +44,7 @@ type ADVERT struct {
 	InstanceID     uint32
 }
 
-// EncodeADVERT serialises a into buf (must be at least [ADVERTSize] bytes).
+// EncodeADVERT serializes a into buf (must be at least [ADVERTSize] bytes).
 func EncodeADVERT(a *ADVERT, buf []byte) {
 	_ = buf[ADVERTSize-1] // bounds check
 	binary.BigEndian.PutUint32(buf[0:4], advertMagic)

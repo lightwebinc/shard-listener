@@ -50,7 +50,7 @@ func newRecvBatch() *recvBatch {
 
 // recv fills the batch from fd: at least one datagram (MSG_WAITFORONE: the
 // call returns as soon as one is there, with whatever else is queued, up to
-// recvBatchSize), honouring the socket's receive timeout like recvfrom.
+// recvBatchSize), honoring the socket's receive timeout like recvfrom.
 func (b *recvBatch) recv(fd int) (int, error) {
 	for i := range b.hdrs {
 		b.hdrs[i].Hdr.Namelen = uint32(unsafe.Sizeof(b.names[i]))

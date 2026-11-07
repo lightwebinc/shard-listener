@@ -48,7 +48,7 @@ import (
 // prefix, so this flag is a no-op for an ASM deployment.
 const (
 	// ControlGroupASMOnly always derives the any-source FF0x prefix from
-	// the scope table, ignoring -source-mode. Pre-fix behaviour.
+	// the scope table, ignoring -source-mode. Pre-fix behavior.
 	ControlGroupASMOnly = "asm-only"
 
 	// ControlGroupBoth derives both prefixes. A receiver joins both; a

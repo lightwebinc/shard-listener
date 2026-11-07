@@ -292,7 +292,7 @@ type Config struct {
 	AutoConfigHysteresis     time.Duration // 0 ⇒ 2 × AnnounceInterval (per BRC-139)
 	AutoJoinFromManifest     bool          // listener-only: union(-shard-include, pilot_groups)
 	AutoConfigLiveResharding bool          // opt-in bridging mode (default: restart on adopt)
-	AutoConfigBridgingWindow time.Duration // 0 ⇒ honour pilot TransitionEpoch verbatim
+	AutoConfigBridgingWindow time.Duration // 0 ⇒ honor pilot TransitionEpoch verbatim
 
 	// BRC-148 BEEF object plane (listener side). The plane is joined when
 	// topics and/or explicit groups are configured; otherwise the listener
@@ -346,7 +346,7 @@ type Config struct {
 	// EgressDedupRedisAddr/Prefix/TTL when the new flags are not set.
 	TxidDedupAddr   string        // DEPRECATED alias for EgressDedupRedisAddr
 	TxidDedupPrefix string        // DEPRECATED alias for EgressDedupPrefix
-	TxidDedupTTL    time.Duration // DEPRECATED alias for EgressDedupTTL
+	TxidDedupTTL    time.Duration // DEPRECATED alias for EgressDedupTTL2 (-egress-dedup-ttl-redis)
 
 	DeploymentID         string
 	NodeID               string
@@ -480,7 +480,7 @@ func Load() (*Config, error) {
 	flag.DurationVar(&c.ReassemblyMaxAge, "reassembly-max-age", envDuration("REASSEMBLY_MAX_AGE", 2*time.Minute),
 		"BRC-130: cap on how long a reassembly slot is held past its TTL while repair of its missing fragments is in progress; size it above the NACK ladder at the slowest repair round trip")
 	flag.BoolVar(&c.NACKTailProbe, "nack-tail-probe", envBool("NACK_TAIL_PROBE", true),
-		"BRC-126: speculatively NACK the next expected SeqNum on a flow that has gone quiet. Gap detection is otherwise inferential (frame N is only known lost when N+1 arrives), so the last frames before a sender idles are invisible. Uses the existing MISS response — no protocol change")
+		"BRC-126: speculatively NACK the next expected SeqNum on a flow that has gone quiet. Gap detection is otherwise inferential (frame N is only known lost when N+1 arrives), so the last frames before a sender idles are invisible. Uses the existing MISS response; no protocol change")
 	flag.Float64Var(&c.NACKTailProbeIdleFactor, "nack-tail-probe-idle-factor", envFloat("NACK_TAIL_PROBE_IDLE_FACTOR", 4.0),
 		"BRC-126: multiple of the flow's own smoothed inter-arrival before silence counts as abnormal")
 	flag.DurationVar(&c.NACKTailProbeMinIdle, "nack-tail-probe-min-idle", envDuration("NACK_TAIL_PROBE_MIN_IDLE", 500*time.Millisecond),
@@ -518,7 +518,7 @@ func Load() (*Config, error) {
 	flag.BoolVar(&c.AutoConfigLiveResharding, "live-resharding", envBool("LIVE_RESHARDING", false),
 		"opt-in BRC-139 live-resharding bridging mode (default: restart on ShardBits adoption)")
 	flag.DurationVar(&c.AutoConfigBridgingWindow, "bridging-window", envDuration("BRIDGING_WINDOW", 0),
-		"local floor on bridging duration; 0 ⇒ honour pilot TransitionEpoch verbatim")
+		"local floor on bridging duration; 0 ⇒ honor pilot TransitionEpoch verbatim")
 	subtreeGroupsFlag := flag.String("subtree-groups", envStr("SUBTREE_GROUPS", ""),
 		"comma-separated 32-char hex group IDs to subscribe (BRC-127)")
 	flag.DurationVar(&c.SubtreeGroupDefaultTTL, "subtree-group-default-ttl",
@@ -557,7 +557,7 @@ func Load() (*Config, error) {
 	flag.StringVar(&c.TxidDedupPrefix, "txid-dedup-prefix", envStr("TXID_DEDUP_PREFIX", ""),
 		"DEPRECATED: use -egress-dedup-prefix. Redis key prefix for TxID dedup entries")
 	flag.DurationVar(&c.TxidDedupTTL, "txid-dedup-ttl", envDuration("TXID_DEDUP_TTL", 0),
-		"DEPRECATED: use -egress-dedup-ttl. TTL for TxID dedup Redis entries")
+		"DEPRECATED: use -egress-dedup-ttl-redis. TTL for TxID dedup Redis entries")
 
 	flag.StringVar(&c.DeploymentID, "deployment-id", envStr("DEPLOYMENT_ID", ""),
 		"per-deployment dedup identifier; HA siblings must share the same value (default: hostname)")
@@ -613,7 +613,7 @@ func Load() (*Config, error) {
 	beefTopicsFlag := flag.String("beef-topics", envStr("BEEF_TOPICS", ""),
 		"comma-separated BRC-148 overlay topics to elect (names or 64-hex TopicIDs); derives plane joins + the topic filter")
 	beefGroupsFlag := flag.String("beef-groups", envStr("BEEF_GROUPS", ""),
-		"comma-separated plane-relative BRC-148 group indices to join (aggregator mode — no topic restriction)")
+		"comma-separated plane-relative BRC-148 group indices to join (aggregator mode: no topic restriction)")
 	beefBits := flag.Uint("beef-shard-bits", uint(envInt("BEEF_SHARD_BITS", 0)),
 		"BRC-148 BEEF plane shard-bit width (0-12, 0 = single group); must match proxy")
 	beefMaxObject := flag.Int("beef-max-object-bytes", envInt("BEEF_MAX_OBJECT_BYTES", 1<<20),

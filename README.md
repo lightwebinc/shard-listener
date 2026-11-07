@@ -91,7 +91,7 @@ A Kubernetes Helm chart is published from a dedicated chart repository:
 - Repository: [`charts/shard-listener`](https://github.com/lightwebinc/charts/tree/main/charts/shard-listener)
 - Install: `helm install shard-listener oci://ghcr.io/lightwebinc/charts/shard-listener` (add `--version` to pin a released chart)
 
-Supports `workloadType=Deployment` (default) and `workloadType=DaemonSet`. Every flag accepted by this binary is exposed under `.config` in the chart's `values.yaml`. The chart hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication. See the chart README for the full reference.
+Supports `workloadType=Deployment` (default) and `workloadType=DaemonSet`. Most flags accepted by this binary are exposed under `.config` in the chart's `values.yaml`; the rest are set through `extraEnv`. The chart hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication. See the chart README for the full reference.
 
 ## Releases
 

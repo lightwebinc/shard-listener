@@ -79,7 +79,7 @@ type Config struct {
 	// EgressPrefix is appended with ":<DeploymentID>:" before use, so the
 	// final key shape is "<EgressPrefix><DeploymentID>:<hex-txid>".
 	// DeploymentID empty falls back to a single-deployment legacy key shape
-	// "<EgressPrefix><hex-txid>" — preserves behaviour of the old single-key
+	// "<EgressPrefix><hex-txid>" ; preserves behavior of the old single-key
 	// txdedup.
 	EgressBackend   cache.Backend
 	EgressRedisAddr string

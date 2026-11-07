@@ -1165,7 +1165,7 @@ shard-listener \
 
 ## Helm chart
 
-Every flag documented in this file is exposed under `.config` in the corresponding Helm chart's `values.yaml`. See the chart repository for installation snippets and the `values.schema.json` for validation rules.
+Most flags documented in this file are exposed under `.config` in the Helm chart's `values.yaml`; the rest (for example `-control-group-compat`, `-manifest-beacon-port`, `-reassembly-ttl`, `-reassembly-max-age`, the NACK tail-probe family, `-rebucket-relay`, `-retry-tee`) are set through `extraEnv`. See the chart repository for installation snippets and the `values.schema.json` for validation rules.
 
 Chart: [`charts/shard-listener`](https://github.com/lightwebinc/charts/tree/main/charts/shard-listener). Supports `workloadType=Deployment | DaemonSet`; hardcodes `NUM_WORKERS=1` to avoid SO_REUSEPORT multicast duplication.
 
