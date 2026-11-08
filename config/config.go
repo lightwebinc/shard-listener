@@ -60,7 +60,7 @@
 //	-nack-tail-probe-min-idle          NACK_TAIL_PROBE_MIN_IDLE           500ms            Floor on the tail-probe idle threshold
 //	-nack-tail-probe-max-misses        NACK_TAIL_PROBE_MAX_MISSES         3                Stop probing after this many consecutive MISS answers
 //	-nack-max-flows                    NACK_MAX_FLOWS                     100000           Cap on tracked per-source flows (0 = unbounded)
-//	-nack-max-forward-jump             NACK_MAX_FORWARD_JUMP              4096             Forward SeqNum jump beyond which a flow re-baselines
+//	-nack-max-forward-jump             NACK_MAX_FORWARD_JUMP              4096             Largest loss burst a flow repairs; a larger jump re-baselines
 //	-beacon-enabled                    BEACON_ENABLED                     true             Enable ADVERT beacon listener
 //	-beacon-port                       BEACON_PORT                        9300             UDP port for beacon reception
 //	-beacon-scope                      BEACON_SCOPE                       site             Multicast scope for beacon groups
@@ -514,7 +514,7 @@ func Load() (*Config, error) {
 	flag.IntVar(&c.NACKMaxFlows, "nack-max-flows", envInt("NACK_MAX_FLOWS", 100000),
 		"cap on tracked per-source flows (flood guard; new sources past the cap still forward but skip NACK recovery until idle flows age out); 0 = unbounded")
 	flag.IntVar(&c.NACKMaxForwardJump, "nack-max-forward-jump", envInt("NACK_MAX_FORWARD_JUMP", 4096),
-		"forward SeqNum jump beyond which a flow re-baselines (emitter change, e.g. anycast failover) instead of registering a phantom gap range; 0 = default 4096")
+		"largest loss burst a flow repairs: every SeqNum missing from a forward jump up to this size is NACKed; a larger jump re-baselines as an emitter change (e.g. anycast failover); 0 = default 4096")
 	flag.BoolVar(&c.BeaconEnabled, "beacon-enabled", envBool("BEACON_ENABLED", true),
 		"enable ADVERT beacon listener for dynamic endpoint discovery")
 	flag.IntVar(&c.BeaconPort, "beacon-port", envInt("BEACON_PORT", 9300),

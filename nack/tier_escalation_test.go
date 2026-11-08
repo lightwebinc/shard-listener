@@ -14,7 +14,9 @@ import (
 // mockEndpoint is a small UDP server that replies to every NACK with a fixed
 // MsgType. If respond is MsgTypeMISS for the first `missThen` requests and
 // MsgTypeACK afterwards, the endpoint simulates a deep-tier cache that
-// eventually warms up.
+// eventually warms up. An ACK is the deployed unicast-back repair: the frame
+// on the NACK socket, then a unicast-flagged ACK, because an ACK alone never
+// closes a gap. Trackers under test register a recover callback to take it.
 type mockEndpoint struct {
 	conn         net.PacketConn
 	addr         *net.UDPAddr
@@ -59,12 +61,15 @@ func (m *mockEndpoint) run() {
 		}
 		resp := nack.MsgTypeMISS
 		var seqNum uint64
+		var flags byte
 		if n > m.missCount {
 			resp = nack.MsgTypeACK
 			seqNum = 200
+			flags = 0x02 // unicast sent
+			_, _ = m.conn.WriteTo(dataFrame(), src)
 		}
 		var out [nack.ResponseSize]byte
-		nack.EncodeResponse(&nack.Response{MsgType: resp, Flags: 0x01, SeqNum: seqNum}, out[:])
+		nack.EncodeResponse(&nack.Response{MsgType: resp, Flags: flags, SeqNum: seqNum}, out[:])
 		_, _ = m.conn.WriteTo(out[:], src)
 	}
 }
@@ -105,6 +110,7 @@ func TestTierEscalation_RecoversAfterDeepTierMiss(t *testing.T) {
 		GapTTL:     10 * time.Second,
 	}
 	tr := nack.New(cfg, nil, nil, nil, reg)
+	tr.SetRecoverFunc(func([]byte) bool { return true })
 
 	const flowA = uint64(0xAAAAAAAAAAAAAAAA)
 	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
@@ -148,6 +154,7 @@ func TestTierEscalation_LowerTiersNotRetriedAfterMiss(t *testing.T) {
 		GapTTL:     10 * time.Second,
 	}
 	tr := nack.New(cfg, nil, nil, nil, reg)
+	tr.SetRecoverFunc(func([]byte) bool { return true })
 
 	const flowB = uint64(0xBBBBBBBBBBBBBBBB)
 	tr.Observe(0, [32]byte{}, flowB, 1, [32]byte{}, nil)
