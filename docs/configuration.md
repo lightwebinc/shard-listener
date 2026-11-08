@@ -219,7 +219,8 @@ lane: its objects are withheld and counted in `bsl_lane_drops_total{reason="no_l
 
 Each value is a `host:port`. Every class is self-delimiting on its stream, so a
 bridge reads objects back to back. Lanes connect on first use and redial after
-a write error.
+a write error. While a bridge is down, the lane dials again on a backoff of
+250 ms doubling to 5 s, and objects in between are dropped as `bridge_down`.
 
 What it does not do:
 

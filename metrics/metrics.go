@@ -294,7 +294,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 	}, []string{"lane"})
 	r.promLaneDrops = promclient.NewCounterVec(promclient.CounterOpts{
 		Name: "bsl_lane_drops_total",
-		Help: "Objects a reference lane did not deliver: no_lane (class has no lane), send_error, not_strippable, bad_size",
+		Help: "Objects a reference lane did not deliver: no_lane (class has no lane), send_error, bridge_down (inside redial backoff), not_strippable, bad_size",
 	}, []string{"lane", "reason"})
 	r.promLaneReconnects = promclient.NewCounterVec(promclient.CounterOpts{
 		Name: "bsl_lane_reconnects_total",

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/objfmt"
@@ -32,6 +33,15 @@ type LaneRecorder interface {
 	LaneReconnect(lane string)
 }
 
+// laneRedialMin/Max bound how often a down lane dials its bridge again. A
+// bridge that blackholes connections costs a dial timeout per attempt, and the
+// lane mutex is shared by every worker, so without a backoff each object of
+// that class would stall the workers behind it.
+const (
+	laneRedialMin = 250 * time.Millisecond
+	laneRedialMax = 5 * time.Second
+)
+
 // Lanes is the reference lane: a class-routing [EgressSink] that delivers each
 // object class, header-stripped, to its own single bridge over one TCP
 // connection. It is generic fan-out to ONE consumer per class, configured by
@@ -55,7 +65,9 @@ type LaneRecorder interface {
 //   - BRC-135 headers ([HeaderSink]) → header lane, as the bare 80 bytes.
 //
 // A class with no lane returns a wrapped [ErrNotElected] and is counted as a
-// "no_lane" drop.
+// "no_lane" drop. While a lane's bridge is down, objects of that class are
+// dropped as "bridge_down" without a dial until the lane's redial backoff
+// (250 ms doubling to 5 s) has passed.
 type Lanes struct {
 	tx, subtree, block, header, beef *lane
 	rec                              LaneRecorder
@@ -68,11 +80,15 @@ var (
 	_ HeaderFanoutSink = (*Lanes)(nil)
 )
 
+// lane is one class's connection to its bridge. mu serializes writers and
+// guards every field.
 type lane struct {
-	name   string
-	mu     sync.Mutex
-	s      *Sender
-	dialed bool // a connection has been made before, so the next one is a reconnect
+	name    string
+	mu      sync.Mutex
+	s       *Sender
+	dialed  bool          // a connection has been made before, so the next one is a reconnect
+	backoff time.Duration // current redial backoff; 0 while the lane is up
+	retryAt time.Time     // earliest next dial while the lane is down
 }
 
 // NewLanes builds the reference lane. rec may be nil.
@@ -107,26 +123,39 @@ func NewLanes(addrs LaneAddrs, rec LaneRecorder) (*Lanes, error) {
 // HasHeader reports whether a header lane is configured.
 func (l *Lanes) HasHeader() bool { return l.header != nil }
 
+// drop counts one undelivered object.
 func (l *Lanes) drop(name, reason string) {
 	if l.rec != nil {
 		l.rec.LaneDrop(name, reason)
 	}
 }
 
+// notElected counts a class with no lane and returns the election outcome.
 func (l *Lanes) notElected(name string) error {
 	l.drop(name, "no_lane")
 	return fmt.Errorf("reference lane: no %s lane: %w", name, ErrNotElected)
 }
 
-// write sends one whole object on ln and books it.
+// write sends one whole object on ln and books it. A down lane inside its
+// redial backoff drops the object without dialing.
 func (l *Lanes) write(ln *lane, buf []byte) error {
 	ln.mu.Lock()
 	wasDown := ln.s.tcpConn == nil
+	if now := time.Now(); wasDown && ln.backoff > 0 && now.Before(ln.retryAt) {
+		wait := ln.retryAt.Sub(now)
+		ln.mu.Unlock()
+		l.drop(ln.name, "bridge_down")
+		return fmt.Errorf("reference lane: %s bridge down, next dial in %s", ln.name, wait.Round(time.Millisecond))
+	}
 	err := ln.s.sendTCP(buf)
 	up := ln.s.tcpConn != nil
 	reconnect := wasDown && up && ln.dialed
 	if up {
 		ln.dialed = true
+		ln.backoff = 0
+	} else {
+		ln.backoff = min(max(2*ln.backoff, laneRedialMin), laneRedialMax)
+		ln.retryAt = time.Now().Add(ln.backoff)
 	}
 	ln.mu.Unlock()
 

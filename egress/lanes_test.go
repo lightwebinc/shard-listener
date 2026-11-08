@@ -27,6 +27,7 @@ type laneVectors struct {
 	} `json:"vectors"`
 }
 
+// loadLaneVectors reads the corpus subset into id -> field -> hex string.
 func loadLaneVectors(t *testing.T) map[string]map[string]string {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/lane-vectors.json")
@@ -55,6 +56,7 @@ func loadLaneVectors(t *testing.T) map[string]map[string]string {
 	return out
 }
 
+// unhex decodes s or fails the test.
 func unhex(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(s)
@@ -75,6 +77,7 @@ type tcpBridge struct {
 	wg    sync.WaitGroup
 }
 
+// newTCPBridge listens on addr and collects every byte written to it.
 func newTCPBridge(t *testing.T, addr string) *tcpBridge {
 	t.Helper()
 	ln, err := net.Listen("tcp", addr)
@@ -115,14 +118,17 @@ func newTCPBridge(t *testing.T, addr string) *tcpBridge {
 	return b
 }
 
+// addr is the bridge's listening address.
 func (b *tcpBridge) addr() string { return b.ln.Addr().String() }
 
+// bytes returns a copy of everything received so far.
 func (b *tcpBridge) bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]byte(nil), b.buf.Bytes()...)
 }
 
+// connCount is the number of connections accepted.
 func (b *tcpBridge) connCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -153,6 +159,7 @@ func waitFor(t *testing.T, what string, want []byte, got func() []byte) {
 	t.Fatalf("%s lane carried\n got  %x\n want %x", what, got(), want)
 }
 
+// laneRec records the lane counters for assertions.
 type laneRec struct {
 	mu         sync.Mutex
 	objects    map[string]int
@@ -161,10 +168,12 @@ type laneRec struct {
 	reconnects map[string]int
 }
 
+// newLaneRec returns an empty recorder.
 func newLaneRec() *laneRec {
 	return &laneRec{objects: map[string]int{}, bytes: map[string]int{}, drops: map[string]int{}, reconnects: map[string]int{}}
 }
 
+// LaneObject implements LaneRecorder.
 func (r *laneRec) LaneObject(l string, n int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -172,18 +181,21 @@ func (r *laneRec) LaneObject(l string, n int) {
 	r.bytes[l] += n
 }
 
+// LaneDrop implements LaneRecorder.
 func (r *laneRec) LaneDrop(l, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.drops[l+"/"+reason]++
 }
 
+// LaneReconnect implements LaneRecorder.
 func (r *laneRec) LaneReconnect(l string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reconnects[l]++
 }
 
+// get reads one counter.
 func (r *laneRec) get(m map[string]int, k string) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -498,4 +510,43 @@ func TestNewLanes_RejectsBadAddress(t *testing.T) {
 	if _, err := NewLanes(LaneAddrs{Block: "no-port"}, nil); err == nil {
 		t.Fatal("NewLanes accepted a lane address with no port")
 	}
+}
+
+// TestLanes_DownBridgeBacksOff checks a lane whose bridge refuses does not dial
+// on every object: inside the redial backoff objects drop as bridge_down.
+func TestLanes_DownBridgeBacksOff(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close() // nothing listens: every dial is refused
+
+	rec := newLaneRec()
+	l, err := NewLanes(LaneAddrs{Header: addr}, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+
+	hdr := &frame.Frame{Payload: make([]byte, frame.BlockHeaderSize)}
+	for i := 0; i < 20; i++ {
+		if err := l.SendHeader(nil, hdr); err == nil {
+			t.Fatalf("send %d to a refused bridge succeeded", i)
+		}
+	}
+	if got := rec.get(rec.drops, "header/send_error"); got != 1 {
+		t.Errorf("send_error drops = %d, want exactly 1 (one dial, then backoff)", got)
+	}
+	if got := rec.get(rec.drops, "header/bridge_down"); got != 19 {
+		t.Errorf("bridge_down drops = %d, want 19", got)
+	}
+
+	// After the backoff a bridge that came up is dialed again.
+	b := newTCPBridge(t, addr)
+	time.Sleep(laneRedialMin + 50*time.Millisecond)
+	if err := l.SendHeader(nil, hdr); err != nil {
+		t.Fatalf("send after backoff with the bridge up: %v", err)
+	}
+	waitFor(t, "header", hdr.Payload, b.bytes)
 }
