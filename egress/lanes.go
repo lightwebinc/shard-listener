@@ -136,10 +136,15 @@ func (l *Lanes) notElected(name string) error {
 	return fmt.Errorf("reference lane: no %s lane: %w", name, ErrNotElected)
 }
 
-// write sends one whole object on ln and books it. A down lane inside its
-// redial backoff drops the object without dialing.
+// write sends one whole object on ln and books it. A connection the bridge has
+// closed (a restart, a graceful stop) is redialed before the write rather than
+// written into. A down lane inside its redial backoff drops the object without
+// dialing.
 func (l *Lanes) write(ln *lane, buf []byte) error {
 	ln.mu.Lock()
+	if ln.s.tcpConn != nil && peerClosed(ln.s.tcpConn) {
+		ln.s.closeTCP()
+	}
 	wasDown := ln.s.tcpConn == nil
 	if now := time.Now(); wasDown && ln.backoff > 0 && now.Before(ln.retryAt) {
 		wait := ln.retryAt.Sub(now)

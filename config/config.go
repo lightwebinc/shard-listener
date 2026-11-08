@@ -1210,6 +1210,11 @@ func (c *Config) validateLanes() error {
 	if c.Mode == "receiver" {
 		return fmt.Errorf("-lane-* flags deliver to bridges and cannot be used with -mode receiver")
 	}
+	// A subtree lane carries BRC-132 subtree data, which arrives only on the
+	// subtree-data group, so the lane implies the subscription.
+	if c.LaneSubtree != "" {
+		c.SubtreeDataEnabled = true
+	}
 	for _, l := range []struct{ flag, addr string }{
 		{"lane-tx", c.LaneTx}, {"lane-subtree", c.LaneSubtree}, {"lane-block", c.LaneBlock},
 		{"lane-header", c.LaneHeader}, {"lane-beef", c.LaneBEEF},

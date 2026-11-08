@@ -287,6 +287,9 @@ func TestLoad_Lanes(t *testing.T) {
 	if !c.Lanes() || c.LaneTx != "127.0.0.1:8725" || c.LaneHeader != "[::1]:9172" || c.LaneBEEF != "overlay:9171" {
 		t.Fatalf("lanes not loaded: %+v", c)
 	}
+	if !c.SubtreeDataEnabled {
+		t.Fatal("-lane-subtree did not enable the subtree-data subscription")
+	}
 
 	c, err = loadWithArgs(t, withIface(t)...)
 	if err != nil || c.Lanes() {

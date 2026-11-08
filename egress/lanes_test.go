@@ -440,8 +440,9 @@ func TestLanes_HeaderRejectsWrongSize(t *testing.T) {
 }
 
 // TestLanes_RedialAfterBridgeRestart checks a lane reconnects to a restarted
-// bridge on the same address and counts the reconnect. Objects written into
-// the dead connection are lost: the lane is at most once.
+// bridge on the same address and counts the reconnect. The bridge's close is
+// seen before the next write, so the first object after the restart is
+// delivered rather than written into the dead connection.
 func TestLanes_RedialAfterBridgeRestart(t *testing.T) {
 	first := newTCPBridge(t, "127.0.0.1:0")
 	addr := first.addr()
@@ -464,19 +465,19 @@ func TestLanes_RedialAfterBridgeRestart(t *testing.T) {
 	first.wg.Wait()
 	second := newTCPBridge(t, addr)
 
+	time.Sleep(20 * time.Millisecond) // let the bridge's FIN reach the lane socket
+
 	next := &frame.Frame{Payload: bytes.Repeat([]byte{0x02}, frame.BlockHeaderSize)}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && rec.get(rec.reconnects, "header") == 0 {
-		_ = l.SendHeader(nil, next)
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got := rec.get(rec.reconnects, "header"); got < 1 {
-		t.Fatalf("header reconnects = %d, want >= 1", got)
-	}
 	if err := l.SendHeader(nil, next); err != nil {
-		t.Fatalf("SendHeader after redial: %v", err)
+		t.Fatalf("first SendHeader after the restart: %v", err)
 	}
-	deadline = time.Now().Add(3 * time.Second)
+	if got := rec.get(rec.reconnects, "header"); got != 1 {
+		t.Fatalf("header reconnects = %d, want 1", got)
+	}
+	if got := rec.get(rec.drops, "header/send_error"); got != 0 {
+		t.Fatalf("header send_error drops = %d, want 0 (nothing written into the closed connection)", got)
+	}
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if got := second.bytes(); len(got) >= frame.BlockHeaderSize {
 			if !bytes.Equal(got[:frame.BlockHeaderSize], next.Payload) {
