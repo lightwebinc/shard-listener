@@ -168,6 +168,71 @@ else
     FAILED=$(( FAILED + 1 ))
 fi
 
+# ── Test 5: reference lane ────────────────────────────────────────────────────
+# Listener with -lane-tx, -lane-block and -lane-header, each to its own TCP
+# sink. Transaction frames reach the tx lane as bare payloads; native BRC-131
+# BlockAnnounce frames put their bare 80-byte header on the header lane and,
+# carrying no whole BRC-144 block, are dropped from the block lane as
+# not strippable. Nothing reaches a lane it was not routed to.
+echo ""
+echo "--- Test 5: reference lane (tx, header, block) ---"
+
+TX_COUNT=$NUM_GROUPS
+TX_SIZE=28
+HDR_COUNT=3
+
+sink-test-frames -tcp -port 9106 -bytes $(( TX_COUNT * TX_SIZE )) -timeout "$RECV_TIMEOUT" &
+S5T=$!
+sink-test-frames -tcp -port 9107 -bytes $(( HDR_COUNT * 80 )) -timeout "$RECV_TIMEOUT" &
+S5H=$!
+sink-test-frames -tcp -port 9108 -bytes 1 -timeout 0 &
+S5B=$!
+
+sleep 1
+
+shard-listener \
+    -iface lo -scope link -shard-bits "$SHARD_BITS" \
+    -listen-port 9005 -require-block-pow=false \
+    -lane-tx "127.0.0.1:9106" -lane-header "127.0.0.1:9107" -lane-block "127.0.0.1:9108" \
+    -metrics-addr ":9204" -workers 2 -debug &
+L5=$!
+
+sleep 1
+
+send-test-frames \
+    -addr "[::1]:9005" \
+    -shard-bits "$SHARD_BITS" -spread -count 1 -interval 50 -payload-size "$TX_SIZE"
+send-test-frames \
+    -addr "[::1]:9005" -block-announce -count "$HDR_COUNT" -interval 50
+
+wait "$S5T" && S5T_EXIT=0 || S5T_EXIT=$?
+wait "$S5H" && S5H_EXIT=0 || S5H_EXIT=$?
+
+sleep 1
+M5=$(curl -sf "http://127.0.0.1:9204/metrics") || M5=""
+lane_metric() {
+    printf '%s\n' "$M5" | grep "^$1{" | grep "$2" | awk '{sum += $2} END {print int(sum)}'
+}
+TX_OBJ=$(lane_metric bsl_lane_objects_total 'lane="tx"')
+HDR_OBJ=$(lane_metric bsl_lane_objects_total 'lane="header"')
+BLK_OBJ=$(lane_metric bsl_lane_objects_total 'lane="block"')
+BLK_DROP=$(lane_metric bsl_lane_drops_total 'reason="not_strippable"')
+EGR_ERR=$(lane_metric bsl_egress_errors_total 'worker=')
+
+kill "$L5" "$S5B" 2>/dev/null || true
+wait "$L5" 2>/dev/null || true
+wait "$S5B" 2>/dev/null || true
+
+if [ "$S5T_EXIT" -eq 0 ] && [ "$S5H_EXIT" -eq 0 ] \
+    && [ "${TX_OBJ:-0}" -eq "$TX_COUNT" ] && [ "${HDR_OBJ:-0}" -eq "$HDR_COUNT" ] \
+    && [ "${BLK_OBJ:-0}" -eq 0 ] && [ "${BLK_DROP:-0}" -eq "$HDR_COUNT" ]; then
+    echo "=== PASS: reference lane (tx=$TX_OBJ header=$HDR_OBJ block_not_strippable=$BLK_DROP) ==="
+    PASSED=$(( PASSED + 1 ))
+else
+    echo "=== FAIL: reference lane (tx_sink=$S5T_EXIT header_sink=$S5H_EXIT tx=${TX_OBJ:-0} header=${HDR_OBJ:-0} block=${BLK_OBJ:-0} block_not_strippable=${BLK_DROP:-0} egress_errors=${EGR_ERR:-0}) ==="
+    FAILED=$(( FAILED + 1 ))
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=== E2E results: $PASSED passed, $FAILED failed ==="

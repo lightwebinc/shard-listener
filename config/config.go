@@ -26,6 +26,11 @@
 //	-delivery-addrs                    DELIVERY_ADDRS                                      receiver mode: comma-separated delivery host:port fan-out set (empty=use -egress-addr)
 //	-egress-proto                      EGRESS_PROTO                       udp              udp | tcp
 //	-strip-header                      STRIP_HEADER                       true             Send payload-only (drop frame header)
+//	-lane-tx                           LANE_TX                                             Reference lane: TCP host:port for transactions (any -lane-* replaces -egress-addr)
+//	-lane-subtree                      LANE_SUBTREE                                        Reference lane: TCP host:port for BRC-143 subtrees
+//	-lane-block                        LANE_BLOCK                                          Reference lane: TCP host:port for BRC-144 blocks
+//	-lane-header                       LANE_HEADER                                         Reference lane: TCP host:port for bare 80-byte headers
+//	-lane-beef                         LANE_BEEF                                           Reference lane: TCP host:port for BRC-149 delivery records
 //	-mc-egress-enabled                 MC_EGRESS_ENABLED                  false            Enable multicast egress
 //	-mc-egress-iface                   MC_EGRESS_IFACE                    (=iface)         Output NIC for multicast send
 //	-mc-egress-port                    MC_EGRESS_PORT                     (=listen-port)   Egress group UDP port
@@ -186,6 +191,15 @@ type Config struct {
 	StripHeader    bool
 	RetryEndpoints []string // host:port list for NACK dispatch
 	RetryTee       string   // co-resident retry-endpoint tee-ingest host:port ("" = off)
+
+	// Reference lane (-lane-*): one TCP host:port per object class, each
+	// delivered header-stripped to a single bridge. Any one set replaces the
+	// single -egress-addr sink. Empty = that class has no lane.
+	LaneTx      string
+	LaneSubtree string
+	LaneBlock   string
+	LaneHeader  string
+	LaneBEEF    string
 
 	// Sharding
 	ShardBits      uint
@@ -426,6 +440,16 @@ func Load() (*Config, error) {
 		"downstream unicast host:port")
 	deliveryAddrsFlag := flag.String("delivery-addrs", envStr("DELIVERY_ADDRS", ""),
 		"receiver mode (-mode receiver): comma-separated delivery host:port set to fan every demuxed frame out to (envelope-preserving); empty falls back to -egress-addr")
+	flag.StringVar(&c.LaneTx, "lane-tx", envStr("LANE_TX", ""),
+		"reference lane: TCP host:port for transaction payloads (BRC-12 raw / BRC-30 EF); any -lane-* replaces -egress-addr")
+	flag.StringVar(&c.LaneSubtree, "lane-subtree", envStr("LANE_SUBTREE", ""),
+		"reference lane: TCP host:port for BRC-143 subtree objects")
+	flag.StringVar(&c.LaneBlock, "lane-block", envStr("LANE_BLOCK", ""),
+		"reference lane: TCP host:port for BRC-144 block objects")
+	flag.StringVar(&c.LaneHeader, "lane-header", envStr("LANE_HEADER", ""),
+		"reference lane: TCP host:port for bare 80-byte block headers (BRC-135 payload)")
+	flag.StringVar(&c.LaneBEEF, "lane-beef", envStr("LANE_BEEF", ""),
+		"reference lane: TCP host:port for BRC-149 BEEF delivery records")
 	flag.StringVar(&c.EgressProto, "egress-proto", envStr("EGRESS_PROTO", "udp"),
 		"egress protocol: udp | tcp")
 	flag.BoolVar(&c.StripHeader, "strip-header", envBool("STRIP_HEADER", true),
@@ -775,6 +799,10 @@ func Load() (*Config, error) {
 	// Validate egress protocol.
 	if c.EgressProto != "udp" && c.EgressProto != "tcp" {
 		return nil, fmt.Errorf("egress-proto must be udp or tcp, got %q", c.EgressProto)
+	}
+
+	if err := c.validateLanes(); err != nil {
+		return nil, err
 	}
 
 	// Default workers.
@@ -1166,4 +1194,37 @@ func parseGroupID(s string) (uint16, error) {
 		return 0, err
 	}
 	return uint16(n), nil
+}
+
+// Lanes reports whether any reference lane flag is set.
+func (c *Config) Lanes() bool {
+	return c.LaneTx != "" || c.LaneSubtree != "" || c.LaneBlock != "" || c.LaneHeader != "" || c.LaneBEEF != ""
+}
+
+// validateLanes checks the reference lane flags: each set lane is a host:port,
+// and lanes deliver to bridges, so they do not combine with receiver mode.
+func (c *Config) validateLanes() error {
+	if !c.Lanes() {
+		return nil
+	}
+	if c.Mode == "receiver" {
+		return fmt.Errorf("-lane-* flags deliver to bridges and cannot be used with -mode receiver")
+	}
+	// A subtree lane carries BRC-132 subtree data, which arrives only on the
+	// subtree-data group, so the lane implies the subscription.
+	if c.LaneSubtree != "" {
+		c.SubtreeDataEnabled = true
+	}
+	for _, l := range []struct{ flag, addr string }{
+		{"lane-tx", c.LaneTx}, {"lane-subtree", c.LaneSubtree}, {"lane-block", c.LaneBlock},
+		{"lane-header", c.LaneHeader}, {"lane-beef", c.LaneBEEF},
+	} {
+		if l.addr == "" {
+			continue
+		}
+		if _, _, err := net.SplitHostPort(l.addr); err != nil {
+			return fmt.Errorf("-%s %q: %w", l.flag, l.addr, err)
+		}
+	}
+	return nil
 }

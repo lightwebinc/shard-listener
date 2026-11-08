@@ -202,6 +202,44 @@ multicast fabric).
 
 ---
 
+## Reference lane (one bridge per class)
+
+The reference lane delivers each object class to a single bridge, each class on
+its own TCP connection. Setting any `-lane-*` flag replaces the single
+`-egress-addr` downstream for every worker. A class whose flag is empty has no
+lane: its objects are withheld and counted in `bsl_lane_drops_total{reason="no_lane"}`.
+
+| Flag / env | Carries | Form on the lane |
+|------------|---------|------------------|
+| `-lane-tx` / `LANE_TX` | Transactions | The BRC-12 or BRC-30 payload as sent; BRC-134 anchors go to no lane |
+| `-lane-subtree` / `LANE_SUBTREE` | Subtrees | BRC-143 subtree object |
+| `-lane-block` / `LANE_BLOCK` | Blocks | BRC-144 block object; a block frame carrying no whole block is dropped as `not_strippable` |
+| `-lane-header` / `LANE_HEADER` | Block headers | The bare 80-byte header from each BRC-135 header the listener emits |
+| `-lane-beef` / `LANE_BEEF` | BEEF objects | BRC-149 delivery record |
+
+Each value is a `host:port`. Every class is self-delimiting on its stream, so a
+bridge reads objects back to back. Lanes connect on first use and redial after
+a write error. A bridge never writes on its lane, so before each write the lane
+checks whether the bridge has closed the connection (a restart or a graceful
+stop) and redials instead of writing into it. While a bridge is down, the lane
+dials again on a backoff of 250 ms doubling to 5 s, and objects in between are
+dropped as `bridge_down`.
+
+What it does not do:
+
+- One bridge per class, set by static flags. There is no consumer table,
+  election, or runtime reconfiguration.
+- No retransmission. A lane carries what the listener holds, at most once; an
+  object written into a broken connection is lost. Gap repair happens on the
+  fabric side (NACK and the retry endpoint) before delivery.
+- No metering, delivery limits, or suspend and resume.
+
+`-lane-subtree` turns on the subtree-data subscription (`-subtree-data-enabled`),
+since subtree data arrives only on that group. Not valid with `-mode receiver`.
+
+Counters, labeled by `lane`: `bsl_lane_objects_total`, `bsl_lane_bytes_total`,
+`bsl_lane_drops_total` (with `reason`), and `bsl_lane_reconnects_total`.
+
 ## Multicast Egress (domain bridging)
 
 When multicast egress is enabled, every frame that passes the shard/subtree
