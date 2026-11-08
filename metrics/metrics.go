@@ -71,6 +71,12 @@ type Recorder struct {
 	promRetryTeeErrors       *promclient.CounterVec // worker
 	promRetryTeeDropped      *promclient.CounterVec // worker
 
+	// Reference lane counters (egress.Lanes): operational, per lane.
+	promLaneObjects    *promclient.CounterVec // lane
+	promLaneBytes      *promclient.CounterVec // lane
+	promLaneDrops      *promclient.CounterVec // lane, reason
+	promLaneReconnects *promclient.CounterVec // lane
+
 	// BRC-130 reassembly counters: cold path (only fires on > MTU frames).
 	frameReassemblyStarted      metric.Int64Counter
 	frameReassemblyCompleted    metric.Int64Counter
@@ -278,12 +284,29 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		Name: "bsl_retry_tee_dropped_total",
 		Help: "Received data frames the retry tee dropped because its sender queue was full (frame NOT cached locally; repair for it falls to other endpoints). The receive path never waits on the tee.",
 	}, []string{"worker"})
+	r.promLaneObjects = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_lane_objects_total",
+		Help: "Objects written to a reference lane (-lane-*), by lane",
+	}, []string{"lane"})
+	r.promLaneBytes = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_lane_bytes_total",
+		Help: "Bytes written to a reference lane (-lane-*), by lane",
+	}, []string{"lane"})
+	r.promLaneDrops = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_lane_drops_total",
+		Help: "Objects a reference lane did not deliver: no_lane (class has no lane), send_error, not_strippable, bad_size",
+	}, []string{"lane", "reason"})
+	r.promLaneReconnects = promclient.NewCounterVec(promclient.CounterOpts{
+		Name: "bsl_lane_reconnects_total",
+		Help: "Reference lane connections re-established after a write error",
+	}, []string{"lane"})
 	for _, c := range []promclient.Collector{
 		r.promFramesReceived, r.promFramesDropped, r.promFramesForwarded,
 		r.promFramesInvalidPayload, r.promFramesDeduped, r.promFramesTxDeduped,
 		r.promEgressErrors, r.promMCEgressErrors, r.promBundlesRebucketed,
 		r.promRebucketUnguarded, r.promRetryTeeFrames, r.promRetryTeeErrors,
-		r.promRetryTeeDropped,
+		r.promRetryTeeDropped, r.promLaneObjects, r.promLaneBytes, r.promLaneDrops,
+		r.promLaneReconnects,
 	} {
 		if regErr := reg.Register(c); regErr != nil {
 			return nil, fmt.Errorf("metrics: register hot-path counter: %w", regErr)
@@ -719,6 +742,22 @@ func (r *Recorder) EgressError(workerID int) {
 // MCEgressError records a send failure on the multicast egress path.
 func (r *Recorder) MCEgressError(workerID int) {
 	r.promMCEgressErrors.WithLabelValues(strconv.Itoa(workerID)).Inc()
+}
+
+// LaneObject records one object written to reference lane name.
+func (r *Recorder) LaneObject(name string, bytes int) {
+	r.promLaneObjects.WithLabelValues(name).Inc()
+	r.promLaneBytes.WithLabelValues(name).Add(float64(bytes))
+}
+
+// LaneDrop records one object a reference lane did not deliver.
+func (r *Recorder) LaneDrop(name, reason string) {
+	r.promLaneDrops.WithLabelValues(name, reason).Inc()
+}
+
+// LaneReconnect records a reference lane connection re-established.
+func (r *Recorder) LaneReconnect(name string) {
+	r.promLaneReconnects.WithLabelValues(name).Inc()
 }
 
 // HeaderForwarded records a block header extracted and forwarded to header egress.

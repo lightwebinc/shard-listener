@@ -178,14 +178,7 @@ func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame) {
 		}
 	}
 
-	if err := w.egr.SendBeef(raw, bf); err != nil {
-		if w.rec != nil {
-			w.rec.EgressError(w.id)
-		}
-		w.log.Debug("beef egress send error", "err", err)
-	} else if w.rec != nil {
-		w.rec.FrameForwarded(w.id, w.egr.Proto())
-	}
+	w.bookEgress(w.egr.SendBeef(raw, bf), "beef egress send error")
 
 	// Gap tracking: BEEF flows are per (sender, group); the NACK's SubtreeID
 	// field is zero per BRC-148 (responders ignore it).

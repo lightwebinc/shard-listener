@@ -288,6 +288,24 @@ func (w *Worker) SetHeaderMCastEgress(s *egress.MCastSender) { w.headerMCastEgr 
 // delivery tier derives its own headers; feeding both would double-emit).
 func (w *Worker) SetHeaderFanout(s egress.HeaderSink) { w.headerFanout = s }
 
+// bookEgress records the outcome of one main-egress send. A frame withheld by
+// election ([egress.ErrNotElected], from a class router with no lane for the
+// class) is neither forwarded nor an egress failure: the router counts it.
+func (w *Worker) bookEgress(err error, msg string) {
+	switch {
+	case err == nil:
+		if w.rec != nil {
+			w.rec.FrameForwarded(w.id, w.egr.Proto())
+		}
+	case egress.IsNotElected(err):
+	default:
+		if w.rec != nil {
+			w.rec.EgressError(w.id)
+		}
+		w.log.Debug(msg, "err", err)
+	}
+}
+
 // SetRebucketRelay marks this listener an intentional BRC-142 re-bucket relay.
 // A relay re-buckets without raising the unguarded-rebucket alarm; a bare
 // listener (default) raises it, since a generation mismatch is a misconfig.
@@ -850,16 +868,7 @@ func (w *Worker) processFrame(raw []byte) bool {
 		}
 	}
 
-	if err := w.egr.Send(raw, f); err != nil {
-		if w.rec != nil {
-			w.rec.EgressError(w.id)
-		}
-		w.log.Debug("egress send error", "err", err)
-	} else {
-		if w.rec != nil {
-			w.rec.FrameForwarded(w.id, w.egr.Proto())
-		}
-	}
+	w.bookEgress(w.egr.Send(raw, f), "egress send error")
 
 	// Multicast egress fan-out: fires independently of unicast outcome.
 	if w.mcastEgr != nil {
@@ -1139,14 +1148,7 @@ func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 			out := buf[:n]
 
 			if !bundleAware {
-				if err := w.egr.Send(out, mf); err != nil {
-					if w.rec != nil {
-						w.rec.EgressError(w.id)
-					}
-					w.log.Debug("egress send error", "err", err)
-				} else if w.rec != nil {
-					w.rec.FrameForwarded(w.id, w.egr.Proto())
-				}
+				w.bookEgress(w.egr.Send(out, mf), "egress send error")
 			}
 
 			if w.mcastEgr != nil {
@@ -1221,16 +1223,7 @@ func (w *Worker) processBlockFrame(raw []byte) bool {
 		return false
 	}
 
-	if err := w.egr.SendBlock(raw, bf); err != nil {
-		if w.rec != nil {
-			w.rec.EgressError(w.id)
-		}
-		w.log.Debug("block egress send error", "err", err)
-	} else {
-		if w.rec != nil {
-			w.rec.FrameForwarded(w.id, w.egr.Proto())
-		}
-	}
+	w.bookEgress(w.egr.SendBlock(raw, bf), "block egress send error")
 
 	// Block header egress: extract and retransmit the 80-byte header.
 	if w.headerEgr != nil || w.headerMCastEgr != nil || w.headerFanout != nil {
@@ -1360,16 +1353,7 @@ func (w *Worker) processSubtreeDataFrame(raw []byte) {
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc132")
 	}
 
-	if err := w.egr.SendSubtreeData(raw, sf); err != nil {
-		if w.rec != nil {
-			w.rec.EgressError(w.id)
-		}
-		w.log.Debug("subtree data egress send error", "err", err)
-	} else {
-		if w.rec != nil {
-			w.rec.FrameForwarded(w.id, w.egr.Proto())
-		}
-	}
+	w.bookEgress(w.egr.SendSubtreeData(raw, sf), "subtree data egress send error")
 
 	// Gap tracking on the subtree data flow uses SubtreeID as the flow scope.
 	if w.tracker != nil && sf.SeqNum != 0 {
@@ -1433,16 +1417,7 @@ func (w *Worker) processAnchorFrame(raw []byte) {
 		}
 	}
 
-	if err := w.egr.Send(raw, f); err != nil {
-		if w.rec != nil {
-			w.rec.EgressError(w.id)
-		}
-		w.log.Debug("anchor egress send error", "err", err)
-	} else {
-		if w.rec != nil {
-			w.rec.FrameForwarded(w.id, w.egr.Proto())
-		}
-	}
+	w.bookEgress(w.egr.Send(raw, f), "anchor egress send error")
 
 	// Gap tracking uses a virtual anchor groupIdx (0xFFF9) that matches the
 	// proxy's HashKey derivation for BRC-134 frames. This gives anchors their
@@ -1492,16 +1467,7 @@ func (w *Worker) DeliverReassembledBlock(payload []byte, bf *frame.BlockFrame) {
 		return
 	}
 
-	if err := w.egr.SendBlock(raw, bf); err != nil {
-		if w.rec != nil {
-			w.rec.EgressError(w.id)
-		}
-		w.log.Debug("reassembled block egress send error", "err", err)
-	} else {
-		if w.rec != nil {
-			w.rec.FrameForwarded(w.id, w.egr.Proto())
-		}
-	}
+	w.bookEgress(w.egr.SendBlock(raw, bf), "reassembled block egress send error")
 
 	// Block header egress: extract and retransmit the 80-byte header.
 	if w.headerEgr != nil || w.headerMCastEgr != nil || w.headerFanout != nil {
@@ -1543,16 +1509,7 @@ func (w *Worker) DeliverReassembledSubtreeData(payload []byte, sf *frame.Subtree
 		w.rec.FrameReceived(w.id, w.iface.Name, "brc132_reassembled")
 	}
 
-	if err := w.egr.SendSubtreeData(raw, sf); err != nil {
-		if w.rec != nil {
-			w.rec.EgressError(w.id)
-		}
-		w.log.Debug("reassembled subtree data egress send error", "err", err)
-	} else {
-		if w.rec != nil {
-			w.rec.FrameForwarded(w.id, w.egr.Proto())
-		}
-	}
+	w.bookEgress(w.egr.SendSubtreeData(raw, sf), "reassembled subtree data egress send error")
 
 	if w.tracker != nil && sf.SeqNum != 0 {
 		w.tracker.ObserveFrom(w.id, uint32(shard.GroupSubtreeDataAnnounce), sf.SubtreeID, sf.HashKey, sf.SeqNum, sf.SubtreeID, w.curSource)
@@ -1621,15 +1578,7 @@ func (w *Worker) DeliverReassembled(payload []byte, f *frame.Frame) {
 		return
 	}
 
-	if err := w.egr.Send(raw, f); err != nil {
-		if w.rec != nil {
-			w.rec.EgressError(w.id)
-		}
-	} else {
-		if w.rec != nil {
-			w.rec.FrameForwarded(w.id, w.egr.Proto())
-		}
-	}
+	w.bookEgress(w.egr.Send(raw, f), "egress send error")
 
 	if w.mcastEgr != nil {
 		if err := w.mcastEgr.Send(raw, f, groupIdx); err != nil {

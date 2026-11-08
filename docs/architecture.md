@@ -574,6 +574,26 @@ payload), what a downstream node/miner expects; `strip-header=false` sends the
 complete 92-byte BRC-124/BRC-128 frame verbatim, for downstreams that re-read
 frames (e.g. domain bridging).
 
+### Reference lane
+
+With any `-lane-*` flag set, every worker shares one `egress.Lanes` in place of
+its `egress.Sender`. `egress.Lanes` is a class router behind the same
+`EgressSink` seam, plus the optional `HeaderSink`. Each lane is one TCP
+`egress.Sender` guarded by a mutex, so a bridge sees exactly one connection per
+class:
+
+| Seam method | Lane | Bytes written |
+|-------------|------|---------------|
+| `Send` | tx | `f.Payload` (BRC-134 anchors: no lane) |
+| `SendSubtreeData` | subtree | `objfmt.StripBytes(ClassSubtree)` |
+| `SendBlock` | block | `objfmt.StripBytes(ClassBlock)` |
+| `SendHeader` | header | the 80-byte payload of the emitted BRC-135 frame |
+| `SendBeef` | beef | `objfmt.EncodeBEEFDelivery` |
+
+A class with no lane returns a wrapped `egress.ErrNotElected`. The worker books
+that as neither forwarded nor an egress error; the router counts it as a
+`no_lane` drop. `SendRaw` is class-less and reaches no lane.
+
 ### Multicast egress (domain bridging)
 
 When `-mc-egress-enabled=true`, each worker also holds an `egress.MCastSender`

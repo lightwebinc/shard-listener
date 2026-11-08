@@ -276,3 +276,27 @@ func TestLoad_AutoConfigValidation(t *testing.T) {
 		t.Errorf("valid live-resharding config rejected: %v", err)
 	}
 }
+
+func TestLoad_Lanes(t *testing.T) {
+	c, err := loadWithArgs(t, withIface(t,
+		"-lane-tx=127.0.0.1:8725", "-lane-subtree=bridge:9143", "-lane-block=bridge:9144",
+		"-lane-header=[::1]:9172", "-lane-beef=overlay:9171")...)
+	if err != nil {
+		t.Fatalf("load with all lanes: %v", err)
+	}
+	if !c.Lanes() || c.LaneTx != "127.0.0.1:8725" || c.LaneHeader != "[::1]:9172" || c.LaneBEEF != "overlay:9171" {
+		t.Fatalf("lanes not loaded: %+v", c)
+	}
+
+	c, err = loadWithArgs(t, withIface(t)...)
+	if err != nil || c.Lanes() {
+		t.Fatalf("default load: lanes=%v err=%v; want no lanes", c != nil && c.Lanes(), err)
+	}
+
+	if _, err := loadWithArgs(t, withIface(t, "-lane-block=no-port")...); err == nil {
+		t.Fatal("accepted a lane address with no port")
+	}
+	if _, err := loadWithArgs(t, withIface(t, "-mode=receiver", "-lane-tx=127.0.0.1:8725")...); err == nil {
+		t.Fatal("accepted -lane-* in receiver mode")
+	}
+}

@@ -540,6 +540,24 @@ func run() error {
 
 	// Start workers. Collect them so the auto-join applier can drive
 	// runtime AddGroup/RemoveGroup against every worker fd.
+	// Reference lane: one shared class router, one TCP connection per lane,
+	// in place of the per-worker single egress sink.
+	var lanes *egress.Lanes
+	if cfg.Lanes() {
+		var err error
+		lanes, err = egress.NewLanes(egress.LaneAddrs{
+			Tx: cfg.LaneTx, Subtree: cfg.LaneSubtree, Block: cfg.LaneBlock,
+			Header: cfg.LaneHeader, BEEF: cfg.LaneBEEF,
+		}, rec)
+		if err != nil {
+			return fmt.Errorf("reference lane: %w", err)
+		}
+		defer func() { _ = lanes.Close() }()
+		slog.Info("reference lane enabled",
+			"tx", cfg.LaneTx, "subtree", cfg.LaneSubtree, "block", cfg.LaneBlock,
+			"header", cfg.LaneHeader, "beef", cfg.LaneBEEF)
+	}
+
 	workers = make([]*listener.Worker, 0, cfg.NumWorkers)
 	for i := range cfg.NumWorkers {
 		// Receiver mode with a delivery set fans every demuxed frame out to each
@@ -547,7 +565,9 @@ func run() error {
 		// (collapsed's behaviour, and receiver's degenerate single-destination case).
 		var egr egress.EgressSink
 		var err error
-		if cfg.Mode == "receiver" && len(cfg.DeliveryAddrs) > 0 {
+		if lanes != nil {
+			egr = lanes
+		} else if cfg.Mode == "receiver" && len(cfg.DeliveryAddrs) > 0 {
 			egr, err = egress.NewMulti(cfg.DeliveryAddrs, cfg.EgressProto)
 		} else {
 			egr, err = egress.New(cfg.EgressAddr, cfg.EgressProto, cfg.StripHeader)
@@ -620,6 +640,9 @@ func run() error {
 		}
 		if headerMCastEgr != nil {
 			w.SetHeaderMCastEgress(headerMCastEgr)
+		}
+		if lanes != nil && lanes.HasHeader() {
+			w.SetHeaderFanout(lanes)
 		}
 		// BRC-135 emitter identity: stable per-emitter HashKey computed once
 		// using the listener's primary IPv6 on the configured interface,
