@@ -3,6 +3,7 @@ package nack_test
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -342,6 +343,7 @@ func TestSendNACK_ACK_DoesNotCloseGapAlone(t *testing.T) {
 	}
 	defer func() { _ = mockConn.Close() }()
 
+	var nacks atomic.Int64
 	go func() {
 		buf := make([]byte, 256)
 		for {
@@ -349,6 +351,7 @@ func TestSendNACK_ACK_DoesNotCloseGapAlone(t *testing.T) {
 			if err != nil {
 				return
 			}
+			nacks.Add(1)
 			var resp [nack.ResponseSize]byte
 			nack.EncodeResponse(&nack.Response{
 				MsgType: nack.MsgTypeACK,
@@ -380,6 +383,9 @@ func TestSendNACK_ACK_DoesNotCloseGapAlone(t *testing.T) {
 	// Well past the first exchange (sweep 100 ms, response ~1 ms) and inside
 	// the first backoff (250 to 500 ms at the default base).
 	time.Sleep(200 * time.Millisecond)
+	if nacks.Load() < 1 {
+		t.Fatal("no NACK reached the retry endpoint, so no ACK was answered")
+	}
 	if got := tr.PendingGaps(); got != 1 {
 		t.Errorf("after a multicast ACK with no copy: PendingGaps = %d, want 1 (the ACK alone must not close it)", got)
 	}
@@ -622,6 +628,15 @@ func TestSendNACK_UnicastACK_NoData_NotCancelled(t *testing.T) {
 // -beacon-flags-unicast is on (the deployed default).
 func unicastRepairServer(t *testing.T, flags byte, withData bool) net.PacketConn {
 	t.Helper()
+	c, _ := countingRepairServer(t, flags, withData)
+	return c
+}
+
+// countingRepairServer is unicastRepairServer, also counting the NACKs it
+// answers.
+func countingRepairServer(t *testing.T, flags byte, withData bool) (net.PacketConn, *atomic.Int64) {
+	t.Helper()
+	var nacks atomic.Int64
 	c, err := net.ListenPacket("udp", "[::1]:0")
 	if err != nil {
 		t.Skipf("UDP loopback unavailable: %v", err)
@@ -634,6 +649,7 @@ func unicastRepairServer(t *testing.T, flags byte, withData bool) net.PacketConn
 			if err != nil {
 				return
 			}
+			nacks.Add(1)
 			if withData {
 				_, _ = c.WriteTo(dataFrame(), src)
 			}
@@ -642,7 +658,7 @@ func unicastRepairServer(t *testing.T, flags byte, withData bool) net.PacketConn
 			_, _ = c.WriteTo(resp[:], src)
 		}
 	}()
-	return c
+	return c, &nacks
 }
 
 // TestSendNACK_UnicastRetransmit_RoutedToObservingWorker: with several workers
@@ -747,7 +763,7 @@ func TestSendNACK_UnicastOnly_NoRecoverFunc_BooksUnrecovered(t *testing.T) {
 // ACK. (With no copy arriving, it is asked for again and finally booked
 // unrecovered: ackconfirm_test.go.)
 func TestSendNACK_MulticastAndUnicastACK_NoRecoverFunc_AwaitsDataPlane(t *testing.T) {
-	mockConn := unicastRepairServer(t, 0x03, false) // multicast + unicast bits
+	mockConn, nacks := countingRepairServer(t, 0x03, false) // multicast + unicast bits
 
 	cfg := nack.TrackerConfig{JitterMax: 0, BackoffBase: 500 * time.Millisecond, BackoffMax: time.Second, MaxRetries: 50, GapTTL: 10 * time.Second}
 	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
@@ -760,6 +776,9 @@ func TestSendNACK_MulticastAndUnicastACK_NoRecoverFunc_AwaitsDataPlane(t *testin
 	tr.Start(ctx)
 
 	time.Sleep(200 * time.Millisecond)
+	if nacks.Load() < 1 {
+		t.Fatal("no NACK reached the retry endpoint, so no ACK was answered")
+	}
 	if got := tr.PendingGaps(); got != 1 {
 		t.Fatalf("multicast+unicast ACK closed the gap with no frame: PendingGaps = %d, want 1", got)
 	}
