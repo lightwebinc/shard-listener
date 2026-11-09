@@ -303,3 +303,11 @@ func TestLoad_Lanes(t *testing.T) {
 		t.Fatal("accepted -lane-* in receiver mode")
 	}
 }
+
+func TestLoad_RejectsNegativeNACKBounds(t *testing.T) {
+	for _, arg := range []string{"-nack-max-forward-jump=-1", "-nack-max-flows=-1", "-nack-max-pending=-1"} {
+		if _, err := loadWithArgs(t, withIface(t, arg)...); err == nil {
+			t.Errorf("Load accepted %s", arg)
+		}
+	}
+}

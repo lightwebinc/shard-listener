@@ -46,6 +46,7 @@ func TestThrottle_DoesNotConsumeRetryBudgetOrEscalate(t *testing.T) {
 		GapTTL:      10 * time.Second,
 	}
 	tr := nack.New(cfg, nil, nil, nil, reg)
+	tr.SetRecoverFunc(func([]byte) bool { return true })
 
 	const flow = uint64(0xD00D)
 	tr.Observe(0, [32]byte{}, flow, 1, [32]byte{}, nil)

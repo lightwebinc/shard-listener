@@ -3,6 +3,7 @@ package nack_test
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -330,7 +331,11 @@ func pollGaps(tr *nack.Tracker, want int, timeout time.Duration) int {
 	return tr.PendingGaps()
 }
 
-func TestSendNACK_ACK_CancelsGap(t *testing.T) {
+// TestSendNACK_ACK_DoesNotCloseGapAlone: a multicast-flagged ACK says a copy
+// was dispatched on the data plane, not that it arrived (BRC-126 §ACK
+// Response). The gap stays pending until the frame fills it; here none does,
+// so after the first exchange it is still open and still being asked for.
+func TestSendNACK_ACK_DoesNotCloseGapAlone(t *testing.T) {
 	// Start a mock UDP endpoint that responds with ACK to any NACK.
 	mockConn, err := net.ListenPacket("udp", "[::1]:0")
 	if err != nil {
@@ -338,6 +343,7 @@ func TestSendNACK_ACK_CancelsGap(t *testing.T) {
 	}
 	defer func() { _ = mockConn.Close() }()
 
+	var nacks atomic.Int64
 	go func() {
 		buf := make([]byte, 256)
 		for {
@@ -345,6 +351,7 @@ func TestSendNACK_ACK_CancelsGap(t *testing.T) {
 			if err != nil {
 				return
 			}
+			nacks.Add(1)
 			var resp [nack.ResponseSize]byte
 			nack.EncodeResponse(&nack.Response{
 				MsgType: nack.MsgTypeACK,
@@ -373,10 +380,14 @@ func TestSendNACK_ACK_CancelsGap(t *testing.T) {
 	defer cancel()
 	tr.Start(ctx)
 
-	// Poll for the gap to be cancelled by ACK.
-	got := pollGaps(tr, 0, 3*time.Second)
-	if got != 0 {
-		t.Errorf("after ACK: PendingGaps = %d, want 0", got)
+	// Well past the first exchange (sweep 100 ms, response ~1 ms) and inside
+	// the first backoff (250 to 500 ms at the default base).
+	time.Sleep(200 * time.Millisecond)
+	if nacks.Load() < 1 {
+		t.Fatal("no NACK reached the retry endpoint, so no ACK was answered")
+	}
+	if got := tr.PendingGaps(); got != 1 {
+		t.Errorf("after a multicast ACK with no copy: PendingGaps = %d, want 1 (the ACK alone must not close it)", got)
 	}
 }
 
@@ -617,6 +628,15 @@ func TestSendNACK_UnicastACK_NoData_NotCancelled(t *testing.T) {
 // -beacon-flags-unicast is on (the deployed default).
 func unicastRepairServer(t *testing.T, flags byte, withData bool) net.PacketConn {
 	t.Helper()
+	c, _ := countingRepairServer(t, flags, withData)
+	return c
+}
+
+// countingRepairServer is unicastRepairServer, also counting the NACKs it
+// answers.
+func countingRepairServer(t *testing.T, flags byte, withData bool) (net.PacketConn, *atomic.Int64) {
+	t.Helper()
+	var nacks atomic.Int64
 	c, err := net.ListenPacket("udp", "[::1]:0")
 	if err != nil {
 		t.Skipf("UDP loopback unavailable: %v", err)
@@ -629,6 +649,7 @@ func unicastRepairServer(t *testing.T, flags byte, withData bool) net.PacketConn
 			if err != nil {
 				return
 			}
+			nacks.Add(1)
 			if withData {
 				_, _ = c.WriteTo(dataFrame(), src)
 			}
@@ -637,7 +658,7 @@ func unicastRepairServer(t *testing.T, flags byte, withData bool) net.PacketConn
 			_, _ = c.WriteTo(resp[:], src)
 		}
 	}()
-	return c
+	return c, &nacks
 }
 
 // TestSendNACK_UnicastRetransmit_RoutedToObservingWorker: with several workers
@@ -736,13 +757,15 @@ func TestSendNACK_UnicastOnly_NoRecoverFunc_BooksUnrecovered(t *testing.T) {
 	}
 }
 
-// TestSendNACK_MulticastAndUnicastACK_NoRecoverFunc_Cancels: when the retry ALSO
-// multicast the repair, the data path fills the gap, so the trust-the-repair
-// cancel is still correct even with no re-injection callback.
-func TestSendNACK_MulticastAndUnicastACK_NoRecoverFunc_Cancels(t *testing.T) {
-	mockConn := unicastRepairServer(t, 0x03, false) // multicast + unicast bits
+// TestSendNACK_MulticastAndUnicastACK_NoRecoverFunc_AwaitsDataPlane: when the
+// retry ALSO multicast the repair, the copy this listener can take travels on
+// the data plane, so the gap stays pending for it rather than closing on the
+// ACK. (With no copy arriving, it is asked for again and finally booked
+// unrecovered: ackconfirm_test.go.)
+func TestSendNACK_MulticastAndUnicastACK_NoRecoverFunc_AwaitsDataPlane(t *testing.T) {
+	mockConn, nacks := countingRepairServer(t, 0x03, false) // multicast + unicast bits
 
-	cfg := nack.TrackerConfig{JitterMax: 0, BackoffBase: 50 * time.Millisecond, BackoffMax: 100 * time.Millisecond, MaxRetries: 50, GapTTL: 10 * time.Second}
+	cfg := nack.TrackerConfig{JitterMax: 0, BackoffBase: 500 * time.Millisecond, BackoffMax: time.Second, MaxRetries: 50, GapTTL: 10 * time.Second}
 	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
 
 	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
@@ -752,15 +775,26 @@ func TestSendNACK_MulticastAndUnicastACK_NoRecoverFunc_Cancels(t *testing.T) {
 	defer cancel()
 	tr.Start(ctx)
 
-	if got := pollGaps(tr, 0, 3*time.Second); got != 0 {
-		t.Errorf("multicast-flagged ACK did not close the gap: PendingGaps = %d, want 0", got)
+	time.Sleep(200 * time.Millisecond)
+	if nacks.Load() < 1 {
+		t.Fatal("no NACK reached the retry endpoint, so no ACK was answered")
+	}
+	if got := tr.PendingGaps(); got != 1 {
+		t.Fatalf("multicast+unicast ACK closed the gap with no frame: PendingGaps = %d, want 1", got)
+	}
+	// The multicast copy arrives on the data path and closes it.
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, nil)
+	if got := tr.PendingGaps(); got != 0 {
+		t.Errorf("data-plane copy did not close the gap: PendingGaps = %d, want 0", got)
 	}
 }
 
 // TestObserveEmitterChange_Rebaselines: a forward jump beyond MaxForwardJump is an
 // EMITTER CHANGE (anycast failover between long-lived proxies with divergent flow
 // counters), not loss, the flow re-baselines: no phantom gap range is registered
-// (which would NACK-storm and pollute unrecovered counters), pending phantoms drop.
+// (which would NACK-storm and pollute unrecovered counters). Gaps registered
+// before the jump are real losses of the previous emitter's frames and stay
+// pending.
 func TestObserveEmitterChange_Rebaselines(t *testing.T) {
 	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second, MaxForwardJump: 1000}, nil, nil, nil, nil)
 	tr.Observe(0, [32]byte{}, flowA, 1, [32]byte{}, nil)
@@ -771,18 +805,18 @@ func TestObserveEmitterChange_Rebaselines(t *testing.T) {
 	}
 	// New emitter takes the flow at seq 50000: beyond any plausible burst.
 	tr.Observe(0, [32]byte{}, flowA, 50000, [32]byte{}, nil)
-	if g := tr.PendingGaps(); g != 0 {
-		t.Fatalf("emitter change must drop phantom pendings: PendingGaps = %d, want 0", g)
+	if g := tr.PendingGaps(); g != 2 {
+		t.Fatalf("emitter change: PendingGaps = %d, want 2 (no phantom range, the real gaps kept)", g)
 	}
 	// Tracking continues from the new baseline: next contiguous frame = no gap,
 	// a small real gap after it is still detected.
 	tr.Observe(0, [32]byte{}, flowA, 50001, [32]byte{}, nil)
-	if g := tr.PendingGaps(); g != 0 {
-		t.Fatalf("contiguous after re-baseline: PendingGaps = %d, want 0", g)
+	if g := tr.PendingGaps(); g != 2 {
+		t.Fatalf("contiguous after re-baseline: PendingGaps = %d, want 2", g)
 	}
 	tr.Observe(0, [32]byte{}, flowA, 50003, [32]byte{}, nil)
-	if g := tr.PendingGaps(); g != 1 {
-		t.Fatalf("real gap after re-baseline: PendingGaps = %d, want 1", g)
+	if g := tr.PendingGaps(); g != 3 {
+		t.Fatalf("real gap after re-baseline: PendingGaps = %d, want 3", g)
 	}
 }
 
@@ -797,40 +831,30 @@ func TestObserveWithinMaxJump_StillGaps(t *testing.T) {
 	}
 }
 
-// TestObserveRateAwareRebaseline: with a learned arrival rate, a jump far beyond
-// rate×silence re-baselines (emitter divergence UNDER the absolute cap, the case a
-// fixed threshold cannot catch), while an outage-sized jump still registers as gaps.
-func TestObserveRateAwareRebaseline(t *testing.T) {
+// TestObserveJumpWithinCapIsLossAtAnyRate: a jump within MaxForwardJump is loss
+// whatever the flow's apparent rate. The rate is measured where Observe runs,
+// so it is the listener's processing cadence, not the sender's, and it once
+// re-baselined this very case (a 2,000-frame jump after 50 ms of quiet at a
+// 1 ms cadence) as an emitter change, dropping a real burst unrepaired.
+func TestObserveJumpWithinCapIsLossAtAnyRate(t *testing.T) {
 	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second, MaxForwardJump: 100000}, nil, nil, nil, nil)
-	// Learn a ~1ms cadence (contiguous frames).
 	for i := uint64(1); i <= 20; i++ {
 		tr.Observe(0, [32]byte{}, flowA, i, [32]byte{}, nil)
 		time.Sleep(time.Millisecond)
 	}
-	if g := tr.PendingGaps(); g != 0 {
-		t.Fatalf("setup: PendingGaps = %d, want 0", g)
-	}
-	// ~50ms silence at ~1ms cadence ⇒ a real outage misses ~50 frames; a jump of
-	// 2000 is ~40× the plausible burst ⇒ emitter change. Re-baseline the DIVERGENT
-	// remainder, but NACK the rate-plausible tail (~50 real losses the new emitter
-	// dropped in the transition, recoverable from its retry), not silent, not the
-	// whole 2000-wide phantom range.
 	time.Sleep(50 * time.Millisecond)
 	tr.Observe(0, [32]byte{}, flowA, 2020, [32]byte{}, nil)
-	tail := tr.PendingGaps()
-	if tail == 0 || tail >= 2000 {
-		t.Fatalf("re-baseline must NACK the bounded rate-plausible tail (non-zero, not the phantom range): PendingGaps = %d", tail)
+	if g := tr.PendingGaps(); g != 1999 {
+		t.Fatalf("a jump within the cap must register every missing SeqNum: PendingGaps = %d, want 1999", g)
 	}
-	// Continue contiguously from the new baseline, then a plausible outage-sized gap
-	// (100 missing) registers ON TOP of the recovered tail.
 	for i := uint64(2021); i <= 2040; i++ {
 		tr.Observe(0, [32]byte{}, flowA, i, [32]byte{}, nil)
 		time.Sleep(time.Millisecond)
 	}
 	time.Sleep(50 * time.Millisecond)
-	tr.Observe(0, [32]byte{}, flowA, 2141, [32]byte{}, nil) // 100 missing ≤ 4×(~50+1)
-	if g := tr.PendingGaps(); g != tail+100 {
-		t.Fatalf("plausible outage gap must add 100: PendingGaps = %d, want %d", g, tail+100)
+	tr.Observe(0, [32]byte{}, flowA, 2141, [32]byte{}, nil) // 100 more
+	if g := tr.PendingGaps(); g != 1999+100 {
+		t.Fatalf("PendingGaps = %d, want %d", g, 1999+100)
 	}
 }
 

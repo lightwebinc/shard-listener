@@ -109,9 +109,9 @@ type Recorder struct {
 	tailProbesRecovered metric.Int64Counter
 	tailProbesMiss      metric.Int64Counter
 	gapsDetected        metric.Int64Counter
-	gapsSuppressed      metric.Int64Counter // cancelled by retransmit fill or ACK response
+	gapsSuppressed      metric.Int64Counter // closed by their frame: a repair or a late original
 	flowsRefused        metric.Int64Counter // new flows skipped at the MaxFlows flood-guard cap
-	seqRebaselines      metric.Int64Counter // flows re-baselined on an implausible SeqNum jump (emitter change)
+	seqRebaselines      metric.Int64Counter // flows re-baselined on a jump beyond MaxForwardJump (emitter change)
 	nacksDispatched     metric.Int64Counter
 	nackSendErrors      metric.Int64Counter // WriteTo failed: the walk tier was never asked
 	nacksThrottled      metric.Int64Counter // held after a THROTTLED congestion signal
@@ -415,7 +415,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 	if r.gapsSuppressed, err = meter.Int64Counter("bsl_gaps_suppressed_total",
-		metric.WithDescription("Gaps cancelled by retransmit fill or ACK response")); err != nil {
+		metric.WithDescription("Gaps closed by their frame: a repair (unicast or a multicast copy) or a late original; an ACK alone never closes a gap")); err != nil {
 		return nil, err
 	}
 	if r.flowsRefused, err = meter.Int64Counter("bsl_nack_flows_refused_total",
@@ -423,7 +423,7 @@ func New(instanceID string, numWorkers int, otlpEndpoint string, otlpInterval ti
 		return nil, err
 	}
 	if r.seqRebaselines, err = meter.Int64Counter("bsl_seq_rebaselines_total",
-		metric.WithDescription("Flows re-baselined on an implausible SeqNum jump (emitter change, e.g. anycast failover)")); err != nil {
+		metric.WithDescription("Flows re-baselined on a SeqNum jump beyond the forward-jump bound (emitter change, e.g. anycast failover)")); err != nil {
 		return nil, err
 	}
 	if r.nacksDispatched, err = meter.Int64Counter("bsl_nacks_dispatched_total",
@@ -779,14 +779,24 @@ func (r *Recorder) HeaderEgressError(workerID int) {
 // source is the multicast source address the loss is attributed to (per-link
 // delivery health); "" when unknown. Source cardinality is the spine/source count.
 func (r *Recorder) GapDetected(flow, source string) {
-	r.gapsDetected.Add(context.Background(), 1,
+	r.GapsDetected(flow, source, 1)
+}
+
+// GapsDetected records n sequence gaps on one flow at once: a burst registers
+// thousands under the tracker's lock, and one add costs what one gap would.
+func (r *Recorder) GapsDetected(flow, source string, n int) {
+	if n <= 0 {
+		return
+	}
+	r.gapsDetected.Add(context.Background(), int64(n),
 		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
 }
 
-// SeqRebaselined counts a flow re-baselined on an implausible forward SeqNum jump:
-// an emitter change (e.g. anycast spine failover between long-lived proxies whose
-// in-memory flow counters diverged), NOT data loss: the intermediate range was never
-// emitted toward this listener, so it must not be registered (or NACKed) as gaps.
+// SeqRebaselined counts a flow re-baselined on a forward SeqNum jump beyond the
+// tracker's MaxForwardJump: an emitter change (e.g. anycast failover between
+// long-lived proxies whose in-memory flow counters diverged), NOT data loss: the
+// intermediate range was never emitted toward this listener, so it is not
+// registered (or NACKed) as gaps. A jump within the bound is loss and is.
 func (r *Recorder) SeqRebaselined(flow, source string) {
 	r.seqRebaselines.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))
@@ -797,8 +807,9 @@ func (r *Recorder) FlowsRefused(flow string) {
 	r.flowsRefused.Add(context.Background(), 1, metric.WithAttributes(attribute.String("flow", flow)))
 }
 
-// GapSuppressed records a gap cancelled by a retransmit fill or ACK response.
-// flow/source as in GapDetected.
+// GapSuppressed records a gap closed by its frame: a repair (returned on the
+// NACK socket, or a multicast copy on the data plane) or a late original. An
+// ACK alone never closes a gap. flow/source as in GapDetected.
 func (r *Recorder) GapSuppressed(flow, source string) {
 	r.gapsSuppressed.Add(context.Background(), 1,
 		metric.WithAttributes(attribute.String("flow", flow), attribute.String("source", source)))

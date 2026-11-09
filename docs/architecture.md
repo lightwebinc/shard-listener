@@ -10,7 +10,7 @@
 - **NACK dispatch**: 64-byte NACK datagrams (HashKey + StartSeq/EndSeq + SubtreeID) with 16-byte ACK/MISS response handling
 - **Beacon discovery**: dynamic retry endpoint registry via BRC-126 ADVERT beacons
 - **Receive-side retry tee**: `-retry-tee` mirrors every received data frame to a co-resident retry-endpoint's loopback tee ingest (source-preserving `teewire` envelope), so the cache learns remote-origin frames without a multicast join of its own (see [configuration.md](configuration.md))
-- **Tier escalation**: MISS → immediate advance to next endpoint; bare ACK → gap canceled on trust; unicast-flagged ACK → wait for the data frame, escalate on timeout
+- **Tier escalation**: MISS → immediate advance to next endpoint; unicast-flagged ACK → wait for the data frame, escalate on timeout; bare or multicast-flagged ACK → the gap stays open for the data-plane copy and the attempt counts as a round (only the frame closes a gap)
 - **Semaphore-bounded dispatch**: at most 64 concurrent NACK goroutines (fixed in `nack.New`)
 - **Egress UDP or TCP**: strip-header (payload-only) by default, since a downstream node reads a raw BSV tx, not a multicast frame; disable for frame-aware downstreams (domain bridging)
 - **Multicast egress**: optional domain bridging; re-emits filtered frames onto a separate multicast address space with configurable scope, interface, port, and hop limit
@@ -209,22 +209,33 @@ a gap in one flow does not affect another flow's tail.
   accepted; they never create new gap entries and never regress `lastSeqNum`.
 - `lastSeqNum` only advances forward.
 
-**Re-baseline on emitter change:** a forward jump that is
-implausible for the elapsed silence means a *different* emitter now stamps the
-flow (e.g. anycast failover between long-lived proxies whose in-memory counters
-diverged); the intermediate range was never emitted toward this listener.
-Implausibility is judged two ways: the jump exceeds `-nack-max-forward-jump`
-(default 4096, the absolute bound), or it exceeds 4× the frames expected for
-the elapsed time at the flow's observed rate (a smoothed inter-arrival EWMA,
-`ewmaIPG`, α=1/8; only applied to jumps > 64 frames). On re-baseline the
-pending phantom gaps are dropped silently (never NACKed),
-`bsl_seq_rebaselines_total` is incremented, and tracking restarts at the new
-`SeqNum`. If the rate estimate is settled (≥ 16 contiguous
-in-order frames), the rate-plausible *transition tail* (≈ elapsed/`ewmaIPG`
-frames just before the new `SeqNum`, bounded) is still NACK-recovered: the new
-emitter stamped those frames during reconvergence and holds them in its retry
-cache, so a real sub-second outage is repaired instead of vanishing inside the
-phantom range.
+**A jump within `-nack-max-forward-jump` is loss, at any rate.** Every
+missing `SeqNum` of a forward jump of up to `-nack-max-forward-jump` frames
+(default 4096) is registered and NACKed, whatever the flow's apparent rate.
+The rate is not consulted because it is measured where the tracker runs, after
+the receive batch and its queue: when the receiver falls behind (the condition
+that overflows a NIC ring or a socket) the frames on either side of a lost burst
+are processed back to back, and a rate test reads the burst as an emitter change.
+Size the bound to the largest burst a flow must repair, the flow's frame rate
+times the longest outage: a plane of 9,000-byte frames at 1 GB/s carries about
+4,096 frames in 37 ms. Each flow holds at most `16 x` that bound pending; a
+missing `SeqNum` past it is booked detected and unrecovered
+(`bsl_gaps_abandoned_total{reason="capacity"}`).
+
+**Re-baseline on emitter change:** a jump beyond `-nack-max-forward-jump` means
+a *different* proxy now stamps the flow (anycast failover between long-lived
+proxies whose in-memory counters for one HashKey diverged): the HashKey hashes
+the ingress source, so it survives the failover while the counter does not.
+The datagram's source cannot tell: on a spine fabric it is a relay that carries
+the ingress numbering through unchanged. On re-baseline the jump's range is not
+registered, `bsl_seq_rebaselines_total` is incremented, and tracking restarts at
+the new `SeqNum`. Gaps already pending **stay pending**: they are frames the
+previous emitter numbered, which the retry caches hold under the same
+HashKey and `SeqNum`, so they are repaired or booked unrecovered like any other
+gap. If the rate estimate is settled (≥ 16 contiguous in-order frames), the
+*transition tail* (≈ elapsed/`ewmaIPG` frames just before the new `SeqNum`,
+bounded by the jump and the bound) is still NACK-recovered: the new emitter
+stamped those frames during reconvergence and holds them in its retry cache.
 
 **Gap fill** (`nack.Tracker.Fill(hashKey, seqNum)`):
 - Called when a retransmit arrives via a NACK ACK response. Deletes the
@@ -241,13 +252,18 @@ phantom range.
   sorted registry.
 
 **NACK escalation** on endpoint response:
-- **ACK**: the Flags byte decides. A **unicast-flagged** ACK (`0x02`) is only a
-  PROMISE: the gap stays pending, the socket keeps draining for the data frame,
-  and a timeout escalates to the next cache. A **bare / multicast-flagged** ACK
-  cancels the gap on TRUST (`Fill`; `bsl_gaps_suppressed_total` incremented), so a
-  repair lost on the same degraded link is never retried. That trust path is why
-  `bsl_gaps_suppressed_total` is not proof of repair; see the gap metrics in
-  [configuration.md](configuration.md#gap-recovery-brc-126).
+- **ACK**: an ACK says a retransmit was dispatched, not that it arrived
+  (BRC-126 §ACK Response), so it never closes a gap by itself: only the frame
+  does. A **unicast-flagged** ACK (`0x02`) with a re-injection callback keeps the
+  socket draining for the data frame, and a timeout escalates to the next cache.
+  A **bare / multicast-flagged** ACK (or a unicast copy the listener cannot take
+  beside a multicast one) leaves the gap pending for the data-plane copy, which
+  closes it through `Observe` when it arrives; until then the attempt counts as a
+  failed round with backoff, exactly like a timeout, so a copy lost on the same
+  impaired link is asked for again and, once `nack-max-retries` rounds are spent,
+  booked unrecovered rather than repaired. BRC-126 lets a listener cancel on such
+  an ACK; this one does not. An ACK that answers a tail probe also confirms the
+  loss: the probe becomes an ordinary gap, booked detected.
 - **MISS**: endpoint index is advanced immediately (no backoff). The next sweep
   dispatch targets the next endpoint in the sorted registry snapshot.
 - **THROTTLED** (`MsgType 0x13`): honest-congestion backoff hint from the
@@ -285,8 +301,8 @@ listener can instead recover frames over the **unicast NACK return channel**:
   arriving data frame does. A `unicast_sent` ACK whose data is lost in transit (the
   retransmit can re-cross the same lossy path) does **not** cancel the gap; it
   **escalates to the next cache**, so a frame lost on one path is repaired from a
-  node that received it over a clean path. (A non-unicast/legacy ACK keeps the
-  original trust-the-multicast-repair semantics.)
+  node that received it over a clean path. (A non-unicast ACK waits for the
+  data-plane copy, see *NACK escalation* above.)
 - `Tracker.SetNACKSource(addr)` binds the NACK socket to a routable source address.
   This is **required on a tunneled fabric**: an unbound socket picks a per-route
   source that can be a point-to-point `/127` tunnel inner address, and the retry's
