@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net"
 	"strings"
@@ -42,6 +43,11 @@ type TrackerConfig struct {
 	// SeqNum past the bound is booked detected and unrecovered (reason
 	// "capacity") instead of registered. 0 = default 16 x MaxForwardJump.
 	MaxPendingPerFlow int
+	// MaxPendingTotal bounds the gaps held pending across ALL flows, so many
+	// flows losing at once (MaxFlows x MaxPendingPerFlow) cannot exhaust
+	// memory. Past it a missing SeqNum is booked detected and unrecovered
+	// (reason "capacity") and tail probes wait. 0 = unbounded.
+	MaxPendingTotal int
 	// TailProbe enables speculative probing of the next expected SeqNum on a flow
 	// that has gone quiet. Gap detection is otherwise INFERENTIAL: frame N is only
 	// known lost when N+1 arrives, so the last frames before a sender goes idle,
@@ -276,6 +282,7 @@ type Tracker struct {
 	mu           sync.Mutex
 	flows        map[uint64]*flowState // keyed by hashKey
 	flowsRefused uint64                // new flows skipped at MaxFlows (flood guard); under mu
+	pendingTotal int                   // gaps pending across all flows; under mu, changed only by addPending/delPending
 
 	// nackQueue receives gap entries ready for NACK dispatch.
 	nackQueue chan *gapEntry
@@ -515,7 +522,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 
 	// Step 3: auto-fill, close any pending gap whose seqNum matches.
 	if e, found := fs.pending[seqNum]; found {
-		delete(fs.pending, seqNum)
+		t.delPending(fs, seqNum)
 		t.bookFill(fs, e)
 		// A repair that does not advance the stream is now fully handled. It
 		// must NOT fall through to step 4: a repaired early-flow seqNum (≤ the
@@ -559,6 +566,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 					t.bookAbandon(fs, seq, fs.source, "restart")
 				}
 			}
+			t.pendingTotal -= len(fs.pending)
 			fs.pending = make(map[uint64]*gapEntry)
 			fs.probing = 0 // any in-flight probe went with the pending set
 			fs.lastSeqNum = seqNum
@@ -631,6 +639,31 @@ func (t *Tracker) maxPendingPerFlow() int {
 	return defaultPendingFactor * int(min(t.maxForwardJump(), 1<<24))
 }
 
+// addPending holds e as a pending gap on fs. Caller holds t.mu.
+func (t *Tracker) addPending(fs *flowState, seq uint64, e *gapEntry) {
+	if _, exists := fs.pending[seq]; !exists {
+		t.pendingTotal++
+	}
+	fs.pending[seq] = e
+}
+
+// delPending drops seq from fs's pending gaps. Caller holds t.mu.
+func (t *Tracker) delPending(fs *flowState, seq uint64) {
+	if _, exists := fs.pending[seq]; exists {
+		delete(fs.pending, seq)
+		t.pendingTotal--
+	}
+}
+
+// pendingRoom is how many more gaps the tracker-wide bound admits. Caller
+// holds t.mu.
+func (t *Tracker) pendingRoom() int {
+	if t.cfg.MaxPendingTotal <= 0 {
+		return math.MaxInt
+	}
+	return max(t.cfg.MaxPendingTotal-t.pendingTotal, 0)
+}
+
 // registerGaps registers every SeqNum in [from, to) not already pending on fs
 // as a gap to NACK. Past MaxPendingPerFlow the rest are booked detected and
 // unrecovered (reason "capacity") rather than held, so the loss stays on the
@@ -641,7 +674,7 @@ func (t *Tracker) maxPendingPerFlow() int {
 // per gap.
 func (t *Tracker) registerGaps(fs *flowState, hashKey uint64, groupIdx uint32, subtreeID [32]byte, from, to uint64, source net.IP, now time.Time) {
 	limit := t.maxPendingPerFlow()
-	room := uint64(max(limit-len(fs.pending), 0))
+	room := uint64(max(min(limit-len(fs.pending), t.pendingRoom()), 0))
 	// At most min(span, room) entries are registered, so the slab never grows
 	// and the pointers into it stay valid.
 	slab := make([]gapEntry, 0, min(to-from, room))
@@ -651,7 +684,7 @@ func (t *Tracker) registerGaps(fs *flowState, hashKey uint64, groupIdx uint32, s
 			continue
 		}
 		detected++
-		if len(fs.pending) >= limit {
+		if len(fs.pending) >= limit || t.pendingRoom() == 0 {
 			t.bookAbandon(fs, m, source, "capacity")
 			continue
 		}
@@ -666,7 +699,7 @@ func (t *Tracker) registerGaps(fs *flowState, hashKey uint64, groupIdx uint32, s
 			deadline:    now.Add(t.cfg.GapTTL),
 			owner:       fs.owner,
 		})
-		fs.pending[m] = &slab[len(slab)-1]
+		t.addPending(fs, m, &slab[len(slab)-1])
 	}
 	if t.rec != nil {
 		t.rec.GapsDetected(fs.flowType, srcStr(source), detected)
@@ -819,12 +852,16 @@ func (t *Tracker) RequestGapsFrom(owner int, hashKey uint64, groupIdx uint32, su
 			deadline:    now.Add(t.cfg.GapTTL),
 			owner:       fs.owner,
 		}
-		fs.pending[seq] = e
-		cp := *e
-		queued = append(queued, &cp)
 		if t.rec != nil {
 			t.rec.GapDetected(fs.flowType, srcStr(fs.source))
 		}
+		if t.pendingRoom() == 0 {
+			t.bookAbandon(fs, seq, fs.source, "capacity")
+			continue
+		}
+		t.addPending(fs, seq, e)
+		cp := *e
+		queued = append(queued, &cp)
 	}
 	t.mu.Unlock()
 
@@ -851,7 +888,7 @@ func (t *Tracker) Fill(hashKey, seqNum uint64) {
 
 	if fs, ok := t.flows[hashKey]; ok {
 		if e, found := fs.pending[seqNum]; found {
-			delete(fs.pending, seqNum)
+			t.delPending(fs, seqNum)
 			t.bookFill(fs, e)
 			return
 		}
@@ -898,7 +935,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 		}
 		for seq, e := range fs.pending {
 			if now.After(e.deadline) {
-				delete(fs.pending, seq)
+				t.delPending(fs, seq)
 				// An unanswered PROBE is not a lost frame: it is an unanswered
 				// question. Counting it as unrecovered would manufacture loss on
 				// every quiet flow and make the repair-ratio alerts unusable.
@@ -917,7 +954,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 				continue
 			}
 			if e.failRounds >= t.cfg.MaxRetries {
-				delete(fs.pending, seq)
+				t.delPending(fs, seq)
 				if e.speculative {
 					t.retireProbe(fs, seq)
 				} else {
@@ -1011,6 +1048,10 @@ func (t *Tracker) maybeProbeTail(hashKey uint64, fs *flowState, now time.Time) {
 	if _, given := fs.abandoned[seq]; given {
 		return
 	}
+	// A full table keeps its room for observed loss.
+	if t.pendingRoom() == 0 {
+		return
+	}
 	fs.probing = seq
 	e := &gapEntry{
 		hashKey:     hashKey,
@@ -1026,7 +1067,7 @@ func (t *Tracker) maybeProbeTail(hashKey uint64, fs *flowState, now time.Time) {
 		probe:       true,
 		owner:       fs.owner,
 	}
-	fs.pending[seq] = e
+	t.addPending(fs, seq, e)
 	if t.rec != nil {
 		t.rec.TailProbeSent(flowLabel(fs.groupIdx), srcStr(fs.source))
 	}
@@ -1040,7 +1081,7 @@ func (t *Tracker) maybeProbeTail(hashKey uint64, fs *flowState, now time.Time) {
 	default:
 		// Queue full: drop the probe entirely rather than let speculative work
 		// displace real gap recovery. It will be reconsidered next sweep.
-		delete(fs.pending, seq)
+		t.delPending(fs, seq)
 		fs.probing = 0
 	}
 }
@@ -1070,7 +1111,7 @@ func (t *Tracker) probeMissed(e *gapEntry) {
 	if !ok {
 		return
 	}
-	delete(fs.pending, e.seqNum)
+	t.delPending(fs, e.seqNum)
 	if fs.probing == e.seqNum {
 		fs.probing = 0
 	}
@@ -1417,11 +1458,7 @@ func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool, numEndpoints int)
 func (t *Tracker) PendingGaps() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	total := 0
-	for _, fs := range t.flows {
-		total += len(fs.pending)
-	}
-	return total
+	return t.pendingTotal
 }
 
 // Pending reports whether any of seqs is still a pending gap on the flow
@@ -1499,7 +1536,7 @@ func (t *Tracker) abandonGap(e *gapEntry, reason string) {
 	if !ok {
 		return
 	}
-	delete(fs.pending, e.seqNum)
+	t.delPending(fs, e.seqNum)
 	if fs.probing == e.seqNum {
 		fs.probing = 0
 	}
@@ -1519,7 +1556,7 @@ func (t *Tracker) cancelGap(e *gapEntry) {
 
 	if fs, ok := t.flows[e.hashKey]; ok {
 		if pend, found := fs.pending[e.seqNum]; found {
-			delete(fs.pending, e.seqNum)
+			t.delPending(fs, e.seqNum)
 			// e is a shallow copy taken at dispatch; the stored entry is
 			// authoritative for the speculative flag.
 			t.bookFill(fs, pend)

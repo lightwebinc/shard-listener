@@ -192,13 +192,14 @@ func run() error {
 	if !delivery {
 		tracker = nack.New(
 			nack.TrackerConfig{
-				JitterMax:      cfg.NACKJitterMax,
-				BackoffBase:    cfg.NACKBackoffBase,
-				BackoffMax:     cfg.NACKBackoffMax,
-				MaxRetries:     cfg.NACKMaxRetries,
-				GapTTL:         cfg.NACKGapTTL,
-				MaxFlows:       cfg.NACKMaxFlows,
-				MaxForwardJump: uint64(cfg.NACKMaxForwardJump),
+				JitterMax:       cfg.NACKJitterMax,
+				BackoffBase:     cfg.NACKBackoffBase,
+				BackoffMax:      cfg.NACKBackoffMax,
+				MaxRetries:      cfg.NACKMaxRetries,
+				GapTTL:          cfg.NACKGapTTL,
+				MaxFlows:        cfg.NACKMaxFlows,
+				MaxPendingTotal: cfg.NACKMaxPending,
+				MaxForwardJump:  uint64(cfg.NACKMaxForwardJump),
 
 				TailProbe:           cfg.NACKTailProbe,
 				TailProbeIdleFactor: cfg.NACKTailProbeIdleFactor,
