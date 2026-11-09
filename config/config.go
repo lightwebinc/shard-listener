@@ -801,6 +801,15 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("egress-proto must be udp or tcp, got %q", c.EgressProto)
 	}
 
+	// The forward-jump bound is also the most gaps one jump registers, and it
+	// sizes the per-flow pending cap; a negative value would wrap when the
+	// tracker converts it, so refuse it.
+	if c.NACKMaxForwardJump < 0 {
+		return nil, fmt.Errorf("nack-max-forward-jump must be 0 (default) or positive, got %d", c.NACKMaxForwardJump)
+	}
+	if c.NACKMaxFlows < 0 {
+		return nil, fmt.Errorf("nack-max-flows must be 0 (unbounded) or positive, got %d", c.NACKMaxFlows)
+	}
 	if err := c.validateLanes(); err != nil {
 		return nil, err
 	}
