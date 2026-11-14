@@ -1141,6 +1141,12 @@ func (t *Tracker) dispatchLoop(ctx context.Context) {
 	}
 }
 
+// respBufSize holds a full BRC frame, so a unicast retransmit is not truncated.
+const respBufSize = 65536
+
+// respBufs lends sendNACK its response buffer.
+var respBufs = sync.Pool{New: func() any { return new([respBufSize]byte) }}
+
 // sendNACK dispatches a NACK to a retry endpoint, then waits for the frame
 // and the ACK/MISS/THROTTLED response. Only the frame closes the gap: one
 // returned on this socket is re-injected and closes it here, one sent on the
@@ -1233,14 +1239,23 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	// client logic; the control response drives tier/backoff state. The buffer
 	// is sized for a full BRC frame so a unicast retransmit is not truncated.
 	deadline := time.Now().Add(t.respTimeout)
-	var rbuf [65536]byte
+	// Borrowed, not declared here: a 64 KiB array on this goroutine escapes to
+	// the heap, and a loss burst sends NACKs by the hundred thousand, each one
+	// zeroing a fresh buffer. Profiled on a lab edge under overload, that was a
+	// third of the NACK path's CPU and gigabytes a second of memory traffic
+	// taken from the receive workers. Nothing keeps the buffer past this call:
+	// a retransmit is copied before it is re-injected and a response is decoded
+	// by value.
+	rp := respBufs.Get().(*[respBufSize]byte)
+	defer respBufs.Put(rp)
+	rbuf := rp[:]
 	unicastACK := false
 	// The callback of the worker that owns this gap's flow. Resolved once: a
 	// recovered frame belongs in that worker's pipeline and nowhere else.
 	reinject := t.recoverFor(e)
 	for {
 		_ = conn.SetReadDeadline(deadline)
-		nr, _, err := conn.ReadFrom(rbuf[:])
+		nr, _, err := conn.ReadFrom(rbuf)
 		if err != nil { // timeout / closed
 			break
 		}
