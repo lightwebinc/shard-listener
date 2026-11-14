@@ -1245,7 +1245,7 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 	// third of the NACK path's CPU and gigabytes a second of memory traffic
 	// taken from the receive workers. Nothing keeps the buffer past this call:
 	// a retransmit is copied before it is re-injected and a response is decoded
-	// by value.
+	// into a struct of its own.
 	rp := respBufs.Get().(*[respBufSize]byte)
 	defer respBufs.Put(rp)
 	rbuf := rp[:]
