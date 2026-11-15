@@ -906,21 +906,59 @@ func (t *Tracker) Start(ctx context.Context) {
 // gcLoop scans pending gaps on a regular interval, evicts expired entries,
 // and enqueues entries whose nextAttempt has passed.
 func (t *Tracker) gcLoop(ctx context.Context) {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	timer := time.NewTimer(sweepInterval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-ticker.C:
+		case now := <-timer.C:
+			start := time.Now()
 			t.sweepOnce(now)
+			timer.Reset(nextSweep(time.Since(start)))
 		}
 	}
+}
+
+const (
+	// sweepInterval is how often the pending gaps are swept when a sweep is
+	// cheap.
+	sweepInterval = 100 * time.Millisecond
+	// sweepShare bounds a sweep to this fraction of the time: the next one
+	// starts no sooner than the last one's duration divided by it.
+	sweepShare = 0.1
+	// maxSweepInterval bounds how far a slow sweep stretches the interval,
+	// so evictions and NACK scheduling never wait longer than this.
+	maxSweepInterval = time.Second
+)
+
+// nextSweep is the wait before the next sweep, given how long the last one
+// took.
+//
+// A sweep walks every pending gap under the lock every receive worker takes
+// for each frame it observes. With few gaps that is microseconds. With a
+// burst of loss it is not: at a hundred thousand pending gaps a sweep runs
+// for milliseconds, and ten of them a second keep the receive path waiting
+// on the lock for a large part of the time, which fills the socket buffer
+// and makes more gaps. So the interval stretches
+// with the sweep's own cost, holding it to sweepShare of the time, up to
+// maxSweepInterval. Under such a burst the NACK queue is full anyway, so the
+// repairs are not what waits.
+func nextSweep(took time.Duration) time.Duration {
+	next := time.Duration(float64(took) / sweepShare)
+	if next < sweepInterval {
+		return sweepInterval
+	}
+	if next > maxSweepInterval {
+		return maxSweepInterval
+	}
+	return next
 }
 
 func (t *Tracker) sweepOnce(now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	queueFull := false // the NACK queue refused a gap in this sweep
 
 	flowTTL := t.cfg.TailTTL
 	if flowTTL <= 0 {
@@ -968,7 +1006,12 @@ func (t *Tracker) sweepOnce(now time.Time) {
 				)
 				continue
 			}
-			if now.After(e.nextAttempt) {
+			// Once the NACK queue has refused a gap, the rest of this sweep
+			// leaves due gaps due: the senders that would make room mostly wait
+			// on this lock to book their results, and offering each of a
+			// burst's gaps to a full queue was a copy and a failed send per
+			// gap, every sweep.
+			if !queueFull && now.After(e.nextAttempt) {
 				// Stamp nextAttempt before copying so concurrent sweeps do not
 				// re-enqueue the same gap while a sendNACK goroutine is in-flight.
 				e.nextAttempt = now.Add(t.respTimeout + 100*time.Millisecond)
@@ -978,6 +1021,7 @@ func (t *Tracker) sweepOnce(now time.Time) {
 				default:
 					// Queue full: reset so this gap is retried next tick.
 					e.nextAttempt = now
+					queueFull = true
 				}
 			}
 		}

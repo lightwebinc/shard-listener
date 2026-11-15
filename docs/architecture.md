@@ -139,6 +139,25 @@ processing goroutine through a bounded queue (on Linux the receive side reads
 previous datagram is processed. A full queue blocks the receive loop; nothing
 is dropped there. The stock binary exposes no flag for this and runs inline.
 
+Two more options ride the pipelined loop, for an embedding build whose plane
+carries large objects:
+
+- **Fragment workers** (`Worker.SetReassemblyBuffers` with more than one
+  buffer). All of one topic's fragments reach one worker, and on its processing
+  goroutine reassembly is most of the work: the copy of every fragment into its
+  object and the object's allocation. With several buffers a fragment goes to
+  the buffer its object's identifier selects, and each buffer has a goroutine
+  of its own that stores BEEF fragments (FrameVer `0x09` objects) and delivers
+  the completed object. The decode and the gap tracker stay on the processing
+  goroutine, in arrival order; every other class is stored inline, in the
+  buffer its identifier selects. A receive buffer is held until the fragment
+  worker has stored the fragment read from it.
+- **Receive GRO** (`Worker.SetRecvGRO`, Linux). The socket asks for `UDP_GRO`:
+  a run of equal datagrams from one sender arrives as one message with the
+  datagrams' length in a control message, and the receive loop splits it back,
+  in order. The kernel queues and hands over one buffer where it handled
+  several. A kernel without the option is logged and read as before.
+
 ## Receive-side retry tee (`-retry-tee`)
 
 When configured, the serve loop mirrors every received **data** frame (fabric
@@ -241,12 +260,18 @@ stamped those frames during reconvergence and holds them in its retry cache.
 - Called when a retransmit arrives via a NACK ACK response. Deletes the
   matching `pending` entry and increments `bsl_gaps_suppressed_total`.
 
-**Sweeper**, every 100 ms:
+**Sweeper**, every 100 ms while a sweep is cheap. A sweep walks every pending
+gap under the lock the receive path takes for each frame, so the wait before
+the next one is at least ten times what the last one took, up to a second: a
+burst that leaves a hundred thousand gaps pending cannot keep the receive
+workers waiting on the lock for more than a tenth of the time.
 - Entries past `deadline` (detected + `nack-gap-ttl`) are evicted;
   `bsl_gaps_unrecovered_total` is incremented.
 - Entries past `nextAttempt` with `retries < nack-max-retries` are enqueued
   on `nackQueue`. `nextAttempt` is advanced immediately before enqueue to
   prevent the same gap from being re-dispatched before a response arrives.
+  Once the queue has refused a gap, the rest of that sweep leaves due gaps
+  due, for the next sweep.
 - `nackQueue` consumers send 64-byte NACK datagrams (carrying `HashKey`,
   `StartSeq`, `EndSeq`, and `SubtreeID`) to the current endpoint in the
   sorted registry.

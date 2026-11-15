@@ -2,7 +2,9 @@ package listener
 
 import (
 	"context"
+	"encoding/binary"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -32,6 +34,23 @@ type recvBatch struct {
 	iovs  [recvBatchSize]unix.Iovec
 	hdrs  [recvBatchSize]mmsghdr
 	n     int
+	// ctl holds each message's control data: with receive GRO on, the kernel
+	// says there how long the datagrams coalesced into the message are.
+	ctl [recvBatchSize][groCtlSize]byte
+
+	// refs counts who still reads the batch's buffers: the processing
+	// goroutine while it walks the batch, and each fragment a fragment worker
+	// has not stored yet. At zero the batch goes back to pool.
+	refs atomic.Int32
+	pool *sync.Pool
+}
+
+func (b *recvBatch) retain() { b.refs.Add(1) }
+
+func (b *recvBatch) release() {
+	if b.refs.Add(-1) == 0 && b.pool != nil {
+		b.pool.Put(b)
+	}
 }
 
 func newRecvBatch() *recvBatch {
@@ -44,8 +63,72 @@ func newRecvBatch() *recvBatch {
 		b.hdrs[i].Hdr.Namelen = uint32(unsafe.Sizeof(b.names[i]))
 		b.hdrs[i].Hdr.Iov = &b.iovs[i]
 		b.hdrs[i].Hdr.SetIovlen(1)
+		b.hdrs[i].Hdr.Control = &b.ctl[i][0]
 	}
 	return b
+}
+
+// Receive GRO (SetRecvGRO).
+//
+// A sender that hands the kernel runs of equal datagrams (UDP GSO, as the
+// proxy's group sends are) puts them on the wire back to back, and a receiving
+// socket with UDP_GRO set gets such a run back as ONE message: the datagrams'
+// payloads concatenated, with their common length in a control message. The
+// bytes are the same and so is their order, but the kernel queues, accounts
+// and hands over one buffer where it handled several, and the read loop makes
+// a seventh of the trips for a plane of 9000-byte fragments (seven fit under
+// the 64 KiB a message may carry). The receive loop splits the message back
+// into its datagrams, so nothing past this file sees a difference.
+//
+// The option is the receiving socket's own. Multicast delivery hands a
+// coalesced run to each socket that asked for it and splits it again for one
+// that did not, so listeners with and without it share a host.
+
+// groCtlSize is the control buffer per message: room for the one cmsg the
+// kernel adds (a cmsghdr and the 4-byte segment size, aligned).
+const groCtlSize = 32
+
+// enableGRO asks for coalesced runs on fd. An error means the kernel has no
+// UDP_GRO; the socket then delivers single datagrams as before.
+func enableGRO(fd int) error {
+	return unix.SetsockoptInt(fd, unix.IPPROTO_UDP, unix.UDP_GRO, 1)
+}
+
+// segSize is the length of the datagrams coalesced into message i, or 0 when
+// the message is a single datagram (no UDP_GRO control message came with it).
+func (b *recvBatch) segSize(i int) int {
+	ctl := b.ctl[i][:b.hdrs[i].Hdr.Controllen]
+	for len(ctl) >= unix.SizeofCmsghdr {
+		h := (*unix.Cmsghdr)(unsafe.Pointer(&ctl[0]))
+		if h.Len < unix.SizeofCmsghdr || int(h.Len) > len(ctl) {
+			return 0
+		}
+		if h.Level == unix.IPPROTO_UDP && h.Type == unix.UDP_GRO && h.Len >= unix.SizeofCmsghdr+4 {
+			// The kernel writes an int in host byte order.
+			return int(binary.NativeEndian.Uint32(ctl[unix.SizeofCmsghdr:]))
+		}
+		next := (int(h.Len) + unix.SizeofPtr - 1) &^ (unix.SizeofPtr - 1)
+		if next >= len(ctl) {
+			return 0
+		}
+		ctl = ctl[next:]
+	}
+	return 0
+}
+
+// message is message i's bytes and the length of the datagrams coalesced
+// into it: 0 when it is a single datagram. A coalesced run's datagrams are
+// seg bytes each, in arrival order, but the last, which may be shorter.
+func (b *recvBatch) message(i int) (msg []byte, seg int) {
+	n := int(b.hdrs[i].Len)
+	if n <= 0 {
+		return nil, 0
+	}
+	msg = b.bufs[i][:n]
+	if seg = b.segSize(i); seg >= n {
+		seg = 0
+	}
+	return msg, seg
 }
 
 // recv fills the batch from fd: at least one datagram (MSG_WAITFORONE: the
@@ -54,6 +137,7 @@ func newRecvBatch() *recvBatch {
 func (b *recvBatch) recv(fd int) (int, error) {
 	for i := range b.hdrs {
 		b.hdrs[i].Hdr.Namelen = uint32(unsafe.Sizeof(b.names[i]))
+		b.hdrs[i].Hdr.SetControllen(groCtlSize)
 		b.hdrs[i].Len = 0
 	}
 	n, _, errno := unix.Syscall6(unix.SYS_RECVMMSG, uintptr(fd), uintptr(unsafe.Pointer(&b.hdrs[0])), uintptr(recvBatchSize), uintptr(unix.MSG_WAITFORONE), 0, 0)
@@ -81,18 +165,35 @@ func (b *recvBatch) sockaddr(i int) unix.Sockaddr {
 // recvPipelined is the Linux receive side of the pipelined serve loop: one
 // recvmmsg per batch, one hand-off per batch.
 func (w *Worker) recvPipelined(ctx context.Context, fd int, tee bool) error {
-	pool := sync.Pool{New: func() any { return newRecvBatch() }}
+	if w.recvGRO {
+		if err := enableGRO(fd); err != nil {
+			w.log.Warn("receive GRO not available: reading single datagrams", "err", err)
+		}
+	}
+	var pool sync.Pool
+	pool.New = func() any { b := newRecvBatch(); b.pool = &pool; return b }
 	queue := make(chan *recvBatch, (w.recvQueue+recvBatchSize-1)/recvBatchSize)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for b := range queue {
+			b.refs.Store(1)
 			for i := 0; i < b.n; i++ {
-				if n := int(b.hdrs[i].Len); n > 0 {
-					w.handleDatagram(b.bufs[i][:n], b.sockaddr(i), tee)
+				msg, seg := b.message(i)
+				if msg == nil {
+					continue
 				}
+				from := b.sockaddr(i)
+				if seg > 0 {
+					// A coalesced run: its datagrams, in order.
+					for len(msg) > seg {
+						w.handleDatagram(msg[:seg], from, tee, b)
+						msg = msg[seg:]
+					}
+				}
+				w.handleDatagram(msg, from, tee, b)
 			}
-			pool.Put(b)
+			b.release()
 		}
 	}()
 	defer func() {

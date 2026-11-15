@@ -105,11 +105,14 @@ type Worker struct {
 	rec               *metrics.Recorder
 	debug             bool
 	verifyPayloadHash bool
-	senderACL         *filter.SenderACL     // nil = accept every source
-	retryTee          *retryTeeSender       // nil = receive-side retry tee disabled
-	dedupSet          *dedup.Set            // nil = dedup disabled
-	txDedup           *txdedup.Store        // nil = cross-listener TxID dedup disabled
-	reassemBuf        *reassembly.Buffer    // nil = BRC-130 disabled
+	senderACL         *filter.SenderACL  // nil = accept every source
+	retryTee          *retryTeeSender    // nil = receive-side retry tee disabled
+	dedupSet          *dedup.Set         // nil = dedup disabled
+	txDedup           *txdedup.Store     // nil = cross-listener TxID dedup disabled
+	reassemBuf        *reassembly.Buffer // nil = BRC-130 disabled
+	// reassemBufs is set with more than one buffer (SetReassemblyBuffers): a
+	// fragment then goes to the buffer its object selects. See fragworkers.go.
+	reassemBufs       []*reassembly.Buffer
 	beefEngine        *shard.PlaneEngine    // nil = BRC-148 BEEF plane disabled (V9 frames dropped)
 	beefTopics        map[[32]byte]struct{} // worker-level topic election; empty = admit all topics
 	beefVersions      map[uint32]struct{}   // accepted BEEF version words; empty = admit all
@@ -124,6 +127,15 @@ type Worker struct {
 	// net.IP (not a string) so the hot RX path does no per-frame stringification
 	// (the address is stringified only at the rare gap/NACK metric-emit sites).
 	curSource net.IP
+	// curHold is the hold on the pooled buffer the datagram being processed
+	// sits in, set under procMu beside curSource; nil for a re-injected frame
+	// (its bytes are its own) and on the inline receive path.
+	curHold datagramHold
+	// fragQ are the fragment workers' queues, one per reassembly buffer, and
+	// fragCtx ends when they stop. Both are set once, under procMu, before any
+	// fragment worker runs; nil = fragments are stored inline.
+	fragQ   []chan fragJob
+	fragCtx context.Context
 
 	// Runtime join management for BRC-139 auto-join and live-resharding
 	// bridging mode. joinFd is the worker's IPv6 multicast socket; it is
@@ -146,6 +158,9 @@ type Worker struct {
 	// channel this deep, so recvfrom overlaps with decode, reassembly and
 	// delivery. 0 processes inline, in the serve loop. See SetRecvQueueDepth.
 	recvQueue int
+	// recvGRO asks the kernel for coalesced runs of datagrams on the receive
+	// socket (SetRecvGRO); the pipelined loop splits them again.
+	recvGRO bool
 
 	// egressSeq assigns a monotonic per-bundle-flow (keyed by the bundle
 	// HashKey) egress SeqNum to decoalesced BRC-142 members: the per-tx SeqNum
@@ -190,6 +205,13 @@ func (w *Worker) SetRecvQueueDepth(depth int) {
 	}
 	w.recvQueue = depth
 }
+
+// SetRecvGRO turns receive GRO on for the worker's socket: the kernel hands
+// over runs of equal datagrams from one sender as one message (UDP_GRO), and
+// the pipelined receive loop splits each back into its datagrams, in order.
+// It needs the receive queue (SetRecvQueueDepth above 0) and Linux; elsewhere
+// it does nothing. Must be called before Run.
+func (w *Worker) SetRecvGRO(on bool) { w.recvGRO = on }
 
 // SetGroupSources configures per-group SSM source lists for the data-plane
 // join. Must be called before [Worker.Run]. Groups absent from src (or
@@ -576,6 +598,10 @@ func (w *Worker) serve(ctx context.Context, fd int, readyMsg string, tee bool) e
 	}
 
 	if w.recvQueue > 0 {
+		// Fragment workers ride the pipelined loop only: its buffers are
+		// pooled, so a worker can hold one past the hand-off.
+		stop := w.startFragWorkers(ctx)
+		defer stop()
 		return w.servePipelined(ctx, fd, tee)
 	}
 	buf := make([]byte, recvBufSize)
@@ -601,14 +627,14 @@ func (w *Worker) serve(ctx context.Context, fd int, readyMsg string, tee bool) e
 			continue
 		}
 		if n > 0 {
-			w.handleDatagram(buf[:n], from, tee)
+			w.handleDatagram(buf[:n], from, tee, nil)
 		}
 	}
 }
 
 // handleDatagram is the per-datagram path shared by the inline and pipelined
 // serve loops: sender filter, retry tee, then processFrame under procMu.
-func (w *Worker) handleDatagram(raw []byte, from unix.Sockaddr, tee bool) {
+func (w *Worker) handleDatagram(raw []byte, from unix.Sockaddr, tee bool, hold datagramHold) {
 	// Extract the source only when something consumes it (sender ACL or the
 	// gap tracker), so a worker with neither pays no per-frame cost.
 	var src net.IP
@@ -634,8 +660,9 @@ func (w *Worker) handleDatagram(raw []byte, from unix.Sockaddr, tee bool) {
 		w.teeToRetry(raw, from)
 	}
 	w.procMu.Lock()
-	w.curSource = src
+	w.curSource, w.curHold = src, hold
 	w.processFrame(raw)
+	w.curHold = nil
 	w.procMu.Unlock()
 }
 
@@ -668,6 +695,7 @@ func (w *Worker) servePipelined(ctx context.Context, fd int, tee bool) error {
 func (w *Worker) Reinject(raw []byte) bool {
 	w.procMu.Lock()
 	w.curSource = nil // recovered frame: no live source; don't clobber per-flow source attribution
+	w.curHold = nil   // and its bytes are its own, not a pooled receive buffer's
 	accepted := w.processFrame(raw)
 	w.procMu.Unlock()
 	return accepted
@@ -712,7 +740,11 @@ func (w *Worker) processFrame(raw []byte) bool {
 			}
 			return true
 		}
-		w.reassemBuf.Observe(ff)
+		// A BEEF fragment goes to its fragment worker when there are any (see
+		// fragworkers.go); the gap tracker still sees it here, in arrival order.
+		if !w.dispatchFragment(ff) {
+			w.bufferFor(ff).Observe(ff)
+		}
 		// Fragment-level gap tracking: feed each fragment's (HashKey,
 		// SeqNum) to the NACK tracker so interior fragment loss within an
 		// object's flow is detected and recovered; the retry endpoint
