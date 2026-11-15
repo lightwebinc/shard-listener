@@ -7,6 +7,7 @@ package listener
 import (
 	"crypto/sha256"
 	"fmt"
+	"net"
 
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/objfmt"
@@ -39,7 +40,7 @@ func (w *Worker) processBeefFrame(raw []byte) {
 		}
 		return
 	}
-	w.deliverBeef(raw, bf)
+	w.deliverBeef(raw, bf, w.curSource)
 }
 
 // DeliverReassembledBeef re-encodes a BRC-130-reassembled BEEF object as a
@@ -66,7 +67,14 @@ func (w *Worker) DeliverReassembledBeefFrame(buf []byte, bf *frame.BEEFFrame) {
 	if w.rec != nil {
 		w.rec.ReassemblyCompleted()
 	}
-	w.deliverBeef(buf[:n], bf)
+	// With fragment workers this runs on one of them, not under procMu: the
+	// source of the datagram being processed is not this object's to read, and
+	// each of its fragments was attributed as it arrived.
+	var src net.IP
+	if w.fragQ == nil {
+		src = w.curSource
+	}
+	w.deliverBeef(buf[:n], bf, src)
 }
 
 // deliverBeef is the shared BEEF delivery core: group membership (implicit:
@@ -74,7 +82,7 @@ func (w *Worker) DeliverReassembledBeefFrame(buf []byte, bf *frame.BEEFFrame) {
 // dedup gates → egress → gap tracking. NACK observation uses a ZERO
 // SubtreeID (a BEEF flow interleaves topics, so a gap's TopicID is
 // unknowable) and the ContentID as the frame identity.
-func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame) {
+func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame, src net.IP) {
 	if w.beefEngine == nil {
 		if w.rec != nil {
 			w.rec.FrameDropped(w.id, "beef_disabled")
@@ -159,7 +167,7 @@ func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame) {
 				w.rec.FrameTxDeduped(w.id)
 			}
 			if w.tracker != nil && bf.SeqNum != 0 {
-				w.tracker.Observe(groupIdx, zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
+				w.tracker.Observe(groupIdx, zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, src)
 			}
 			return
 		}
@@ -172,7 +180,7 @@ func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame) {
 				w.rec.FrameDeduped(w.id)
 			}
 			if w.tracker != nil {
-				w.tracker.Observe(groupIdx, zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
+				w.tracker.Observe(groupIdx, zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, src)
 			}
 			return
 		}
@@ -183,7 +191,7 @@ func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame) {
 	// Gap tracking: BEEF flows are per (sender, group); the NACK's SubtreeID
 	// field is zero per BRC-148 (responders ignore it).
 	if w.tracker != nil && bf.SeqNum != 0 {
-		w.tracker.Observe(groupIdx, zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, w.curSource)
+		w.tracker.Observe(groupIdx, zeroSub, bf.HashKey, bf.SeqNum, bf.ContentID, src)
 	}
 
 	if w.debug {
