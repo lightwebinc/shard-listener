@@ -151,7 +151,9 @@ carries large objects:
   the completed object. The decode and the gap tracker stay on the processing
   goroutine, in arrival order; every other class is stored inline, in the
   buffer its identifier selects. A receive buffer is held until the fragment
-  worker has stored the fragment read from it.
+  worker has stored the fragment read from it, and a worker's receive batches
+  are bounded: fragment workers that fall behind make the reader wait for a
+  batch, and the socket buffer takes the burst.
 - **Receive GRO** (`Worker.SetRecvGRO`, Linux). The socket asks for `UDP_GRO`:
   a run of equal datagrams from one sender arrives as one message with the
   datagrams' length in a control message, and the receive loop splits it back,

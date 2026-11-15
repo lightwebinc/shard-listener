@@ -3,7 +3,6 @@ package listener
 import (
 	"context"
 	"encoding/binary"
-	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -42,16 +41,63 @@ type recvBatch struct {
 	// goroutine while it walks the batch, and each fragment a fragment worker
 	// has not stored yet. At zero the batch goes back to pool.
 	refs atomic.Int32
-	pool *sync.Pool
+	pool *batchPool
 }
 
 func (b *recvBatch) retain() { b.refs.Add(1) }
 
 func (b *recvBatch) release() {
 	if b.refs.Add(-1) == 0 && b.pool != nil {
-		b.pool.Put(b)
+		b.pool.put(b)
 	}
 }
+
+// recvBatchHold is how many batches, beyond those the receive queue holds,
+// fragments waiting for a fragment worker may keep from reuse.
+const recvBatchHold = 32
+
+// batchPool is one worker's receive batches. It makes them as they are first
+// needed and never more than max. A fragment a fragment worker has not stored
+// yet keeps its whole batch from reuse (recvBatchSize buffers of maxDatagram
+// bytes), so with no bound a fragment worker that fell behind could hold a
+// batch for every fragment queued for it. At the bound the reader waits for a
+// batch to come back and the socket buffer takes the burst, which is what
+// happens when the processing goroutine falls behind.
+type batchPool struct {
+	free chan *recvBatch
+	made int // batches made so far; the reader goroutine's alone
+	max  int
+}
+
+func newBatchPool(max int) *batchPool {
+	return &batchPool{free: make(chan *recvBatch, max), max: max}
+}
+
+// get returns a batch free for use: one that came back, a new one while fewer
+// than max exist, or else the next to come back. It returns nil if ctx ends
+// first. Only the reader goroutine calls it.
+func (p *batchPool) get(ctx context.Context) *recvBatch {
+	select {
+	case b := <-p.free:
+		return b
+	default:
+	}
+	if p.made < p.max {
+		p.made++
+		b := newRecvBatch()
+		b.pool = p
+		return b
+	}
+	select {
+	case b := <-p.free:
+		return b
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+// put takes a batch back. It never waits: free has room for every batch made.
+func (p *batchPool) put(b *recvBatch) { p.free <- b }
 
 func newRecvBatch() *recvBatch {
 	b := &recvBatch{}
@@ -170,9 +216,10 @@ func (w *Worker) recvPipelined(ctx context.Context, fd int, tee bool) error {
 			w.log.Warn("receive GRO not available: reading single datagrams", "err", err)
 		}
 	}
-	var pool sync.Pool
-	pool.New = func() any { b := newRecvBatch(); b.pool = &pool; return b }
 	queue := make(chan *recvBatch, (w.recvQueue+recvBatchSize-1)/recvBatchSize)
+	// Every batch that can be in use at once: queued, read into, walked by the
+	// processing goroutine, and those held for fragment workers.
+	pool := newBatchPool(cap(queue) + 2 + recvBatchHold)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -201,10 +248,13 @@ func (w *Worker) recvPipelined(ctx context.Context, fd int, tee bool) error {
 		<-done
 	}()
 	for {
-		b := pool.Get().(*recvBatch)
+		b := pool.get(ctx)
+		if b == nil {
+			return nil
+		}
 		n, err := b.recv(fd)
 		if err != nil {
-			pool.Put(b)
+			pool.put(b)
 			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
 				if ctx.Err() != nil {
 					return nil
@@ -224,7 +274,7 @@ func (w *Worker) recvPipelined(ctx context.Context, fd int, tee bool) error {
 			continue
 		}
 		if n == 0 {
-			pool.Put(b)
+			pool.put(b)
 			continue
 		}
 		queue <- b

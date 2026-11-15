@@ -1,6 +1,7 @@
 package listener
 
 import (
+	"context"
 	"encoding/binary"
 	"testing"
 	"time"
@@ -148,5 +149,50 @@ func TestRecvGROLoopback(t *testing.T) {
 		if len(d) != want || d[0] != byte(i) || d[len(d)-1] != byte(i) {
 			t.Fatalf("datagram %d: %d bytes, first %d last %d", i, len(d), d[0], d[len(d)-1])
 		}
+	}
+}
+
+// TestBatchPool_BoundsLiveBatches: the pool makes batches up to its bound,
+// then the reader waits for one to come back, and a context that ends frees
+// the wait. A held batch is what a fragment not yet stored keeps.
+func TestBatchPool_BoundsLiveBatches(t *testing.T) {
+	p := newBatchPool(3)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var held []*recvBatch
+	for i := 0; i < 3; i++ {
+		b := p.get(ctx)
+		if b == nil {
+			t.Fatalf("batch %d of 3 not handed out", i+1)
+		}
+		b.refs.Store(1)
+		held = append(held, b)
+	}
+	got := make(chan *recvBatch, 1)
+	go func() { got <- p.get(ctx) }()
+	select {
+	case b := <-got:
+		t.Fatalf("a fourth batch was handed out past the bound: %p", b)
+	case <-time.After(50 * time.Millisecond):
+	}
+	held[1].release() // its last holder is done: the batch comes back
+	select {
+	case b := <-got:
+		if b != held[1] {
+			t.Fatal("the waiting reader did not get the batch that came back")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reader still waits after a batch came back")
+	}
+
+	go func() { got <- p.get(ctx) }()
+	cancel()
+	select {
+	case b := <-got:
+		if b != nil {
+			t.Fatal("a batch was handed out after the context ended with none free")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reader still waits after its context ended")
 	}
 }
