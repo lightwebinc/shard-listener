@@ -162,7 +162,7 @@ func TestRunUnicastIngest_DeliveryForwardsToSink(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = egr.Close() })
 	iface := loopbackIface(t)
-	const ingestPort = 39017
+	ingestPort := freeUDP6Port(t)
 	// Delivery worker: nil tracker/mcastEgr, no dedup/reassembly wired.
 	w := New(0, iface, ingestPort, nil, eng, filter.New(nil, nil, nil, nil), egr, nil, nil, nil, false)
 
@@ -216,7 +216,7 @@ func TestRunUnicastIngest_PipelinedDeliveryForwardsToSink(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = egr.Close() })
 	iface := loopbackIface(t)
-	const ingestPort = 39018
+	ingestPort := freeUDP6Port(t)
 	w := New(0, iface, ingestPort, nil, eng, filter.New(nil, nil, nil, nil), egr, nil, nil, nil, false)
 	w.SetRecvQueueDepth(64)
 
