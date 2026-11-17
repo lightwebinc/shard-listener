@@ -2,10 +2,13 @@ package listener
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,7 +70,10 @@ func newTeeSinkDepth(t *testing.T, depth int) (string, <-chan []byte, func()) {
 }
 
 // startIngestWorker builds a worker with the retry tee wired to teeAddr and
-// runs the given ingest entry point until test cleanup.
+// runs the given ingest entry point until test cleanup. It returns once the
+// worker's socket is bound, and fails with the worker's own error if the
+// entry point returns first (a bind that failed used to surface only as
+// "connection refused" on the test's next write).
 func startIngestWorker(t *testing.T, ingestPort int, teeAddr string, run func(*Worker, context.Context) error) *Worker {
 	t.Helper()
 	sinkAddr, _, sinkCleanup := newSink(t)
@@ -90,8 +96,53 @@ func startIngestWorker(t *testing.T, ingestPort int, teeAddr string, run func(*W
 			t.Error("ingest loop did not exit on cancel")
 		}
 	})
-	time.Sleep(50 * time.Millisecond) // let the socket bind
+	waitBound(t, ingestPort, errCh)
 	return w
+}
+
+// freeUDP6Port asks the kernel for a UDP port nothing holds. Fixed test ports
+// sat in the ephemeral range, where another socket in the same run could
+// already have them.
+func freeUDP6Port(t *testing.T) int {
+	t.Helper()
+	pc, err := net.ListenPacket("udp6", "[::]:0")
+	if err != nil {
+		t.Skipf("no IPv6: %v", err)
+	}
+	port := pc.LocalAddr().(*net.UDPAddr).Port
+	_ = pc.Close()
+	return port
+}
+
+// waitBound returns once a UDP socket is bound to port on the wildcard IPv6
+// address, and fails with the worker's error if it exits first. It reads
+// /proc/net/udp6 rather than probing with a bind, which could steal the port
+// from the worker (it sets SO_REUSEADDR, a probe would not). Without /proc
+// (not Linux) it falls back to a short sleep.
+func waitBound(t *testing.T, port int, errCh chan error) {
+	t.Helper()
+	want := fmt.Sprintf("%032X:%04X ", 0, port)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		select {
+		case err := <-errCh:
+			errCh <- err // leave it for the cleanup
+			t.Fatalf("ingest worker exited before it was bound: %v", err)
+		default:
+		}
+		b, err := os.ReadFile("/proc/net/udp6")
+		if err != nil {
+			time.Sleep(50 * time.Millisecond)
+			return
+		}
+		if strings.Contains(string(b), want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nothing bound to udp6 port %d within 2s", port)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func dialIngest(t *testing.T, port int) *net.UDPConn {
@@ -132,7 +183,7 @@ func TestRetryTee_MirrorsReceivedFrameWithSource(t *testing.T) {
 	teeAddr, teeCh, teeCleanup := newTeeSink(t)
 	defer teeCleanup()
 
-	const ingestPort = 39041
+	ingestPort := freeUDP6Port(t)
 	startIngestWorker(t, ingestPort, teeAddr, func(w *Worker, ctx context.Context) error {
 		return w.RunUnicastIngest(ctx)
 	})
@@ -173,7 +224,7 @@ func TestRetryTee_SkipsControlAndHeaderFrames(t *testing.T) {
 	teeAddr, teeCh, teeCleanup := newTeeSink(t)
 	defer teeCleanup()
 
-	const ingestPort = 39042
+	ingestPort := freeUDP6Port(t)
 	startIngestWorker(t, ingestPort, teeAddr, func(w *Worker, ctx context.Context) error {
 		return w.RunUnicastIngest(ctx)
 	})
@@ -225,7 +276,7 @@ func TestRetryTee_LocalMirrorPathDoesNotTee(t *testing.T) {
 	teeAddr, teeCh, teeCleanup := newTeeSink(t)
 	defer teeCleanup()
 
-	const mirrorPort = 39043
+	mirrorPort := freeUDP6Port(t)
 	startIngestWorker(t, mirrorPort, teeAddr, func(w *Worker, ctx context.Context) error {
 		return w.RunUnicastIngestOn(ctx, mirrorPort)
 	})
@@ -309,7 +360,7 @@ func TestRetryTee_AllFramesArriveWhenQueueKeepsUp(t *testing.T) {
 	teeAddr, teeCh, teeCleanup := newTeeSinkDepth(t, n)
 	defer teeCleanup()
 
-	const ingestPort = 39044
+	ingestPort := freeUDP6Port(t)
 	w := startIngestWorker(t, ingestPort, teeAddr, func(w *Worker, ctx context.Context) error {
 		return w.RunUnicastIngest(ctx)
 	})
