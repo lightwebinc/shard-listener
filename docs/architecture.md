@@ -88,10 +88,10 @@ Source lists per group come from two places:
 
 | Group                          | Source set                                                                                    |
 | ------------------------------ | --------------------------------------------------------------------------------------------- |
-| Data groups (`FF35::B:idx`), BEEF band, BlockBroadcast (`:FFFE`) | `-ssm-publishers-static`: the proxies' `-bind-source` addresses (the proxy emits all three) |
+| Data groups (`FF35::B:idx`, startup and auto-join), BEEF band, BlockBroadcast (`:FFFE`) | `-ssm-publishers-static`: the proxies' `-bind-source` addresses (the proxy emits all three) |
 | Beacon (`:FFFD`)               | `-ssm-bootstrap-beacon`: the retry-endpoint pod IPs (retry-endpoint emits NACK ADVERTs)       |
 | Manifest port of the beacon group | `-ssm-bootstrap-manifest`: the shard-manifest pod IPs                                      |
-| Subtree data, subtree group announce (`:FFFB`, `:FFFC`) | `-ssm-bootstrap-subtree-announce`                                    |
+| Subtree data, subtree group announce (`:FFFB`, `:FFFC`) | `-ssm-bootstrap-subtree-announce`, which must name the proxies (they emit both); unset, the `-ssm-publishers-static` set |
 
 BlockBroadcast follows the publishers, not the manifest announcers: block
 announces, anchors and coinbase frames leave from the emitting proxy's own
@@ -400,6 +400,15 @@ same group**: shard-manifest announces on UDP 9001 while ADVERTs arrive on
 Under SSM each port joins its own source roster (`-ssm-bootstrap-beacon` for
 ADVERTs, `-ssm-bootstrap-manifest` for manifests) because the two are
 published by different hosts.
+
+UDP 9001 is also the default data port, so the manifest socket shares it with
+the data-plane workers (and the BRC-127 announce socket shares it too). The
+control sockets bind with the workers' options, `SO_REUSEPORT` plus
+`SO_REUSEADDR` (`discovery/sharedport.go`), which lets any of them bind
+first under either source mode. On Linux they also set
+`IPV6_MULTICAST_ALL=0`: by default a socket receives multicast for every group
+joined on the host at its port, which would hand the control sockets the whole
+data plane.
 
 Endpoints are evicted automatically after 3 × BeaconInterval without a refresh.
 The NACK tracker holds a snapshot of the registry at dispatch time, so evictions

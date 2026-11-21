@@ -15,7 +15,7 @@
 //	-source-mode                       SOURCE_MODE                        asm              Multicast addressing model: asm | ssm
 //	-ssm-bootstrap-beacon              SSM_BOOTSTRAP_BEACON                                CSV of retry-endpoint sources for the beacon (S,G) join
 //	-ssm-bootstrap-manifest            SSM_BOOTSTRAP_MANIFEST                              CSV of shard-manifest sources for the manifest-port (S,G) join
-//	-ssm-bootstrap-subtree-announce    SSM_BOOTSTRAP_SUBTREE_ANNOUNCE                      CSV of subtree-announce emitter sources
+//	-ssm-bootstrap-subtree-announce    SSM_BOOTSTRAP_SUBTREE_ANNOUNCE     (publishers)     CSV of 0xFFFB/0xFFFC emitter sources; must name the proxies; unset = -ssm-publishers-static
 //	-ssm-publishers-static             SSM_PUBLISHERS_STATIC                               Lab/CI: CSV of publisher (proxy) sources for the data-plane and block-broadcast (S,G) joins
 //	-ssm-bootstrap-refresh             SSM_BOOTSTRAP_REFRESH              30s              DNS re-resolve interval for SSM bootstrap entries
 //	-local-source                      LOCAL_SOURCE                                        Co-located proxy BIND_SOURCE excluded from (S,G) joins
@@ -216,12 +216,15 @@ type Config struct {
 	// SSMBootstrap{Beacon,Manifest,SubtreeGroupAnnounce}: per-control-group
 	//   bootstrap source lists (IPv6 literals or DNS names) used to (S,G)
 	//   join the matching control group. Resolved via shared
-	//   bootstrap.Resolver at startup.
+	//   bootstrap.Resolver at startup. The subtree-announce list covers
+	//   0xFFFB and 0xFFFC, whose traffic the proxies emit, so it must name
+	//   them; unset, those groups take the publisher set.
 	// SSMPublishersStatic: lab/CI escape hatch for the publisher (proxy)
 	//   source set, and the only one this binary joins: it sources the
-	//   data-plane shard groups, the BEEF band and block broadcast
-	//   (0xFFFE), whose frames the proxies emit from their own addresses.
-	//   The manifest-announced source set is not applied to joins.
+	//   data-plane shard groups (at startup and on auto-join), the BEEF
+	//   band and block broadcast (0xFFFE), whose frames the proxies emit
+	//   from their own addresses. The manifest-announced source set is not
+	//   applied to joins.
 	// SSMBootstrapRefresh: DNS re-resolve interval (default 30s).
 	// LocalSource: the co-located proxy's BIND_SOURCE on a collapsed node.
 	//   Excluded from every roster-driven (S,G) join: joining the node's
@@ -429,7 +432,7 @@ func Load() (*Config, error) {
 	ssmBootstrapManifest := flag.String("ssm-bootstrap-manifest", envStr("SSM_BOOTSTRAP_MANIFEST", ""),
 		"CSV of shard-manifest sources for SSM join of the beacon group's manifest port (-manifest-beacon-port)")
 	ssmBootstrapSubtreeAnn := flag.String("ssm-bootstrap-subtree-announce", envStr("SSM_BOOTSTRAP_SUBTREE_ANNOUNCE", ""),
-		"CSV of subtree-announce emitter sources for SSM join of that control group")
+		"CSV of subtree data/group-announce emitter sources (0xFFFB/0xFFFC) for SSM joins; the proxies emit both, so list them; unset uses -ssm-publishers-static")
 	ssmPublishersStatic := flag.String("ssm-publishers-static", envStr("SSM_PUBLISHERS_STATIC", ""),
 		"lab/CI: CSV of publisher (proxy) IPv6 sources for SSM join of the data-plane and block-broadcast groups")
 	flag.StringVar(&c.LocalSource, "local-source", envStr("LOCAL_SOURCE", ""),

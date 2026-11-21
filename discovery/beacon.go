@@ -21,13 +21,13 @@ import (
 //
 // When Sources is non-empty the beacon groups are joined as SSM (S,G)
 // against the supplied source list (typically the retry-endpoint pods'
-// IPv6 from -ssm-bootstrap-beacon). When Sources is empty the
-// listener uses the stdlib ASM path (net.ListenMulticastUDP).
+// IPv6 from -ssm-bootstrap-beacon). When Sources is empty they are joined
+// any-source (IPV6_JOIN_GROUP).
 //
 // Groups entries that share a UDP port share ONE socket, with a join per
-// address on it. Two wildcard binds on the same port collide, and the
-// BRC-126/129 transition config, the any-source FF0x beacon group and the
-// source-specific FF3x one, both on -beacon-port: is exactly such a pair.
+// address on it: the BRC-126/129 transition config, the any-source FF0x
+// beacon group and the source-specific FF3x one, both on -beacon-port, is
+// exactly such a pair.
 type BeaconListener struct {
 	Registry *Registry
 	Groups   []*net.UDPAddr    // beacon group addresses to join
@@ -78,9 +78,9 @@ func (bl *BeaconListener) Start(ctx context.Context) error {
 
 // bucketByPort groups the configured beacon addresses by UDP port,
 // preserving first-seen port order and the address order within a port.
-// One bucket becomes one socket: a second wildcard bind on a port already
-// held fails, so the FF0x/FF3x pair the BRC-126/129 transition puts on
-// -beacon-port has to be two joins on one socket, not two sockets.
+// One bucket becomes one socket and one receive loop: the FF0x/FF3x pair
+// the BRC-126/129 transition puts on -beacon-port is two joins on one
+// socket, not two sockets.
 func bucketByPort(groups []*net.UDPAddr) [][]*net.UDPAddr {
 	idx := make(map[int]int, len(groups))
 	buckets := make([][]*net.UDPAddr, 0, len(groups))
@@ -97,32 +97,25 @@ func bucketByPort(groups []*net.UDPAddr) [][]*net.UDPAddr {
 }
 
 // openGroupConn opens one UDP6 listener on the bucket's shared port and
-// joins every address in it. A single ASM address keeps the stdlib path
-// (net.ListenMulticastUDP: bind + IPV6_JOIN_GROUP, byte-for-byte what
-// earlier releases did). Everything else, any SSM roster, or more than
-// one address on the port, which is what -control-group-compat=both
-// produces: binds the wildcard once and adds each membership via netjoin
-// (MCAST_JOIN_SOURCE_GROUP per source under SSM, IPV6_JOIN_GROUP under
-// ASM).
+// joins every address in it: it binds the wildcard once and adds each
+// membership via netjoin (MCAST_JOIN_SOURCE_GROUP per source under SSM,
+// IPV6_JOIN_GROUP under ASM). One bucket holding two addresses is what
+// -control-group-compat=both produces.
+//
+// The bind carries the data-plane workers' sharing options (shareDataPort):
+// the manifest port defaults to the data port (9001), so this socket and the
+// workers' sockets, plus the BRC-127 announce socket, hold one port. Without
+// them the second bind failed with EADDRINUSE, either every worker or the
+// beacon listener (which then also stops ADVERT discovery).
 func (bl *BeaconListener) openGroupConn(grps []*net.UDPAddr) (*net.UDPConn, error) {
 	if len(grps) == 0 {
 		return nil, fmt.Errorf("beacon listen: empty group bucket")
 	}
 	port := grps[0].Port
 	srcs := bl.sourcesFor(grps[0])
-	if len(srcs) == 0 && len(grps) == 1 {
-		return net.ListenMulticastUDP("udp6", bl.Iface, grps[0])
-	}
-	// Bind the wildcard on the shared port (so we receive datagrams sent
-	// to any joined group address) and add the memberships explicitly.
-	pc, err := net.ListenPacket("udp6", fmt.Sprintf("[::]:%d", port))
+	uc, err := listenSharedUDP6(port)
 	if err != nil {
 		return nil, fmt.Errorf("beacon listen %d: %w", port, err)
-	}
-	uc, ok := pc.(*net.UDPConn)
-	if !ok {
-		_ = pc.Close()
-		return nil, fmt.Errorf("beacon listen: unexpected conn type %T", pc)
 	}
 	raw, err := uc.SyscallConn()
 	if err != nil {

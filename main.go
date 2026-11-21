@@ -220,17 +220,18 @@ func run() error {
 	// SSM: resolve per-control-group bootstrap source lists and the
 	// static publisher list (lab/CI) into a single map keyed by group
 	// address. The publisher list covers every group the proxies emit to:
-	// the data-plane shard groups, the BEEF band and block broadcast
-	// (0xFFFE). The manifest-announced source set (BRC-139 SourcesValid)
-	// is not applied to joins: the beacon listener observes manifests and
-	// the applier reports source-set changes through
+	// the data-plane shard groups (at startup and on auto-join), the BEEF
+	// band, block broadcast (0xFFFE), and subtree announce (0xFFFB/0xFFFC)
+	// when that has no list of its own. The manifest-announced source set
+	// (BRC-139 SourcesValid) is not applied to joins: the beacon listener
+	// observes manifests and the applier reports source-set changes through
 	// manifest.Hooks.OnSourceSetChange, which this binary leaves unset.
-	// Startup is fail-closed on the configured lists.
-	var gs listener.GroupSources
-	var beaconSrcs, manifestSrcs, subAnnSrcs []netip.Addr
+	// Startup is fail-closed on the configured lists. Under ASM every
+	// roster stays nil, which selects (*,G) joins.
+	var ssm ssmSources
 	if !delivery && cfg.SourceMode == "ssm" {
 		var err error
-		gs, beaconSrcs, manifestSrcs, subAnnSrcs, err = buildSSMSources(ctx, cfg, beefJoinIdx)
+		ssm, err = buildSSMSources(ctx, cfg, beefJoinIdx)
 		if err != nil {
 			return fmt.Errorf("ssm bootstrap: %w", err)
 		}
@@ -274,7 +275,7 @@ func run() error {
 			Registry:      groupReg,
 			Groups:        announceGroups,
 			Iface:         cfg.Iface,
-			Sources:       subAnnSrcs,
+			Sources:       ssm.subtreeAnnounce,
 			DefaultTTL:    cfg.SubtreeGroupDefaultTTL,
 			SenderInclude: cfg.SenderInclude,
 			SenderExclude: cfg.SenderExclude,
@@ -328,7 +329,7 @@ func run() error {
 			Registry: reg,
 			Groups:   beaconGroups(cfg, beaconIPs),
 			Iface:    cfg.Iface,
-			Sources:  beaconSrcs,
+			Sources:  ssm.beacon,
 			Rec:      rec,
 			Debug:    cfg.Debug,
 		}
@@ -337,8 +338,8 @@ func run() error {
 			// The manifest port is published by shard-manifest announcers,
 			// not by the retry endpoints that publish ADVERTs, so under SSM
 			// it joins its own (S,G) roster (-ssm-bootstrap-manifest).
-			if len(manifestSrcs) > 0 && cfg.AutoConfigBeaconPort != cfg.BeaconPort {
-				bl.SourcesByPort = map[int][]netip.Addr{cfg.AutoConfigBeaconPort: manifestSrcs}
+			if len(ssm.manifest) > 0 && cfg.AutoConfigBeaconPort != cfg.BeaconPort {
+				bl.SourcesByPort = map[int][]netip.Addr{cfg.AutoConfigBeaconPort: ssm.manifest}
 			}
 			slog.Info("manifest consumer enabled",
 				"bootstrap", cfg.AutoConfigBootstrap,
@@ -403,46 +404,7 @@ func run() error {
 					if !cfg.AutoJoinFromManifest {
 						return
 					}
-					for _, idx := range added {
-						addr := engine.Addr(uint32(idx), cfg.ListenPort)
-						ga, ok := netip.AddrFromSlice(addr.IP.To16())
-						if !ok {
-							slog.Warn("auto-join: bad group address", "idx", idx)
-							continue
-						}
-						for _, w := range workers {
-							if err := w.AddGroup(ga, nil); err != nil {
-								var errno syscall.Errno
-								if errors.As(err, &errno) && errno == syscall.ENOBUFS {
-									// mld_max_msf source-filter exhaustion is the
-									// canonical at-scale join failure (category-8).
-									slog.Error("auto-join failed: MLD source-filter exhausted; raise net.ipv6.mld_max_msf",
-										"group", ga.String(), "err", err, "errno", errno.Error(), "syscall", "setsockopt")
-								} else {
-									slog.Warn("auto-join AddGroup failed",
-										"group", ga.String(), "worker", w, "err", err)
-								}
-							}
-						}
-					}
-					for _, idx := range removed {
-						addr := engine.Addr(uint32(idx), cfg.ListenPort)
-						ga, ok := netip.AddrFromSlice(addr.IP.To16())
-						if !ok {
-							continue
-						}
-						// Static -shard-include entries are NEVER leaved.
-						if inStaticInclude(cfg.ShardInclude, idx) {
-							continue
-						}
-						for _, w := range workers {
-							if err := w.RemoveGroup(ga, nil); err != nil {
-								slog.Warn("auto-join RemoveGroup failed",
-									"group", ga.String(), "worker", w, "err", err)
-							}
-						}
-					}
-					slog.Info("auto-join applied", "added", added, "removed", removed)
+					applyPilotGroups(workers, engine, cfg.ListenPort, cfg.ShardInclude, ssm.publishers, added, removed)
 				},
 			},
 		}
@@ -635,8 +597,8 @@ func run() error {
 		if tracker != nil {
 			tracker.RegisterRecover(w.ID(), w.Reinject)
 		}
-		if gs != nil {
-			w.SetGroupSources(gs)
+		if ssm.groups != nil {
+			w.SetGroupSources(ssm.groups)
 		}
 		if headerEgr != nil {
 			w.SetHeaderEgress(headerEgr)
@@ -928,12 +890,24 @@ func excludeOwnSource(srcs []netip.Addr, own netip.Addr) []netip.Addr {
 	return out
 }
 
+// ssmSources is the resolved SSM source plan: the per-group map the
+// data-plane workers join from, and the rosters handed to the control-plane
+// listeners and to runtime auto-join. Every roster has -local-source removed.
+type ssmSources struct {
+	groups          listener.GroupSources
+	beacon          []netip.Addr // -ssm-bootstrap-beacon: retry endpoints (ADVERTs)
+	manifest        []netip.Addr // -ssm-bootstrap-manifest: announcers (manifest port)
+	subtreeAnnounce []netip.Addr // 0xFFFB/0xFFFC: -ssm-bootstrap-subtree-announce, else publishers
+	publishers      []netip.Addr // -ssm-publishers-static: the proxies
+}
+
 // buildSSMSources resolves the per-control-group bootstrap source lists
 // and the lab/CI static publisher list into a single map keyed by
 // IPv6-group-address. The control-group source lists (beacon, manifest,
-// subtree-announce) are returned separately so they can be threaded into
-// the BeaconListener / SubtreeGroupAnnounceListener Sources fields. All
-// resolvers run for the lifetime of ctx; startup is fail-closed.
+// subtree-announce) and the publisher set are returned separately so they
+// can be threaded into the BeaconListener / SubtreeGroupAnnounceListener
+// Sources fields and into runtime auto-join. All resolvers run for the
+// lifetime of ctx; startup is fail-closed.
 //
 // The publisher list (-ssm-publishers-static) is the source set of every
 // group a proxy emits to: the data-plane shard groups, the BEEF band, and
@@ -942,15 +916,18 @@ func excludeOwnSource(srcs []netip.Addr, own netip.Addr) []netip.Addr {
 // sources the way it distributes the data plane's, so 0xFFFE is never
 // joined against the manifest announcers' bootstrap list.
 //
-// Returns (gs, beaconSrcs, manifestSrcs, subtreeAnnSrcs, err).
-func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint32) (listener.GroupSources, []netip.Addr, []netip.Addr, []netip.Addr, error) {
+// The proxy also emits BRC-132 subtree data (0xFFFB) and BRC-127 subtree
+// group announcements (0xFFFC). Those take -ssm-bootstrap-subtree-announce,
+// BRC-129's out-of-band control-plane list, which then has to name every
+// emitter, the proxies included; left unset, they take the publisher set.
+func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint32) (ssmSources, error) {
 	gs := make(listener.GroupSources)
 
 	var own netip.Addr
 	if cfg.LocalSource != "" {
 		a, err := netip.ParseAddr(cfg.LocalSource)
 		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("local-source: %w", err)
+			return ssmSources{}, fmt.Errorf("local-source: %w", err)
 		}
 		own = a
 	}
@@ -968,19 +945,25 @@ func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint
 
 	beaconSrcs, err := resolve(cfg.SSMBootstrapBeacon)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("ssm-bootstrap-beacon: %w", err)
+		return ssmSources{}, fmt.Errorf("ssm-bootstrap-beacon: %w", err)
 	}
 	manifestSrcs, err := resolve(cfg.SSMBootstrapManifest)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("ssm-bootstrap-manifest: %w", err)
+		return ssmSources{}, fmt.Errorf("ssm-bootstrap-manifest: %w", err)
 	}
 	subAnnSrcs, err := resolve(cfg.SSMBootstrapSubtreeAnn)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("ssm-bootstrap-subtree-announce: %w", err)
+		return ssmSources{}, fmt.Errorf("ssm-bootstrap-subtree-announce: %w", err)
 	}
 	staticSrcs, err := resolve(cfg.SSMPublishersStatic)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("ssm-publishers-static: %w", err)
+		return ssmSources{}, fmt.Errorf("ssm-publishers-static: %w", err)
+	}
+	// An unset subtree-announce list means the reference emitters, the
+	// proxies. An explicit list is used as given, even if the -local-source
+	// exclusion leaves it empty.
+	if len(cfg.SSMBootstrapSubtreeAnn) == 0 {
+		subAnnSrcs = staticSrcs
 	}
 
 	// Map control-group sources onto their group addresses too (so the
@@ -1006,10 +989,10 @@ func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint
 	// only through the -local-source exclusion (resolution is fail-closed).
 	switch {
 	case len(staticSrcs) == 0 && len(cfg.SSMPublishersStatic) > 0:
-		slog.Warn("ssm: -ssm-publishers-static resolves only to -local-source, so no remote publisher is left; block-broadcast and data-plane groups are joined without a source filter, which PIM-SSM does not route",
+		slog.Warn("ssm: -ssm-publishers-static resolves only to -local-source, so no remote publisher is left; the groups it sources (block broadcast, data plane, subtree announce without its own list) are joined without a source filter, which PIM-SSM does not route",
 			"local_source", cfg.LocalSource)
 	case len(staticSrcs) == 0:
-		slog.Warn("ssm: no publisher sources; block-broadcast and data-plane groups are joined without a source filter, which PIM-SSM does not route",
+		slog.Warn("ssm: no publisher sources; the groups the publisher list sources (block broadcast, data plane, subtree announce without its own list) are joined without a source filter, which PIM-SSM does not route",
 			"flag", "-ssm-publishers-static")
 	default:
 		put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupBlockBroadcast), staticSrcs)
@@ -1025,7 +1008,13 @@ func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint
 			put(ip, staticSrcs)
 		}
 	}
-	return gs, beaconSrcs, manifestSrcs, subAnnSrcs, nil
+	return ssmSources{
+		groups:          gs,
+		beacon:          beaconSrcs,
+		manifest:        manifestSrcs,
+		subtreeAnnounce: subAnnSrcs,
+		publishers:      staticSrcs,
+	}, nil
 }
 
 // beaconGroups returns the (group, port) pairs the listener joins: the
@@ -1056,6 +1045,62 @@ func beaconGroups(cfg *config.Config, beaconIPs []net.IP) []*net.UDPAddr {
 		}
 	}
 	return groups
+}
+
+// groupJoiner is the part of a receive worker that runtime auto-join drives
+// (*listener.Worker).
+type groupJoiner interface {
+	AddGroup(group netip.Addr, sources []netip.Addr) error
+	RemoveGroup(group netip.Addr, sources []netip.Addr) error
+}
+
+// applyPilotGroups joins the BRC-139 pilot groups that were added on every
+// worker and leaves the removed ones; static -shard-include entries are never
+// left. sources is the publisher set the startup data-plane joins use (nil
+// under ASM): under SSM a runtime join must be an (S,G) join on it like its
+// siblings', because a (*,G) join in the SSM range is not routed, and a leave
+// names the same sources as its join.
+func applyPilotGroups[W groupJoiner](workers []W, engine *shard.Engine, port int, static []uint32, sources []netip.Addr, added, removed []uint16) {
+	for _, idx := range added {
+		addr := engine.Addr(uint32(idx), port)
+		ga, ok := netip.AddrFromSlice(addr.IP.To16())
+		if !ok {
+			slog.Warn("auto-join: bad group address", "idx", idx)
+			continue
+		}
+		for _, w := range workers {
+			if err := w.AddGroup(ga, sources); err != nil {
+				var errno syscall.Errno
+				if errors.As(err, &errno) && errno == syscall.ENOBUFS {
+					// mld_max_msf source-filter exhaustion is the
+					// canonical at-scale join failure (category-8).
+					slog.Error("auto-join failed: MLD source-filter exhausted; raise net.ipv6.mld_max_msf",
+						"group", ga.String(), "err", err, "errno", errno.Error(), "syscall", "setsockopt")
+				} else {
+					slog.Warn("auto-join AddGroup failed",
+						"group", ga.String(), "worker", w, "err", err)
+				}
+			}
+		}
+	}
+	for _, idx := range removed {
+		addr := engine.Addr(uint32(idx), port)
+		ga, ok := netip.AddrFromSlice(addr.IP.To16())
+		if !ok {
+			continue
+		}
+		// Static -shard-include entries are NEVER leaved.
+		if inStaticInclude(static, idx) {
+			continue
+		}
+		for _, w := range workers {
+			if err := w.RemoveGroup(ga, sources); err != nil {
+				slog.Warn("auto-join RemoveGroup failed",
+					"group", ga.String(), "worker", w, "err", err)
+			}
+		}
+	}
+	slog.Info("auto-join applied", "added", added, "removed", removed, "sources", len(sources))
 }
 
 // inStaticInclude reports whether the given shard index is in the

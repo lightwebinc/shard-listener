@@ -96,14 +96,24 @@ CSV of source IPs that emit subtree-announce frames. Used as the SSM
 source set for both `GroupSubtreeDataAnnounce` (0xFFFB) and
 `GroupSubtreeGroupAnnounce` (0xFFFC).
 
+The proxy emits both groups' traffic itself (BRC-132 subtree data and BRC-127
+subtree group announcements, from its own `-bind-source`), so this list must
+name the proxies, plus any other host that announces. Left unset, it
+defaults to the `-ssm-publishers-static` set, which covers the proxies; set
+it only when other hosts announce too, and then list the proxies as well. An
+explicit list is used as given and never merged with the publisher set.
+
 ### `-ssm-publishers-static` / `SSM_PUBLISHERS_STATIC` (default: `""`)
 
 **Lab / CI escape hatch.** Pre-declared publisher source list (the
 proxies' `-bind-source` addresses), applied to every group the proxies emit
-to: every shard group, the BEEF plane groups the listener joins, and
-`GroupBlockBroadcast` (0xFFFE). Block announces, anchors and coinbase frames
-all leave from the emitting proxy's own source (BRC-129, BRC-133), so block
-broadcast shares the data plane's source set. Manifest-driven discovery is
+to: every shard group (including the groups `-shard-include-from-manifest`
+joins at runtime), the BEEF plane groups the listener joins,
+`GroupBlockBroadcast` (0xFFFE), and the subtree groups (0xFFFB, 0xFFFC) when
+`-ssm-bootstrap-subtree-announce` is unset. Block announces, anchors and
+coinbase frames all leave from the emitting proxy's own source (BRC-129,
+BRC-133), so block broadcast shares the data plane's source set, and so do
+the subtree groups the proxy emits. Manifest-driven discovery is
 the production design; the stock binary does not apply the
 manifest-announced source set to its joins (see
 [architecture: SSM mode](architecture.md#ssm-rfc-4607-mode)), so this list
@@ -761,6 +771,14 @@ reached however many announcers run.
 Setting it equal to `-beacon-port` is supported and opens a single socket:
 the receive loop demuxes ADVERT from manifest on the MsgType byte.
 
+The default equals the default `-listen-port` (9001), so the manifest socket
+shares its port with the data-plane workers, and with the BRC-127 announce
+socket when `-subtree-groups` is set. Every one of these sockets binds with
+the workers' options (`SO_REUSEPORT` and `SO_REUSEADDR`), so they bind in any
+order under both source modes, and on Linux the control sockets set
+`IPV6_MULTICAST_ALL=0`, so each receives only the groups it joined itself,
+not the data plane's.
+
 Under `-source-mode ssm` this port joins the sources from
 `-ssm-bootstrap-manifest` (the announcers), while `-beacon-port` keeps the
 `-ssm-bootstrap-beacon` sources (the retry endpoints); the two publishers are
@@ -796,7 +814,11 @@ When set, the listener's effective subscription =
 union of `Flags.GroupsValid` payloads from the authoritative
 `Flags.PilotOnly=1` manifests currently within their TTL (the union is
 not quorum-gated). Pilot-added groups are leaved when no pilot still
-claims them; static `-shard-include` entries are NEVER leaved.
+claims them; static `-shard-include` entries are NEVER leaved. Under
+`-source-mode ssm` a pilot-added group is `(S,G)`-joined on the same
+publisher set as the startup data-plane groups (`-ssm-publishers-static`,
+without `-local-source`), and left on it; with no publisher set it is joined
+without a source filter, like them.
 
 ### `-live-resharding` / `LIVE_RESHARDING` (default: `false`)
 
