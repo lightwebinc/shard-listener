@@ -108,10 +108,11 @@ the production design; the stock binary does not apply the
 manifest-announced source set to its joins (see
 [architecture: SSM mode](architecture.md#ssm-rfc-4607-mode)), so this list
 is the only source of data-plane and block-broadcast `(S,G)` joins it has.
-With the list empty those groups are joined without a source filter, which
-PIM-SSM does not route, and the listener logs a warning at startup. Startup
-fails when `source-mode=ssm` AND the list has > 16 entries AND no manifest
-bootstrap is configured.
+With the list empty, or resolving only to `-local-source` (which is
+excluded), those groups are joined without a source filter, which PIM-SSM
+does not route, and the listener logs a warning at startup that names the
+cause. Startup fails when `source-mode=ssm` AND the list has > 16 entries AND
+no manifest bootstrap is configured.
 
 ### `-ssm-bootstrap-refresh` / `SSM_BOOTSTRAP_REFRESH` (default: `30s`)
 

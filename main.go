@@ -1000,11 +1000,18 @@ func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint
 
 	// Publisher-sourced groups (lab/CI static path): block broadcast, the
 	// data-plane shard groups and the BEEF band, all emitted from the
-	// proxies' own sources.
-	if len(staticSrcs) == 0 {
+	// proxies' own sources. With no remote publisher left they get no
+	// source entry, so they are joined without a source filter; the
+	// warning names why. A configured list that resolved comes back empty
+	// only through the -local-source exclusion (resolution is fail-closed).
+	switch {
+	case len(staticSrcs) == 0 && len(cfg.SSMPublishersStatic) > 0:
+		slog.Warn("ssm: -ssm-publishers-static resolves only to -local-source, so no remote publisher is left; block-broadcast and data-plane groups are joined without a source filter, which PIM-SSM does not route",
+			"local_source", cfg.LocalSource)
+	case len(staticSrcs) == 0:
 		slog.Warn("ssm: no publisher sources; block-broadcast and data-plane groups are joined without a source filter, which PIM-SSM does not route",
 			"flag", "-ssm-publishers-static")
-	} else {
+	default:
 		put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupBlockBroadcast), staticSrcs)
 		for idx := uint32(0); idx < cfg.NumGroups; idx++ {
 			ip := shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupIdx(idx))

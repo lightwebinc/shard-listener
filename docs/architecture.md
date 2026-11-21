@@ -100,7 +100,8 @@ distributes the data plane's.
 
 A group with no source list is joined without a source filter
 (`IPV6_JOIN_GROUP`), which PIM-SSM does not route; with
-`-ssm-publishers-static` empty the listener logs a warning at startup. The
+`-ssm-publishers-static` empty, or resolving only to `-local-source`, the
+listener logs a warning at startup that names the cause. The
 stock binary takes data-plane and block-broadcast sources from
 `-ssm-publishers-static` only: the applier reports changes of the
 manifest-announced source set (BRC-139 `SourcesValid`) through

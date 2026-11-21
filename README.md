@@ -48,11 +48,14 @@ shard-listener \
   -shard-bits 2 \
   -scope site \
   -source-mode ssm \
-  -ssm-publishers-static  2001:db8::10,2001:db8::11 \
-  -ssm-bootstrap-manifest shard-manifest-headless.svc.cluster.local \
-  -ssm-bootstrap-beacon   retry-endpoint-headless.svc.cluster.local \
+  -ssm-publishers-static 2001:db8::10,2001:db8::11 \
+  -ssm-bootstrap-beacon  retry-endpoint-headless.svc.cluster.local \
   -egress-addr 127.0.0.1:9100
 ```
+
+`-ssm-bootstrap-manifest` (the manifest announcers) sources only the manifest
+port, so it matters only with `-manifest-consumer-enabled`; see the
+[configuration reference](docs/configuration.md#ssm-rfc-4607).
 
 ## Build
 

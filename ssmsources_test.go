@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +35,16 @@ func groupAddr(t *testing.T, cfg *config.Config, idx shard.GroupIdx) netip.Addr 
 		t.Fatalf("group %#x: not an IPv6 address", uint16(idx))
 	}
 	return ga
+}
+
+// captureLogs routes the default logger into a buffer for the test.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 func addrs(ss ...string) []netip.Addr {
@@ -74,6 +87,7 @@ func TestBuildSSMSources_BlockBroadcastJoinsPublishers(t *testing.T) {
 // With no publisher list, block broadcast gets no source list at all (it is
 // joined without a filter, like the data plane), not the announcers'.
 func TestBuildSSMSources_BlockBroadcastIgnoresManifestList(t *testing.T) {
+	logs := captureLogs(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	cfg := ssmTestConfig()
@@ -85,6 +99,35 @@ func TestBuildSSMSources_BlockBroadcastIgnoresManifestList(t *testing.T) {
 	}
 	if got, ok := gs[groupAddr(t, cfg, shard.GroupBlockBroadcast)]; ok {
 		t.Errorf("block broadcast (0xFFFE) sources = %v, want none without -ssm-publishers-static", got)
+	}
+	if !strings.Contains(logs.String(), "no publisher sources") {
+		t.Errorf("startup log %q lacks the missing-publisher warning", logs.String())
+	}
+}
+
+// A publisher list that resolves only to -local-source leaves no remote
+// publisher. The groups keep the data plane's fallback (no source entry),
+// and the warning names that cause instead of reporting a missing list.
+func TestBuildSSMSources_LocalSourceOnlyPublishers(t *testing.T) {
+	logs := captureLogs(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cfg := ssmTestConfig()
+	cfg.SSMPublishersStatic = []string{"2001:db8::10"}
+	cfg.LocalSource = "2001:db8::10"
+
+	gs, _, _, _, err := buildSSMSources(ctx, cfg, nil)
+	if err != nil {
+		t.Fatalf("buildSSMSources: %v", err)
+	}
+	for _, idx := range []shard.GroupIdx{shard.GroupBlockBroadcast, 0} {
+		if got, ok := gs[groupAddr(t, cfg, idx)]; ok {
+			t.Errorf("group %#x sources = %v, want none (own source only)", uint16(idx), got)
+		}
+	}
+	out := logs.String()
+	if !strings.Contains(out, "resolves only to -local-source") || strings.Contains(out, "no publisher sources") {
+		t.Errorf("startup log %q must name the -local-source cause, not a missing list", out)
 	}
 }
 
