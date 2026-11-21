@@ -77,10 +77,12 @@ source) via the shared `shard-common/netjoin` helper.
 CSV of `shard-manifest` source IPs (IPv6 literals or DNS names; a
 headless-Service name is the expected production form). Resolved via
 the shared `bootstrap.Resolver` at startup and re-resolved every
-`ssm-bootstrap-refresh`. Used as the SSM source set for two `(S,G)` joins:
+`ssm-bootstrap-refresh`. Used as the SSM source set for one `(S,G)` join:
 the manifest port of the beacon group (`-manifest-beacon-port`, when the
-manifest consumer is enabled and that port differs from `-beacon-port`) and
-`GroupBlockBroadcast` (0xFFFE).
+manifest consumer is enabled and that port differs from `-beacon-port`).
+It is not a source set for `GroupBlockBroadcast` (0xFFFE): block-broadcast
+frames come from the proxies, so that group joins the
+`-ssm-publishers-static` sources (below).
 
 ### `-ssm-bootstrap-beacon` / `SSM_BOOTSTRAP_BEACON` (default: `""`)
 
@@ -96,16 +98,21 @@ source set for both `GroupSubtreeDataAnnounce` (0xFFFB) and
 
 ### `-ssm-publishers-static` / `SSM_PUBLISHERS_STATIC` (default: `""`)
 
-**Lab / CI escape hatch.** Pre-declared data-plane publisher source
-list (the proxies' `-bind-source` addresses), applied to every shard group
-and to the BEEF plane groups the listener joins. Manifest-driven discovery
-is the production design; the stock binary does not apply the
+**Lab / CI escape hatch.** Pre-declared publisher source list (the
+proxies' `-bind-source` addresses), applied to every group the proxies emit
+to: every shard group, the BEEF plane groups the listener joins, and
+`GroupBlockBroadcast` (0xFFFE). Block announces, anchors and coinbase frames
+all leave from the emitting proxy's own source (BRC-129, BRC-133), so block
+broadcast shares the data plane's source set. Manifest-driven discovery is
+the production design; the stock binary does not apply the
 manifest-announced source set to its joins (see
 [architecture: SSM mode](architecture.md#ssm-rfc-4607-mode)), so this list
-is the only source of data-plane `(S,G)` joins it has, and a data group with
-no source list is joined without a source filter. Startup fails when
-`source-mode=ssm` AND the list has > 16 entries AND no manifest bootstrap
-is configured.
+is the only source of data-plane and block-broadcast `(S,G)` joins it has.
+With the list empty, or resolving only to `-local-source` (which is
+excluded), those groups are joined without a source filter, which PIM-SSM
+does not route, and the listener logs a warning at startup that names the
+cause. Startup fails when `source-mode=ssm` AND the list has > 16 entries AND
+no manifest bootstrap is configured.
 
 ### `-ssm-bootstrap-refresh` / `SSM_BOOTSTRAP_REFRESH` (default: `30s`)
 
@@ -545,16 +552,27 @@ dedup suppresses the second delivery.
 
 ### `-egress-dedup-cap` / `EGRESS_DEDUP_CAP` (default: `0`)
 
-Capacity of the egress dedup set (number of `(groupIdx, subtreeID, seqNum)`
-entries). `0` disables dedup entirely. A value of `65536` is sufficient for
-~10 minutes of sustained traffic at 100 TPS with 10% gap rate.
+Capacity of the egress dedup set (number of
+`(HashKey, groupIdx, subtreeID, seqNum)` entries). `0` disables dedup
+entirely. A value of `65536` is sufficient for ~10 minutes of sustained
+traffic at 100 TPS with 10% gap rate.
+
+The key names one frame of one sender's flow. `HashKey` is the flow identity
+the proxy stamps, `XXH64(senderIPv6 ∥ groupIdx ∥ subtreeID)` (BRC-124), and
+`SeqNum` counts within that flow, so two proxies publishing to the same group
+and subtree can share a sequence number; the `HashKey` keeps a second
+sender's frame from being suppressed as a duplicate of the first's. A
+retransmit carries its original frame's `HashKey` and `SeqNum`, so it still
+matches. The set is in-process memory, never shared between instances, so a
+rolling upgrade has no mixed-version effect on it.
 
 ### `-egress-dedup-ttl` / `EGRESS_DEDUP_TTL` (default: `2s`)
 
-TTL for entries in the egress dedup set. Frames with the same `SeqNum` seen
-within this window are suppressed. Size to cover the maximum expected
-retransmit delay: a late retransmit can arrive up to `nack-backoff-max` + one
-sweep interval (5.1 s with defaults) after the inline frame, so raise the TTL
+TTL for entries in the egress dedup set. Frames with the same `SeqNum` on the
+same flow (`HashKey`) seen within this window are suppressed. Size to cover
+the maximum expected retransmit delay: a late retransmit can arrive up to
+`nack-backoff-max` + one sweep interval (5.1 s with defaults) after the
+inline frame, so raise the TTL
 above the 2 s default when full retransmit-window suppression matters
 (live-resharding additionally requires ≥ 4 s). Entries also evict on capacity
 overflow regardless of TTL.
@@ -575,9 +593,27 @@ listeners). See `-egress-dedup-redis-addr` / `-egress-dedup-prefix` /
 `-txid-dedup-*` flags remain as aliases; see
 [Deprecated TxID dedup flags](#deprecated-txid-dedup-flags).
 
-Local egress dedup (above) operates on `(groupIdx, subtreeID, SeqNum)` within
-a single listener; the per-deployment dedup is keyed on `TxID`. The two
-mechanisms are independent and can be combined.
+Local egress dedup (above) operates on `(HashKey, groupIdx, subtreeID,
+SeqNum)` within a single listener; the per-deployment dedup is keyed on
+`TxID`. The two mechanisms are independent and can be combined.
+
+The per-deployment claim id depends on the frame class:
+
+| Frame class | Claim id (32 bytes, hex in the backend key) | Sender in the key |
+| --- | --- | --- |
+| BRC-124/BRC-128 transaction (whole or reassembled), BRC-134 anchor | `TxID` | No: a content identity |
+| BRC-149 BEEF object | `SHA-256(ContentID ∥ TopicID)` | No: a content identity |
+| BRC-142 bundle | `HashKey ∥ SeqNum`, zero-padded | Yes, through the `HashKey` |
+
+A content identity is sender-independent on purpose: the same transaction or
+object carried by two senders is one delivery downstream. The bundle id is a
+sequence identity, and its `HashKey` keeps two senders' bundles with equal
+`SeqNum` values apart. The key shape
+`<EGRESS_DEDUP_PREFIX><DEPLOYMENT_ID>:<hex-id>` is the same for every backend
+(tier-1 local LRU, `memory`, `redis`, `aerospike`). The local dedup key
+(above) never reaches a backend, so a change to it leaves the backend keys
+alone: HA siblings running different releases keep sharing claims through a
+rolling upgrade, and the prefix carries no version.
 
 ---
 
@@ -1002,7 +1038,7 @@ collector load.
 ### `-log-format` / `LOG_FORMAT` (default: `text`)
 
 Structured-log output format: `text` (human-readable, stderr; dev default) or
-`json` (one JSON object per line on stdout, for fleet aggregation via a
+`json` (one JSON object per line on stdout, for log aggregation via a
 node-local collector). Every line carries the `service.{name,instance.id,version}`
 identity triple shared with the OTLP metrics resource attributes. See the
 [Unified Component Logging](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md).
@@ -1056,7 +1092,10 @@ Redis-protocol address (Redis/Valkey/Dragonfly) for the per-deployment egress
 TxID dedup. Empty falls back to a tier-1 in-process LRU only, useful for
 single-listener deployments or when the backend is unavailable.
 
-Final key shape: `<EGRESS_DEDUP_PREFIX><DEPLOYMENT_ID>:<hex-txid>`.
+Final key shape: `<EGRESS_DEDUP_PREFIX><DEPLOYMENT_ID>:<hex-id>`, where the
+id is the TxID for a transaction (see
+[Cross-Listener TxID Deduplication](#cross-listener-txid-deduplication) for
+the other frame classes).
 
 ### `-egress-dedup-prefix` / `EGRESS_DEDUP_PREFIX` (default `bsl:egr:`)
 
@@ -1067,7 +1106,8 @@ appended to this prefix.
 
 TTL for egress-dedup backend entries. Must exceed the maximum propagation
 delay across HA siblings. Distinct from `-egress-dedup-ttl`
-(the local egress sliding-window dedup TTL for `(groupIdx, subtreeID, SeqNum)`).
+(the local egress sliding-window dedup TTL for
+`(HashKey, groupIdx, subtreeID, SeqNum)`).
 
 ### `-egress-dedup-local-cap` / `EGRESS_DEDUP_LOCAL_CAP` (default `1048576`)
 

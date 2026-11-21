@@ -10,7 +10,7 @@ import (
 func makeAdvert(tier, pref uint8, instanceID uint32) *ADVERT {
 	return &ADVERT{
 		Scope:          0x05,
-		NACKAddr:       net.ParseIP("fd20::41"),
+		NACKAddr:       net.ParseIP("2001:db8::41"),
 		NACKPort:       9300,
 		Tier:           tier,
 		Preference:     pref,

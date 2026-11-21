@@ -88,13 +88,21 @@ Source lists per group come from two places:
 
 | Group                          | Source set                                                                                    |
 | ------------------------------ | --------------------------------------------------------------------------------------------- |
-| Data groups (`FF35::B:idx`)    | `-ssm-publishers-static`                                                                      |
+| Data groups (`FF35::B:idx`), BEEF band, BlockBroadcast (`:FFFE`) | `-ssm-publishers-static`: the proxies' `-bind-source` addresses (the proxy emits all three) |
 | Beacon (`:FFFD`)               | `-ssm-bootstrap-beacon`: the retry-endpoint pod IPs (retry-endpoint emits NACK ADVERTs)       |
-| Manifest port of the beacon group; BlockBroadcast (`:FFFE`) | `-ssm-bootstrap-manifest`: the shard-manifest pod IPs            |
+| Manifest port of the beacon group | `-ssm-bootstrap-manifest`: the shard-manifest pod IPs                                      |
 | Subtree data, subtree group announce (`:FFFB`, `:FFFC`) | `-ssm-bootstrap-subtree-announce`                                    |
 
+BlockBroadcast follows the publishers, not the manifest announcers: block
+announces, anchors and coinbase frames leave from the emitting proxy's own
+source (BRC-133), and BRC-129 distributes those sources the way it
+distributes the data plane's.
+
 A group with no source list is joined without a source filter
-(`IPV6_JOIN_GROUP`). The stock binary takes data-plane sources from
+(`IPV6_JOIN_GROUP`), which PIM-SSM does not route; with
+`-ssm-publishers-static` empty, or resolving only to `-local-source`, the
+listener logs a warning at startup that names the cause. The
+stock binary takes data-plane and block-broadcast sources from
 `-ssm-publishers-static` only: the applier reports changes of the
 manifest-announced source set (BRC-139 `SourcesValid`) through
 `manifest.Hooks.OnSourceSetChange`, a hook the stock binary leaves unset.
@@ -405,7 +413,7 @@ exhausted, and they are the fallbacks that survive a loss UPSTREAM of beacon
 scope, where every discovered cache is missing the same frames.
 
 Because Tier defaults to `0` on every endpoint and the registry sort uses
-`sort.Slice` (not stable), an unconfigured fleet ties on `(0, 128)` and the
+`sort.Slice` (not stable), an unconfigured deployment ties on `(0, 128)` and the
 escalation ORDER is arbitrary and not repeatable between runs. Note also that an
 ADVERT says nothing about WHAT an endpoint caches (no group range, shard-bit
 width, plane/band or FrameVer coverage), so a retry that never joined the BEEF
@@ -622,9 +630,12 @@ Four callback types are registered on the reassembly buffer (`reassembly.Buffer`
 ## Egress deduplication
 
 When `-egress-dedup-cap` is non-zero, each worker maintains a fixed-capacity
-TTL-bounded set of recently-seen `(groupIdx, subtreeID, seqNum)` keys.
-Before forwarding a BRC-124/BRC-128 frame with a non-zero `SeqNum`, the worker
-checks the set:
+TTL-bounded set of recently-seen `(HashKey, groupIdx, subtreeID, seqNum)`
+keys. `SeqNum` counts per flow and the `HashKey` names the flow, which carries
+the sender (BRC-124), so two senders on one group and subtree never collide;
+BRC-142 bundles and BRC-149 BEEF frames are keyed the same way, a BEEF frame
+with its TopicID in the subtree slot. Before forwarding a BRC-124/BRC-128
+frame with a non-zero `SeqNum`, the worker checks the set:
 
 - **First occurrence**: key is inserted; frame is forwarded normally.
 - **Duplicate**: key is already present (inline frame and its retransmit both
@@ -758,14 +769,14 @@ The listener uses the shared `shard-common/logging` package: `run` calls
 `logging.Init` once, installing a process-wide `slog` default carrying the
 `service.{name,instance.id,version}` identity triple (shared with the OTLP
 metrics resource attributes). `-log-format json` emits one JSON object per line
-on stdout for fleet aggregation; `-log-level` is runtime-togglable via
+on stdout for log aggregation; `-log-level` is runtime-togglable via
 `POST /loglevel` and SIGHUP. At startup the listener emits a one-shot
 `host.inventory` event (OS/CPU/mem/NIC incl. IPv4+IPv6, multicast sysctls) and
 a `bsl_host_info` gauge.
 
 **Category-8 OS/NIC logging:** the pilot-driven auto-join path in `main.go`
 classifies `AddGroup` failures: an `ENOBUFS` from exceeding `net.ipv6.mld_max_msf`
-(the kernel's per-socket source-filter cap, the canonical fleet-scale SSM join
+(the kernel's per-socket source-filter cap, the canonical at-scale SSM join
 failure) is logged at Error with the errno and a remediation hint, distinct from
 generic join failures.
 

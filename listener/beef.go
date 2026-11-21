@@ -173,9 +173,11 @@ func (w *Worker) deliverBeef(raw []byte, bf *frame.BEEFFrame, src net.IP) {
 		}
 	}
 
-	// Inline-vs-retransmit suppression (same frame arriving twice).
+	// Inline-vs-retransmit suppression (same frame arriving twice). The
+	// HashKey names the sender's (sender, group) flow, whose SeqNum the key
+	// carries, so a frame from another sender is never taken for a duplicate.
 	if w.dedupSet != nil && bf.SeqNum != 0 {
-		if w.dedupSet.SeenAndAdd(dedup.Key{GroupIdx: groupIdx, SubtreeID: bf.TopicID, SeqNum: bf.SeqNum}) {
+		if w.dedupSet.SeenAndAdd(dedup.Key{HashKey: bf.HashKey, GroupIdx: groupIdx, SubtreeID: bf.TopicID, SeqNum: bf.SeqNum}) {
 			if w.rec != nil {
 				w.rec.FrameDeduped(w.id)
 			}

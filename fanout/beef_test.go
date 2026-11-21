@@ -164,12 +164,11 @@ func (f *filterRec) ObserveBEEFFiltered(reason string, wire int) {
 	f.reason, f.wire = reason, wire
 }
 
-// TestSendBeef_EmptyElectionDeliversNothing pins the 2026-09-15 ruling. An
-// empty topic election used to mean "every topic on the plane", which made a
-// billable trap out of the provisioning flow: a tunnel request elects LANES
-// and topics are joined afterwards, so between the two every consumer was an
-// all-plane aggregator and was billed for the whole plane without having asked
-// for anything. "No subscription yet" and "send me everything" must not be the
+// TestSendBeef_EmptyElectionDeliversNothing pins that an empty topic election
+// delivers nothing. Read as "every topic on the plane", it would make a
+// consumer whose lanes are elected before its topics are joined an all-plane
+// aggregator in between, delivered the whole plane without having asked for
+// anything. "No subscription yet" and "send me everything" must not be the
 // same wire state, and the safe reading of silence is to send nothing.
 func TestSendBeef_EmptyElectionDeliversNothing(t *testing.T) {
 	s, _ := beefSinkFixture(t)
@@ -190,7 +189,7 @@ func TestSendBeef_EmptyElectionDeliversNothing(t *testing.T) {
 	}
 
 	if unsubscribed.beef != 0 {
-		t.Errorf("a consumer that elected NO topic received %d objects: it would be billed for a plane it never subscribed to", unsubscribed.beef)
+		t.Errorf("a consumer that elected NO topic received %d objects: it would be delivered a plane it never subscribed to", unsubscribed.beef)
 	}
 	if unsubObs.n != 1 || unsubObs.reason != fanout.FilterTopic {
 		t.Errorf("unsubscribed consumer's observer = %+v, want 1×%s so the non-delivery reads as FILTERED, not as loss", *unsubObs, fanout.FilterTopic)

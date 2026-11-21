@@ -687,9 +687,9 @@ func (r *Recorder) ReassemblyRepairWaitCompleted() {
 }
 
 // FrameDeduped records a BRC-124/BRC-128 retransmit suppressed before egress
-// because the (groupIdx, subtreeID, SeqNum) tuple was already forwarded
-// recently. The gap-state suppression metric (GapSuppressed) is a separate
-// signal: it tracks gap-tracker fills, not egress dedup.
+// because the (HashKey, groupIdx, subtreeID, SeqNum) key was already
+// forwarded recently. The gap-state suppression metric (GapSuppressed) is a
+// separate signal: it tracks gap-tracker fills, not egress dedup.
 func (r *Recorder) FrameDeduped(workerID int) {
 	r.promFramesDeduped.WithLabelValues(strconv.Itoa(workerID)).Inc()
 }

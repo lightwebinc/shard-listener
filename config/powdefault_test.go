@@ -7,9 +7,9 @@ import (
 )
 
 // The block-control gate defaults ON. This is a security-relevant default that
-// several render surfaces (ansible, helm, fleet) mirror by hand, so pin it here
-// , a silent flip back to false would disable PoW validation fleet-wide and no
-// other test would notice.
+// several deployment templates (Ansible roles, Helm charts) mirror by hand, so
+// pin it here: a silent flip back to false would disable PoW validation on
+// every deployment and no other test would notice.
 func TestRequireBlockPoWDefaultsOn(t *testing.T) {
 	oldArgs, oldCL := os.Args, flag.CommandLine
 	t.Cleanup(func() { os.Args, flag.CommandLine = oldArgs, oldCL })

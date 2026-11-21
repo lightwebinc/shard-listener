@@ -1,10 +1,18 @@
 // Package dedup implements a fixed-capacity sliding-window deduplicator
 // for downstream egress in shard-listener.
 //
-// Frames are keyed by (groupIdx, subtreeID, seqNum). When a multicast
-// retransmit arrives after the inline frame has already been forwarded
-// downstream, the dedup set causes the listener to suppress the duplicate
-// before egress while still letting the gap tracker observe it.
+// Frames are keyed by (HashKey, groupIdx, subtreeID, seqNum). When a
+// multicast retransmit arrives after the inline frame has already been
+// forwarded downstream, the dedup set causes the listener to suppress the
+// duplicate before egress while still letting the gap tracker observe it.
+//
+// HashKey is the flow identity the ingress proxy stamps,
+// XXH64(senderIPv6 ∥ groupIdx ∥ subtreeID) (BRC-124), and SeqNum counts
+// within one flow. Two senders publishing to the same group and subtree
+// number their frames independently, so without the HashKey the second
+// sender's frame with an equal SeqNum would be dropped as a duplicate of the
+// first's. A retransmit carries the original frame's HashKey and SeqNum, so
+// it still matches the inline copy.
 //
 // Implementation is a fixed-size map plus a ring buffer of inserted keys.
 // On insert past capacity, the oldest key is evicted. Each entry carries a
@@ -17,8 +25,10 @@ import (
 	"time"
 )
 
-// Key identifies a unique frame for deduplication purposes.
+// Key identifies a unique frame for deduplication purposes: one SeqNum of
+// one sender's flow.
 type Key struct {
+	HashKey   uint64 // flow identity from the frame header; carries the sender
 	GroupIdx  uint32
 	SubtreeID [32]byte
 	SeqNum    uint64
