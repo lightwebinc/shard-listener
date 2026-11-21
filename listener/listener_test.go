@@ -904,10 +904,10 @@ func TestNew_Construction(t *testing.T) {
 
 func TestSockaddrIP_IPv6(t *testing.T) {
 	sa := &unix.SockaddrInet6{
-		Addr: [16]byte{0xfd, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x24},
+		Addr: [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x24},
 	}
 	got := sockaddrIP(sa)
-	want := net.ParseIP("fd20::24")
+	want := net.ParseIP("2001:db8::24")
 	if !got.Equal(want) {
 		t.Errorf("sockaddrIP = %v, want %v", got, want)
 	}
@@ -927,7 +927,7 @@ func TestWorker_SetSenderACL_PreservedOnWorker(t *testing.T) {
 	if w.senderACL != nil {
 		t.Fatal("default worker must have nil senderACL")
 	}
-	_, cidr, err := net.ParseCIDR("fd20::/16")
+	_, cidr, err := net.ParseCIDR("2001:db8::/32")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -936,7 +936,7 @@ func TestWorker_SetSenderACL_PreservedOnWorker(t *testing.T) {
 	if w.senderACL == nil {
 		t.Fatal("senderACL must be set after SetSenderACL")
 	}
-	if !w.senderACL.Allow(net.ParseIP("fd20::24")) {
+	if !w.senderACL.Allow(net.ParseIP("2001:db8::24")) {
 		t.Error("included sender must be allowed")
 	}
 	if w.senderACL.Allow(net.ParseIP("fe80::1")) {

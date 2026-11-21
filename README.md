@@ -39,8 +39,8 @@ shard-listener \
 ```
 
 SSM (requires PIM-SSM in the fabric and a raised
-`net.ipv6.mld_max_msf`; the data-plane groups are joined from the
-`-ssm-publishers-static` sources, the proxies' addresses):
+`net.ipv6.mld_max_msf`; the data-plane and block-broadcast groups are joined
+from the `-ssm-publishers-static` sources, the proxies' addresses):
 
 ```sh
 shard-listener \

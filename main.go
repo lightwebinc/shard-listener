@@ -218,12 +218,14 @@ func run() error {
 	defer cancel()
 
 	// SSM: resolve per-control-group bootstrap source lists and the
-	// static data-plane publisher list (lab/CI) into a single map keyed
-	// by group address. Production manifest-driven discovery for
-	// data-plane groups lands in a follow-up: the beacon listener already
-	// observes BRC-139 manifests via the beacon group; an OnChange path
-	// can mutate this map dynamically. For now, fail-closed startup on
-	// the configured bootstrap lists.
+	// static publisher list (lab/CI) into a single map keyed by group
+	// address. The publisher list covers every group the proxies emit to:
+	// the data-plane shard groups, the BEEF band and block broadcast
+	// (0xFFFE). The manifest-announced source set (BRC-139 SourcesValid)
+	// is not applied to joins: the beacon listener observes manifests and
+	// the applier reports source-set changes through
+	// manifest.Hooks.OnSourceSetChange, which this binary leaves unset.
+	// Startup is fail-closed on the configured lists.
 	var gs listener.GroupSources
 	var beaconSrcs, manifestSrcs, subAnnSrcs []netip.Addr
 	if !delivery && cfg.SourceMode == "ssm" {
@@ -413,7 +415,7 @@ func run() error {
 								var errno syscall.Errno
 								if errors.As(err, &errno) && errno == syscall.ENOBUFS {
 									// mld_max_msf source-filter exhaustion is the
-									// canonical fleet-scale join failure (category-8).
+									// canonical at-scale join failure (category-8).
 									slog.Error("auto-join failed: MLD source-filter exhausted; raise net.ipv6.mld_max_msf",
 										"group", ga.String(), "err", err, "errno", errno.Error(), "syscall", "setsockopt")
 								} else {
@@ -906,14 +908,6 @@ func setupBEEF(cfg *config.Config) (*shard.PlaneEngine, map[[32]byte]struct{}, m
 	return pe, topics, versions, joins, nil
 }
 
-// buildSSMSources resolves the per-control-group bootstrap source lists
-// and the lab/CI static publisher list into a single map keyed by
-// IPv6-group-address. The control-group source lists (beacon, manifest,
-// subtree-announce) are returned separately so they can be threaded into
-// the BeaconListener / SubtreeGroupAnnounceListener Sources fields. All
-// resolvers run for the lifetime of ctx; startup is fail-closed.
-//
-// Returns (gs, beaconSrcs, manifestSrcs, subtreeAnnSrcs, err).
 // excludeOwnSource drops the node's own source address from a roster before
 // it feeds (S,G) joins. Joining the node's own source on the PIM interface
 // installs an iif==oif mroute on a collapsed edge: every originated frame
@@ -934,6 +928,21 @@ func excludeOwnSource(srcs []netip.Addr, own netip.Addr) []netip.Addr {
 	return out
 }
 
+// buildSSMSources resolves the per-control-group bootstrap source lists
+// and the lab/CI static publisher list into a single map keyed by
+// IPv6-group-address. The control-group source lists (beacon, manifest,
+// subtree-announce) are returned separately so they can be threaded into
+// the BeaconListener / SubtreeGroupAnnounceListener Sources fields. All
+// resolvers run for the lifetime of ctx; startup is fail-closed.
+//
+// The publisher list (-ssm-publishers-static) is the source set of every
+// group a proxy emits to: the data-plane shard groups, the BEEF band, and
+// block broadcast (0xFFFE). BRC-133 puts block announces and coinbase
+// frames on the emitting proxy's own source, and BRC-129 distributes those
+// sources the way it distributes the data plane's, so 0xFFFE is never
+// joined against the manifest announcers' bootstrap list.
+//
+// Returns (gs, beaconSrcs, manifestSrcs, subtreeAnnSrcs, err).
 func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint32) (listener.GroupSources, []netip.Addr, []netip.Addr, []netip.Addr, error) {
 	gs := make(listener.GroupSources)
 
@@ -976,7 +985,7 @@ func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint
 
 	// Map control-group sources onto their group addresses too (so the
 	// data-plane Worker's join loop pre-loads them when those groups are
-	// also in its joined-group set, e.g. BlockBroadcast for manifest).
+	// also in its joined-group set, e.g. subtree data on 0xFFFB).
 	put := func(ip net.IP, srcs []netip.Addr) {
 		if len(srcs) == 0 {
 			return
@@ -988,10 +997,15 @@ func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint
 	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupBeacon), beaconSrcs)
 	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupSubtreeDataAnnounce), subAnnSrcs)
 	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupSubtreeGroupAnnounce), subAnnSrcs)
-	put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupBlockBroadcast), manifestSrcs)
 
-	// Data-plane shard groups (lab/CI static path).
-	if len(staticSrcs) > 0 {
+	// Publisher-sourced groups (lab/CI static path): block broadcast, the
+	// data-plane shard groups and the BEEF band, all emitted from the
+	// proxies' own sources.
+	if len(staticSrcs) == 0 {
+		slog.Warn("ssm: no publisher sources; block-broadcast and data-plane groups are joined without a source filter, which PIM-SSM does not route",
+			"flag", "-ssm-publishers-static")
+	} else {
+		put(shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupBlockBroadcast), staticSrcs)
 		for idx := uint32(0); idx < cfg.NumGroups; idx++ {
 			ip := shard.GroupAddr(cfg.MCPrefix, cfg.MCGroupID, shard.GroupIdx(idx))
 			put(ip, staticSrcs)

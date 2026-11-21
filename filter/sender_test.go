@@ -18,7 +18,7 @@ func mustCIDR(t *testing.T, s string) *net.IPNet {
 
 func TestSenderACL_NilAllowsAll(t *testing.T) {
 	var acl *filter.SenderACL
-	if !acl.Allow(net.ParseIP("fd20::24")) {
+	if !acl.Allow(net.ParseIP("2001:db8::24")) {
 		t.Error("nil ACL must accept every source")
 	}
 }
@@ -30,8 +30,8 @@ func TestSenderACL_EmptyListsReturnsNil(t *testing.T) {
 }
 
 func TestSenderACL_ExcludeBlocks(t *testing.T) {
-	acl := filter.NewSenderACL(nil, []*net.IPNet{mustCIDR(t, "fd20::/16")})
-	if acl.Allow(net.ParseIP("fd20::24")) {
+	acl := filter.NewSenderACL(nil, []*net.IPNet{mustCIDR(t, "2001:db8::/32")})
+	if acl.Allow(net.ParseIP("2001:db8::24")) {
 		t.Error("excluded sender must be denied")
 	}
 	if !acl.Allow(net.ParseIP("fe80::1")) {
@@ -40,8 +40,8 @@ func TestSenderACL_ExcludeBlocks(t *testing.T) {
 }
 
 func TestSenderACL_IncludeOnly(t *testing.T) {
-	acl := filter.NewSenderACL([]*net.IPNet{mustCIDR(t, "fd20::/16")}, nil)
-	if !acl.Allow(net.ParseIP("fd20::24")) {
+	acl := filter.NewSenderACL([]*net.IPNet{mustCIDR(t, "2001:db8::/32")}, nil)
+	if !acl.Allow(net.ParseIP("2001:db8::24")) {
 		t.Error("included sender must be allowed")
 	}
 	if acl.Allow(net.ParseIP("fe80::1")) {
@@ -51,13 +51,13 @@ func TestSenderACL_IncludeOnly(t *testing.T) {
 
 func TestSenderACL_ExcludeWinsOverInclude(t *testing.T) {
 	acl := filter.NewSenderACL(
-		[]*net.IPNet{mustCIDR(t, "fd20::/16")},
-		[]*net.IPNet{mustCIDR(t, "fd20::24/128")},
+		[]*net.IPNet{mustCIDR(t, "2001:db8::/32")},
+		[]*net.IPNet{mustCIDR(t, "2001:db8::24/128")},
 	)
-	if acl.Allow(net.ParseIP("fd20::24")) {
+	if acl.Allow(net.ParseIP("2001:db8::24")) {
 		t.Error("exclude must win over include")
 	}
-	if !acl.Allow(net.ParseIP("fd20::25")) {
+	if !acl.Allow(net.ParseIP("2001:db8::25")) {
 		t.Error("non-excluded sender within include must still be allowed")
 	}
 }

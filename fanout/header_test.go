@@ -71,7 +71,7 @@ func TestSendHeader_BroadcastsToHeaderCapableOnly(t *testing.T) {
 	}
 }
 
-// TestSendHeader_ShardElectionIgnored pins that headers are fleet-global: a
+// TestSendHeader_ShardElectionIgnored pins that headers are network-wide: a
 // consumer restricted to one shard still receives them, matching SendBlock.
 func TestSendHeader_ShardElectionIgnored(t *testing.T) {
 	sharded := &headerRecSink{}

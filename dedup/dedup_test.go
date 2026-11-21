@@ -43,6 +43,25 @@ func TestSeenAndAdd_DistinctKeysAreMisses(t *testing.T) {
 	}
 }
 
+// SeqNum counts per flow, so two senders publishing to one group and subtree
+// reuse each other's sequence numbers. The HashKey (the flow identity, which
+// carries the sender) must keep them apart: otherwise the second sender's
+// frame is suppressed as a duplicate of the first's and never forwarded.
+func TestSeenAndAdd_DistinctSendersAreMisses(t *testing.T) {
+	s := New(8, time.Second)
+	a, b := key(0, 0, 1), key(0, 0, 1)
+	a.HashKey, b.HashKey = 0xA1, 0xB2
+	if s.SeenAndAdd(a) {
+		t.Fatal("first sender's frame: first insert hit?")
+	}
+	if s.SeenAndAdd(b) {
+		t.Fatal("second sender's frame with the same (group, subtree, seq) must not collide")
+	}
+	if !s.SeenAndAdd(a) {
+		t.Fatal("first sender's retransmit must still be a hit")
+	}
+}
+
 func TestSeenAndAdd_CapacityEviction(t *testing.T) {
 	s := New(2, time.Hour)
 	_ = s.SeenAndAdd(key(0, 0, 1))

@@ -113,7 +113,7 @@ func TestParseIPNetList(t *testing.T) {
 	if l, err := parseIPNetList(""); err != nil || l != nil {
 		t.Fatalf("empty: %v %v", l, err)
 	}
-	got, err := parseIPNetList("fd20::24, fd20::/16, 10.0.0.1")
+	got, err := parseIPNetList("2001:db8::24, 2001:db8::/32, 192.0.2.1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,10 +125,10 @@ func TestParseIPNetList(t *testing.T) {
 	if ones != 128 || bits != 128 {
 		t.Errorf("ipv6 mask: %d/%d", ones, bits)
 	}
-	// CIDR -> /16
-	ones, _ = got[1].Mask.Size()
-	if ones != 16 {
-		t.Errorf("cidr mask: %d", ones)
+	// IPv6 CIDR keeps its prefix length
+	ones, bits = got[1].Mask.Size()
+	if ones != 32 || bits != 128 {
+		t.Errorf("cidr mask: %d/%d", ones, bits)
 	}
 	// Plain IPv4 -> /32
 	ones, bits = got[2].Mask.Size()
@@ -144,11 +144,11 @@ func TestParseIPNetList(t *testing.T) {
 }
 
 func TestParseIPNetListContains(t *testing.T) {
-	nets, err := parseIPNetList("fd20::/16")
+	nets, err := parseIPNetList("2001:db8::/32")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !nets[0].Contains(net.ParseIP("fd20::24")) {
+	if !nets[0].Contains(net.ParseIP("2001:db8::24")) {
 		t.Error("contains failed")
 	}
 	if nets[0].Contains(net.ParseIP("fe80::1")) {

@@ -81,7 +81,8 @@ const (
 // to its SSM source list. Groups absent from the map, or with empty
 // source lists, are joined ASM-style via IPV6_JOIN_GROUP. Each control
 // group's source list comes from the matching -ssm-bootstrap-* flag; the
-// data-plane source list is -ssm-publishers-static.
+// groups the proxies emit to (the data plane and block broadcast, 0xFFFE)
+// take the publisher list, -ssm-publishers-static.
 type GroupSources map[netip.Addr][]netip.Addr
 
 // Worker is a single multicast receive goroutine.
@@ -220,9 +221,9 @@ func (w *Worker) SetGroupSources(src GroupSources) {
 }
 
 // SetEgressDedup attaches a duplicate-suppression set keyed on
-// (groupIdx, subtreeID, SeqNum). When set, retransmits whose key was already
-// forwarded recently are dropped before egress. nil disables dedup. Defaults
-// to disabled.
+// (HashKey, groupIdx, subtreeID, SeqNum), one frame of one sender's flow.
+// When set, retransmits whose key was already forwarded recently are dropped
+// before egress. nil disables dedup. Defaults to disabled.
 func (w *Worker) SetEgressDedup(s *dedup.Set) {
 	w.dedupSet = s
 }
@@ -859,6 +860,8 @@ func (w *Worker) processFrame(raw []byte) bool {
 
 	// Cross-listener TxID dedup: when multiple listeners receive the same
 	// multicast frame, only the first to claim the TxID in Redis forwards it.
+	// The claim is the TxID alone, deliberately without the sender: the same
+	// transaction carried by two senders is one delivery downstream.
 	// Fail-open: on Redis error the frame is forwarded and the error is counted.
 	if w.txDedup != nil && f.Version == frame.FrameVerV2 {
 		claimed, claimErr := w.txDedup.Claim(f.TxID)
@@ -883,10 +886,12 @@ func (w *Worker) processFrame(raw []byte) bool {
 
 	// Egress duplicate suppression (GAP-3): when an inline frame and its
 	// retransmit both reach the listener (common at 1+% loss with a warm
-	// retry endpoint), forward only the first. Gap-state suppression in
+	// retry endpoint), forward only the first. The key carries the flow's
+	// HashKey: SeqNum counts per sender, so two senders on one group and
+	// subtree can share a SeqNum. Gap-state suppression in
 	// nack.Tracker.Observe is independent and still runs below.
 	if w.dedupSet != nil && f.Version == frame.FrameVerV2 && f.SeqNum != 0 {
-		if w.dedupSet.SeenAndAdd(dedup.Key{GroupIdx: groupIdx, SubtreeID: f.SubtreeID, SeqNum: f.SeqNum}) {
+		if w.dedupSet.SeenAndAdd(dedup.Key{HashKey: f.HashKey, GroupIdx: groupIdx, SubtreeID: f.SubtreeID, SeqNum: f.SeqNum}) {
 			if w.rec != nil {
 				w.rec.FrameDeduped(w.id)
 			}
@@ -1089,8 +1094,9 @@ func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 
 	// Cross-listener egress dedup, at the BUNDLE level: only the first listener
 	// in a deployment forwards a given bundle. Keyed by a synthetic bundle id
-	// (HashKey ∥ SeqNum) since a bundle has no TxID. Still observe for gap
-	// bookkeeping.
+	// (HashKey ∥ SeqNum) since a bundle has no TxID; the HashKey carries the
+	// sender, so two senders' bundles with equal SeqNums claim different keys.
+	// Still observe for gap bookkeeping.
 	if w.txDedup != nil && b.SeqNum != 0 {
 		var bid [32]byte
 		binary.BigEndian.PutUint64(bid[0:8], b.HashKey)
@@ -1110,9 +1116,11 @@ func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 	}
 
 	// Local egress duplicate suppression (inline frame + its retransmit), at the
-	// bundle level. Still observe so gap-fill bookkeeping stays accurate.
+	// bundle level, keyed on the bundle flow's HashKey so another sender's
+	// bundle with the same SeqNum is not taken for a duplicate. Still observe
+	// so gap-fill bookkeeping stays accurate.
 	if w.dedupSet != nil && b.SeqNum != 0 {
-		if w.dedupSet.SeenAndAdd(dedup.Key{GroupIdx: groupIdx, SubtreeID: b.SubtreeID, SeqNum: b.SeqNum}) {
+		if w.dedupSet.SeenAndAdd(dedup.Key{HashKey: b.HashKey, GroupIdx: groupIdx, SubtreeID: b.SubtreeID, SeqNum: b.SeqNum}) {
 			if w.rec != nil {
 				w.rec.FrameDeduped(w.id)
 			}

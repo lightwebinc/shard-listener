@@ -42,8 +42,8 @@ func TestApplier_FiresShardBitsChangeHook(t *testing.T) {
 		Hysteresis: 1 * time.Nanosecond,
 	})
 	// Two authoritative announcers agreeing on SB=8.
-	reg.Upsert(mustAddr("fd20::1"), authoritativePilotManifest(1, 8, []uint16{0, 1}))
-	reg.Upsert(mustAddr("fd20::2"), authoritativePilotManifest(2, 8, []uint16{0, 1}))
+	reg.Upsert(mustAddr("2001:db8::1"), authoritativePilotManifest(1, 8, []uint16{0, 1}))
+	reg.Upsert(mustAddr("2001:db8::2"), authoritativePilotManifest(2, 8, []uint16{0, 1}))
 
 	var mu sync.Mutex
 	fired := []struct{ prev, next uint8 }{}
@@ -104,13 +104,13 @@ func TestApplier_PilotGroupsDiff(t *testing.T) {
 	go a.Run(ctx)
 
 	// Tick 1: two pilots agree on groups {0, 1}.
-	reg.Upsert(mustAddr("fd20::1"), authoritativePilotManifest(1, 8, []uint16{0, 1}))
-	reg.Upsert(mustAddr("fd20::2"), authoritativePilotManifest(2, 8, []uint16{0, 1}))
+	reg.Upsert(mustAddr("2001:db8::1"), authoritativePilotManifest(1, 8, []uint16{0, 1}))
+	reg.Upsert(mustAddr("2001:db8::2"), authoritativePilotManifest(2, 8, []uint16{0, 1}))
 	time.Sleep(50 * time.Millisecond)
 
 	// Tick 2: both pilots add group 2.
-	reg.Upsert(mustAddr("fd20::1"), authoritativePilotManifest(1, 8, []uint16{0, 1, 2}))
-	reg.Upsert(mustAddr("fd20::2"), authoritativePilotManifest(2, 8, []uint16{0, 1, 2}))
+	reg.Upsert(mustAddr("2001:db8::1"), authoritativePilotManifest(1, 8, []uint16{0, 1, 2}))
+	reg.Upsert(mustAddr("2001:db8::2"), authoritativePilotManifest(2, 8, []uint16{0, 1, 2}))
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	time.Sleep(20 * time.Millisecond)

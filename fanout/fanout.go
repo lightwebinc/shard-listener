@@ -58,8 +58,8 @@ import (
 // , the own-traffic the fan-out identifies (by the OwnIngressIP HashKey match)
 // and drops from egress. It is a pure measurement seam: it never changes which
 // frames are delivered. A downstream build supplies it to meter that
-// (non-billable) tunnel-bound ingress volume. It fires only when OwnIngressIP is
-// set (own-traffic exclusion is what surfaces the frames to observe).
+// tunnel-bound ingress volume. It fires only when OwnIngressIP is set
+// (own-traffic exclusion is what surfaces the frames to observe).
 type Consumer struct {
 	ID            string
 	Shards        []uint32
@@ -74,14 +74,13 @@ type Consumer struct {
 	// plane: a consumer that has elected no topic has subscribed to no topic,
 	// and the safe reading of silence is to send nothing.
 	//
-	// This used to mean the opposite, "admit every topic", described as the
-	// spec's aggregator posture. BRC-149 defines no such rule, and the
-	// consequence was a billable trap: provisioning elects LANES and topics
-	// are joined afterwards, so every consumer was an all-plane aggregator,
-	// billed for the whole plane, for the window between the two. "No
+	// Reading an empty set as "admit every topic" (an aggregator posture
+	// BRC-149 does not define) would make a consumer whose lanes are elected
+	// before its topics are joined an all-plane aggregator in between,
+	// delivered the whole plane without having asked for it. "No
 	// subscription yet" and "send me everything" must not be the same wire
-	// state. The aggregator posture is still available, but it is now the
-	// explicit opt-in below.
+	// state. The aggregator posture is still available, as the explicit
+	// opt-in below.
 	TopicSet map[[32]byte]struct{}
 
 	// AllTopics makes the consumer an aggregator: every topic on its elected
@@ -133,7 +132,7 @@ type IngressObserver interface {
 
 // Sink is an egress.EgressSink that fans each frame out to the matching subset
 // of a consumer table. Shard-routed transaction frames (Send) use the reverse
-// index; fleet-global control frames (SendBlock, SendSubtreeData, SendRaw) are
+// index; network-wide control frames (SendBlock, SendSubtreeData, SendRaw) are
 // broadcast to every consumer, matching the worker's bypass-filter semantics
 // for those frame classes.
 //
@@ -254,9 +253,8 @@ func (s *Sink) SendBeef(raw []byte, bf *frame.BEEFFrame) error {
 
 	var firstErr error
 	deliver := func(c *Consumer) {
-		// An empty election matches nothing. See Consumer.TopicSet: this is
-		// the whole point of the change, so an unsubscribed consumer receives
-		// and is billed for nothing rather than for everything.
+		// An empty election matches nothing (see Consumer.TopicSet): an
+		// unsubscribed consumer receives nothing rather than everything.
 		matched := bf.TopicID
 		if !c.AllTopics {
 			found := false
@@ -476,7 +474,7 @@ func isOwnTraffic(c *Consumer, groupIdx uint32, f *frame.Frame) bool {
 }
 
 // SendBlock broadcasts a BRC-131 block control frame to every consumer (block
-// announcements are fleet-global, not shard-scoped).
+// announcements are network-wide, not shard-scoped).
 func (s *Sink) SendBlock(raw []byte, bf *frame.BlockFrame) error {
 	return s.broadcast(func(c *Consumer) error { return c.Sink.SendBlock(raw, bf) })
 }
@@ -487,7 +485,7 @@ func (s *Sink) SendSubtreeData(raw []byte, sf *frame.SubtreeDataFrame) error {
 }
 
 // SendHeader broadcasts a BRC-135 block header frame to every consumer, exactly
-// as blocks and subtree data are broadcast: headers are fleet-global, not
+// as blocks and subtree data are broadcast: headers are network-wide, not
 // shard-scoped, so there is no index to route on. Which consumers actually
 // receive one is decided by their own sink, a class router delivers only to a
 // consumer that elected a header lane and reports the rest as not-elected.

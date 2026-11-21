@@ -14,9 +14,9 @@
 //	-mc-group-id                       MC_GROUP_ID                        0x000B           IANA group-id (default Bitcoin = 0x000B)
 //	-source-mode                       SOURCE_MODE                        asm              Multicast addressing model: asm | ssm
 //	-ssm-bootstrap-beacon              SSM_BOOTSTRAP_BEACON                                CSV of retry-endpoint sources for the beacon (S,G) join
-//	-ssm-bootstrap-manifest            SSM_BOOTSTRAP_MANIFEST                              CSV of shard-manifest sources for the manifest/block-broadcast (S,G) join
+//	-ssm-bootstrap-manifest            SSM_BOOTSTRAP_MANIFEST                              CSV of shard-manifest sources for the manifest-port (S,G) join
 //	-ssm-bootstrap-subtree-announce    SSM_BOOTSTRAP_SUBTREE_ANNOUNCE                      CSV of subtree-announce emitter sources
-//	-ssm-publishers-static             SSM_PUBLISHERS_STATIC                               Lab/CI: CSV of data-plane publisher sources
+//	-ssm-publishers-static             SSM_PUBLISHERS_STATIC                               Lab/CI: CSV of publisher (proxy) sources for the data-plane and block-broadcast (S,G) joins
 //	-ssm-bootstrap-refresh             SSM_BOOTSTRAP_REFRESH              30s              DNS re-resolve interval for SSM bootstrap entries
 //	-local-source                      LOCAL_SOURCE                                        Co-located proxy BIND_SOURCE excluded from (S,G) joins
 //	-shard-include                     SHARD_INCLUDE                                       Comma-separated shard indices (empty=all)
@@ -217,9 +217,11 @@ type Config struct {
 	//   bootstrap source lists (IPv6 literals or DNS names) used to (S,G)
 	//   join the matching control group. Resolved via shared
 	//   bootstrap.Resolver at startup.
-	// SSMPublishersStatic: lab/CI escape hatch for the data-plane source
-	//   set, and the only data-plane source set this binary joins: the
-	//   manifest-announced source set is not applied to joins.
+	// SSMPublishersStatic: lab/CI escape hatch for the publisher (proxy)
+	//   source set, and the only one this binary joins: it sources the
+	//   data-plane shard groups, the BEEF band and block broadcast
+	//   (0xFFFE), whose frames the proxies emit from their own addresses.
+	//   The manifest-announced source set is not applied to joins.
 	// SSMBootstrapRefresh: DNS re-resolve interval (default 30s).
 	// LocalSource: the co-located proxy's BIND_SOURCE on a collapsed node.
 	//   Excluded from every roster-driven (S,G) join: joining the node's
@@ -425,11 +427,11 @@ func Load() (*Config, error) {
 	ssmBootstrapBeacon := flag.String("ssm-bootstrap-beacon", envStr("SSM_BOOTSTRAP_BEACON", ""),
 		"CSV of retry-endpoint sources for SSM join of the beacon group")
 	ssmBootstrapManifest := flag.String("ssm-bootstrap-manifest", envStr("SSM_BOOTSTRAP_MANIFEST", ""),
-		"CSV of shard-manifest sources for SSM join of the manifest/block-broadcast group")
+		"CSV of shard-manifest sources for SSM join of the beacon group's manifest port (-manifest-beacon-port)")
 	ssmBootstrapSubtreeAnn := flag.String("ssm-bootstrap-subtree-announce", envStr("SSM_BOOTSTRAP_SUBTREE_ANNOUNCE", ""),
 		"CSV of subtree-announce emitter sources for SSM join of that control group")
 	ssmPublishersStatic := flag.String("ssm-publishers-static", envStr("SSM_PUBLISHERS_STATIC", ""),
-		"lab/CI: CSV of data-plane publisher IPv6 sources (production uses manifest discovery)")
+		"lab/CI: CSV of publisher (proxy) IPv6 sources for SSM join of the data-plane and block-broadcast groups")
 	flag.StringVar(&c.LocalSource, "local-source", envStr("LOCAL_SOURCE", ""),
 		"co-located proxy's BIND_SOURCE; excluded from all (S,G) joins (own-source loop guard)")
 	flag.DurationVar(&c.SSMBootstrapRefresh, "ssm-bootstrap-refresh", envDuration("SSM_BOOTSTRAP_REFRESH", 30*time.Second),
@@ -565,7 +567,7 @@ func Load() (*Config, error) {
 	flag.BoolVar(&c.Debug, "debug", envBool("DEBUG", false),
 		"enable per-frame debug logging; deprecated alias for -log-level=debug")
 	flag.StringVar(&c.LogFormat, "log-format", envStr("LOG_FORMAT", "text"),
-		"log output format: text (default, stderr) | json (stdout, for fleet aggregation)")
+		"log output format: text (default, stderr) | json (stdout, for log aggregation)")
 	flag.StringVar(&c.LogLevel, "log-level", envStr("LOG_LEVEL", "info"),
 		"log level: debug|info|warn|error (overridden to debug when -debug is set)")
 	flag.Float64Var(&c.TraceSampling, "trace-sampling", envFloat("TRACE_SAMPLING", 0),
@@ -581,7 +583,7 @@ func Load() (*Config, error) {
 	flag.IntVar(&c.EgressDedupCap, "egress-dedup-cap", envInt("EGRESS_DEDUP_CAP", 0),
 		"egress duplicate-suppression capacity (0 = disabled); typical value: workers × tps × dedup-ttl")
 	flag.DurationVar(&c.EgressDedupTTL, "egress-dedup-ttl", envDuration("EGRESS_DEDUP_TTL", 2*time.Second),
-		"egress dedup TTL: max age of a remembered (groupIdx, subtreeID, SeqNum) tuple")
+		"egress dedup TTL: max age of a remembered (HashKey, groupIdx, subtreeID, SeqNum) key")
 	flag.StringVar(&c.TxidDedupAddr, "txid-dedup-addr", envStr("TXID_DEDUP_ADDR", ""),
 		"DEPRECATED: use -egress-dedup-redis-addr. Redis address for cross-listener TxID dedup")
 	flag.StringVar(&c.TxidDedupPrefix, "txid-dedup-prefix", envStr("TXID_DEDUP_PREFIX", ""),

@@ -233,9 +233,9 @@ type Buffer struct {
 	//     the wire depends on the egress claim on (ContentID, TopicID), which
 	//     caught it in the measured pre-fix run, but that claim is optional
 	//     (-egress-dedup-local-cap 0 removes it) and shorter-lived than the
-	//     recovery horizon, so the duplicate delivery (and the double billing
-	//     that follows it) is one config change away. A layer must not rely on a
-	//     later one to undo duplicates it manufactured;
+	//     recovery horizon, so the duplicate delivery is one config change
+	//     away. A layer must not rely on a later one to undo duplicates it
+	//     manufactured;
 	//   - the fresh slot never fills, so its TTL eviction fires onIncomplete and
 	//     NACKs the very fragments the listener already has, which the responder
 	//     answers by multicast, which opens more slots, a self-feeding loop.

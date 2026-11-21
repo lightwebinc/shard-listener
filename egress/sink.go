@@ -12,12 +12,12 @@ import (
 // most classes, so this is the common case on every frame.
 //
 // A class-routing sink must return an error (rather than nil) for an unelected
-// class, or a metering wrapper keyed on "err == nil" would bill a delivery that
-// never happened. But an aggregating fan-out must NOT surface it as the batch's
-// error, or the worker books an egress failure, and skips its "forwarded"
-// counter: on ordinary traffic. Wrapping this sentinel is what lets both hold
-// at once: the biller still sees a non-nil error, while the fan-out recognises
-// it with [errors.Is] and keeps aggregating.
+// class, or a metering wrapper keyed on "err == nil" would count a delivery
+// that never happened. But an aggregating fan-out must NOT surface it as the
+// batch's error, or the worker books an egress failure, and skips its
+// "forwarded" counter: on ordinary traffic. Wrapping this sentinel is what lets
+// both hold at once: the metering wrapper still sees a non-nil error, while the
+// fan-out recognizes it with [errors.Is] and keeps aggregating.
 //
 // Class routers should wrap it (`fmt.Errorf("...: %w", egress.ErrNotElected)`)
 // so the specific message survives for logs.
