@@ -27,7 +27,9 @@ a `sink-test-frames` sink. Five scenarios are exercised sequentially:
 (default 9102). Over UDP it counts decoded frames, or raw datagrams with
 `-raw`, and exits 0 at `-count`; with `-tcp -bytes N` it accepts TCP
 connections and exits 0 once N bytes have arrived. It exits 1 if `-timeout`
-(default 30s) passes first.
+(default 30s) passes first. Both targets must be positive to complete: at
+the default `-count 0`, or `-bytes 0`, it runs until the timeout (exit 1),
+or forever with `-timeout 0`.
 
 The suite requires `shard-proxy` checked out at `../shard-proxy`
 (for `send-test-frames`). `make test-e2e` builds all binaries fresh before
