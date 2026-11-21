@@ -39,7 +39,8 @@ shard-listener \
 ```
 
 SSM (requires PIM-SSM in the fabric and a raised
-`net.ipv6.mld_max_msf`):
+`net.ipv6.mld_max_msf`; the data-plane groups are joined from the
+`-ssm-publishers-static` sources, the proxies' addresses):
 
 ```sh
 shard-listener \
@@ -47,6 +48,7 @@ shard-listener \
   -shard-bits 2 \
   -scope site \
   -source-mode ssm \
+  -ssm-publishers-static  2001:db8::10,2001:db8::11 \
   -ssm-bootstrap-manifest shard-manifest-headless.svc.cluster.local \
   -ssm-bootstrap-beacon   retry-endpoint-headless.svc.cluster.local \
   -egress-addr 127.0.0.1:9100
@@ -65,7 +67,7 @@ make docker      # build Docker image
 
 - [Architecture](docs/architecture.md)
 - [Configuration reference](docs/configuration.md): every flag, plus the
-  `bsl_` metrics reference
+  metrics reference
 - [Testing](docs/testing.md)
 - [Unified Component Logging](https://github.com/lightwebinc/shard-common/blob/main/docs/logging.md): `-log-format json` structured logs, `host.inventory`, `-trace-sampling`, runtime `/loglevel`
 - [Protocol specification](https://github.com/lightwebinc/shard-common/blob/main/docs/protocol.md)
@@ -73,9 +75,9 @@ make docker      # build Docker image
 
 ## Dependencies
 
-- [`github.com/lightwebinc/shard-common`](https://github.com/lightwebinc/shard-common): `frame`, `shard` packages
-- Prometheus client (`client_golang`, `common`) + OpenTelemetry SDK, OTLP gRPC and Prometheus exporters
-- `golang.org/x/sys`: `SO_REUSEPORT`, multicast socket options
+- [`github.com/lightwebinc/shard-common`](https://github.com/lightwebinc/shard-common): `frame`, `bundle`, `objfmt`, `shard`, `netjoin`, `bootstrap`, `manifest`, `cache`, `txidset`, `teewire`, `seqhash`, `pow`, `logging`, `tracing`, `hostinfo`
+- Prometheus client (`client_golang`; `common` in tests) + OpenTelemetry SDK, OTLP gRPC and Prometheus exporters
+- `golang.org/x/sys`: `SO_REUSEPORT`, multicast socket options; `golang.org/x/net`: batched sends for the retry tee
 - `github.com/alicebob/miniredis/v2`: in-process Redis for egress dedup tests
 
 ## Container image

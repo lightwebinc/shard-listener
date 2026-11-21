@@ -7,8 +7,9 @@ fallbacks; hard-coded defaults apply when neither is present.
 
 ### `-iface` / `MULTICAST_IF` (default: `eth0`)
 
-Network interface for multicast group joins and NACK send. Must be the same
-interface the multicast fabric is reachable on.
+Network interface for multicast group joins. Must be the same interface the
+multicast fabric is reachable on. NACKs are unicast datagrams and follow the
+routing table, not this flag.
 
 ### `-listen-port` / `LISTEN_PORT` (default: `9001`)
 
@@ -76,8 +77,10 @@ source) via the shared `shard-common/netjoin` helper.
 CSV of `shard-manifest` source IPs (IPv6 literals or DNS names; a
 headless-Service name is the expected production form). Resolved via
 the shared `bootstrap.Resolver` at startup and re-resolved every
-`ssm-bootstrap-refresh`. Used as the SSM source set for the manifest
-group `(S,G)` join.
+`ssm-bootstrap-refresh`. Used as the SSM source set for two `(S,G)` joins:
+the manifest port of the beacon group (`-manifest-beacon-port`, when the
+manifest consumer is enabled and that port differs from `-beacon-port`) and
+`GroupBlockBroadcast` (0xFFFE).
 
 ### `-ssm-bootstrap-beacon` / `SSM_BOOTSTRAP_BEACON` (default: `""`)
 
@@ -94,16 +97,23 @@ source set for both `GroupSubtreeDataAnnounce` (0xFFFB) and
 ### `-ssm-publishers-static` / `SSM_PUBLISHERS_STATIC` (default: `""`)
 
 **Lab / CI escape hatch.** Pre-declared data-plane publisher source
-list applied to every shard group. Production must use manifest-driven
-discovery (set `-ssm-bootstrap-manifest`); fails closed when
-`source-mode=ssm` AND the list has > 16 entries AND no manifest
-bootstrap is configured.
+list (the proxies' `-bind-source` addresses), applied to every shard group
+and to the BEEF plane groups the listener joins. Manifest-driven discovery
+is the production design; the stock binary does not apply the
+manifest-announced source set to its joins (see
+[architecture: SSM mode](architecture.md#ssm-rfc-4607-mode)), so this list
+is the only source of data-plane `(S,G)` joins it has, and a data group with
+no source list is joined without a source filter. Startup fails when
+`source-mode=ssm` AND the list has > 16 entries AND no manifest bootstrap
+is configured.
 
 ### `-ssm-bootstrap-refresh` / `SSM_BOOTSTRAP_REFRESH` (default: `30s`)
 
 DNS re-resolve interval for the bootstrap lists. The `bootstrap.Resolver`
-retains the last good AAAA set on transient refresh failures so a brief
-DNS outage doesn't drop active joins.
+retains the last good AAAA set on transient refresh failures. The joins
+themselves are issued once, from the set resolved at startup: the stock
+binary does not re-join when a later refresh returns a different set, so a
+changed source list takes effect at the next restart.
 
 ### `-local-source` / `LOCAL_SOURCE` (default: `""`)
 
@@ -158,11 +168,12 @@ decoalescing needs **no CLI flag**. Bundles are decoalesced/re-bucketed and deli
 egress path (see [architecture: BRC-142 Bundle Processing](architecture.md#brc-142-bundle-processing)).
 When a bundle's ShardBits generation differs from this listener's, it is
 re-bucketed to the local generation; the re-bucketed datagram size cap is the
-hardcoded public-internet MTU baseline (`rebucketMaxBytes = 1500` in `listener.go`),
-not configurable. `-rebucket-relay` / `REBUCKET_RELAY` (default: `false`)
+hardcoded public-internet MTU baseline (`rebucketPathMTU = 1500` in
+`listener/listener.go`, less 48 bytes of IPv6 and UDP headers for the bundle
+itself), not configurable. `-rebucket-relay` / `REBUCKET_RELAY` (default: `false`)
 marks this listener an **intentional** re-bucket relay (it runs a different
 ShardBits than the bundles it receives); when false, re-bucketing raises the
-`bsl_rebucket_unguarded` alarm.
+`bsl_rebucket_unguarded_total` alarm.
 
 ---
 
@@ -189,6 +200,7 @@ downstream reader expects, rather than to the frame's raw payload:
 | Transaction | The standard `tx` (BRC-12) or Extended Format (BRC-30) serialization |
 | Block | The BRC-144 block object. A block-control frame that carries no whole block cannot be stripped into one, so it is refused and counted as an egress error rather than forwarded |
 | Subtree | The BRC-143 subtree object: merkle root, node count, then the ordered node hashes |
+| BEEF | The BRC-149 delivery record: the 32-byte TopicID, a 4-byte big-endian payload length, then the frame payload. A bare BEEF object is not self-delimiting, so it is never sent alone |
 
 The subtree row is why stripping is not simply "drop the header". BRC-132 keeps
 the subtree's merkle root in the frame header and carries aggregate fields and a
@@ -238,14 +250,16 @@ What it does not do:
 since subtree data arrives only on that group. Not valid with `-mode receiver`.
 
 Counters, labeled by `lane`: `bsl_lane_objects_total`, `bsl_lane_bytes_total`,
-`bsl_lane_drops_total` (with `reason`), and `bsl_lane_reconnects_total`.
+`bsl_lane_drops_total` (with `reason`), and `bsl_lane_reconnects_total`; the
+[metrics reference](#reference-lane) lists the reasons.
 
 ## Multicast Egress (domain bridging)
 
-When multicast egress is enabled, every frame that passes the shard/subtree
-filter is re-emitted onto an IPv6 multicast address space in addition to the
-normal unicast downstream. This enables bridging between multicast domains with
-optional scope and/or address-space translation.
+When multicast egress is enabled, every transaction frame that passes the
+shard/subtree filter is re-emitted onto an IPv6 multicast address space in
+addition to the normal unicast downstream. This enables bridging between
+multicast domains with optional scope and/or address-space translation. Block,
+subtree-data, anchor and BEEF frames are not re-emitted.
 
 The re-emitted frame uses the **same shard index** as the ingress group, but
 the destination address is computed with independently configurable scope,
@@ -295,8 +309,8 @@ multicast delivery (requires PIM or similar on intermediate routers).
 
 > **Firewall:** the egress interface OUTPUT chain must accept
 > `ip6 daddr ff00::/8 udp dport <mc-egress-port>`. The `listener-infra`
-> Ansible role nft template should be extended with this rule when mc egress
-> is in use.
+> firewall role's nftables template (Linux) adds this rule on its fabric
+> interface when `mc_egress_enabled` is set.
 
 > **Same address-space warning:** if `-mc-egress-scope` and
 > `-mc-egress-group-id` match the ingress address space, re-emitted frames
@@ -365,8 +379,10 @@ directly attached segment.
 
 ## NACK / Gap Recovery
 
-Gap tracking is performed for BRC-124/BRC-128 frames where `SeqNum` (bytes 48–55) is
-non-zero. `HashKey` (bytes 40–47) is a stable per-flow identifier computed as
+Gap tracking is performed for every frame whose `SeqNum` (bytes 48–55) is
+non-zero: transactions, fragments, bundles, block, subtree, anchor and BEEF
+frames, each on its own flow. `HashKey` (bytes 40–47) is a stable per-flow
+identifier computed as
 `XXH64(senderIPv6 ∥ groupIdx ∥ subtreeID)`; `SeqNum` is a monotonic per-flow
 counter starting at 1. Both are stamped in-place by the proxy; a zero `SeqNum`
 means the frame has not been stamped and gap tracking is skipped.
@@ -378,8 +394,10 @@ the sorted registry.
 ### `-retry-endpoints` / `RETRY_ENDPOINTS`
 
 Comma-separated `host:port` list of multicast retry caching nodes to send NACK
-datagrams to. Empty disables NACK dispatch (gaps are still detected and
-counted). Example: `[2001:db8::1]:9300,[2001:db8::2]:9300`.
+datagrams to, kept as the lowest-priority seeds beside the endpoints
+discovered by beacon. With this empty and no endpoint discovered, no NACK is
+sent (gaps are still detected and counted). Example:
+`[2001:db8::1]:9300,[2001:db8::2]:9300`.
 
 ### `-retry-tee` / `RETRY_TEE` (default: empty = off)
 
@@ -430,7 +448,9 @@ Cap on exponential backoff between successive NACK retries for the same gap.
 ### `-nack-max-retries` / `NACK_MAX_RETRIES` (default: `5`)
 
 Maximum **failed recovery rounds** per gap: a response timeout, a send
-error, or a MISS from the deepest endpoint in the registry. Once reached the
+error, a bare or multicast-flagged ACK (its repair copy is awaited on the
+data plane, and the round is spent meanwhile), or a MISS from the deepest
+endpoint in the registry. Once reached the
 gap is declared unrecoverable and evicted (`bsl_gaps_unrecovered_total` and
 `bsl_gaps_abandoned_total{reason="retries"}` incremented).
 
@@ -576,8 +596,10 @@ after 3 × their advertised interval without a refresh.
 
 ### `-beacon-port` / `BEACON_PORT` (default: `9300`)
 
-UDP port for receiving ADVERT beacon datagrams. Must match the
-`-nack-port` / `NACK_PORT` of the retry endpoints.
+UDP port for receiving ADVERT beacon datagrams. `retry-endpoint` sends its
+ADVERTs to UDP 9300 on the beacon group whatever its `-nack-port` is (the
+NACK port travels inside the ADVERT), so leave this at the default for stock
+retry endpoints.
 
 ### `-beacon-scope` / `BEACON_SCOPE` (default: `site`)
 
@@ -677,7 +699,10 @@ applying the normative consumer profile (Authoritative quorum, hysteresis,
 ±1 ShardBits shift bound, manual-pin precedence).
 Default off; opt-in via `-manifest-consumer-enabled`. See the
 [Automatic Shard Configuration design](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#automatic-shard-configuration)
-for the system-level design.
+for the system-level design. A running listener acts on manifests in two
+ways only: the pilot-group auto-join (`-shard-include-from-manifest`) and
+the `multicast_manifest_*` telemetry. Its `ShardBits` and source mode stay
+as configured (see `-live-resharding`).
 
 ### `-manifest-consumer-enabled` / `MANIFEST_CONSUMER_ENABLED` (default: `false`)
 
@@ -711,16 +736,16 @@ different hosts, so one shared (S,G) roster would filter one of them out.
 
 ### `-manifest-bootstrap` / `MANIFEST_BOOTSTRAP` (default: `optional`)
 
-`optional` ⇒ start with CLI/env values; pilot adjustments applied
-opportunistically. `required` ⇒ refuse data-plane bind until quorum is
-reached for `ShardBits` (and `SourceModeSSM` when SSM). `/readyz`
-returns 503 throughout the wait.
+`optional` or `required`. The listener validates and logs the value but
+does not act on it: in both modes it starts on its CLI/env values and binds
+the data plane at once. Holding the data-plane bind until quorum
+(`required`) is not implemented in the listener.
 
 ### `-pilot-quorum` / `PILOT_QUORUM` (default: `2`)
 
 Minimum distinct authoritative announcers (keyed on `(SrcIPv6,
-InstanceID)`) required for adoption. `1` is permitted but logs a
-warning at startup; production deployments should keep `≥ 2`.
+InstanceID)`) required for adoption. `1` is permitted; production
+deployments should keep `≥ 2`.
 
 ### `-pilot-hysteresis` / `PILOT_HYSTERESIS` (default: `0`)
 
@@ -732,26 +757,29 @@ default per §Safety).
 
 When set, the listener's effective subscription =
 `union(-shard-include, pilot_groups)`, where `pilot_groups` is the
-union of `Flags.GroupsValid` payloads from `Flags.PilotOnly=1`
-manifests that satisfy quorum. Pilot-added groups are leaved when no
-pilot still claims them; static `-shard-include` entries are NEVER
-leaved.
+union of `Flags.GroupsValid` payloads from the authoritative
+`Flags.PilotOnly=1` manifests currently within their TTL (the union is
+not quorum-gated). Pilot-added groups are leaved when no pilot still
+claims them; static `-shard-include` entries are NEVER leaved.
 
 ### `-live-resharding` / `LIVE_RESHARDING` (default: `false`)
 
-Opt-in BRC-139 bridging mode. When false (default), a `ShardBits` or
-`SourceModeSSM` adoption flips `/readyz` and exits non-zero so the
-orchestrator can roll the pod. When true, the listener tracks a
-Successor view but the actual bridging coordination is driven by the
-pilot's Successor block + the worker's runtime `AddGroup`/`RemoveGroup`
-path. Enabling this requires `-egress-dedup-cap > 0` and
-`-egress-dedup-ttl ≥ 4s` (validated at startup) so the listener's egress
-dedup can absorb the duplicate frames a bridging proxy emits.
+Opt-in BRC-139 bridging mode. The listener acts on neither setting.
+`-shard-bits` is a manual pin, so a manifest never changes a running
+listener's `ShardBits`: announcers that disagree with it are counted as
+divergence (`multicast_manifest_divergence_total`), and nothing flips
+`/readyz` or exits. A Successor block that reaches quorum is tracked as a
+view only (`multicast_manifest_resharding_state` and
+`multicast_manifest_resharding_window_seconds`); the listener does not join
+the successor layout. The flag is still validated: with
+`-manifest-consumer-enabled`, setting it requires `-egress-dedup-cap > 0`
+and `-egress-dedup-ttl ≥ 4s`, so the listener's egress dedup can absorb the
+duplicate frames a bridging proxy emits.
 
 ### `-bridging-window` / `BRIDGING_WINDOW` (default: `0`)
 
-Local floor on the bridging duration. `0` ⇒ honor the pilot's
-`TransitionEpoch` verbatim; nonzero ⇒ `MAX(pilot, this)`.
+Reserved for the bridging mode (a local floor on the bridging duration).
+The listener parses it and does not use it.
 
 ---
 
@@ -989,22 +1017,23 @@ debug↔configured level). `-debug` is retained as a deprecated alias for
 ### `-trace-sampling` / `TRACE_SAMPLING` (default: `0`)
 
 Distributed-trace head sampling ratio `0.0`–`1.0`. `0` installs a no-op tracer
-(zero cost). When `> 0` with an `-otlp-endpoint`, control-plane flows (NACK →
-recovery, manifest adoption) are traced and exported via the collector; the
-receive hot path is never traced.
+(zero cost). When `> 0` with an `-otlp-endpoint`, an OTLP trace exporter is
+installed for control-plane flows; the listener creates no spans of its own, so
+nothing is exported. The receive hot path is never traced.
 
 ### `-deployment-id` / `DEPLOYMENT_ID` (default: hostname)
 
-Logical deployment identifier. All HA listener siblings sharing a Redis
-must set the same value to dedup their downstream egress. Listeners with
+Logical deployment identifier. All HA listener siblings sharing a dedup
+backend must set the same value to dedup their downstream egress. Listeners with
 distinct `DEPLOYMENT_ID` values race independently, so each deployment
 forwards at most once. Default = hostname makes every listener its own
 deployment of one out of the box.
 
-### `-node-id` / `NODE_ID` (default: hostname)
+### `-node-id` / `NODE_ID` (default: the `-deployment-id` value)
 
-Informational identifier surfaced in metrics labels. Does not participate
-in the dedup decision.
+Informational identifier. It is parsed and defaulted, but the listener does
+not attach it to any metric or log, and it does not participate in the
+dedup decision.
 
 The egress dedup and the courtesy ingress mark each use a modular
 `shard-common/cache` backend, selected independently. See
@@ -1015,9 +1044,11 @@ for the interface and backend matrix.
 
 Tier-2 backend for the egress dedup store: `redis|aerospike|memory|none`. Empty
 infers `redis` when `-egress-dedup-redis-addr` is set, else `none` (tier-1 LRU
-only). Aerospike seed nodes are set with `-egress-dedup-aerospike-hosts`
-(comma-separated `host:port`), namespace `-egress-dedup-aerospike-namespace`
-(default `cache`), set `-egress-dedup-aerospike-set` (default `bsl-egr`).
+only). Aerospike seed nodes are set with `-egress-dedup-aerospike-hosts` /
+`EGRESS_DEDUP_AEROSPIKE_HOSTS` (comma-separated `host:port`), the namespace
+with `-egress-dedup-aerospike-namespace` / `EGRESS_DEDUP_AEROSPIKE_NAMESPACE`
+(default `cache`), and the set with `-egress-dedup-aerospike-set` /
+`EGRESS_DEDUP_AEROSPIKE_SET` (default `bsl-egr`).
 
 ### `-egress-dedup-redis-addr` / `EGRESS_DEDUP_REDIS_ADDR`
 
@@ -1034,30 +1065,34 @@ appended to this prefix.
 
 ### `-egress-dedup-ttl-redis` / `EGRESS_DEDUP_TTL_REDIS` (default `60s`)
 
-TTL for egress-dedup Redis entries. Must exceed the maximum propagation
-delay across HA siblings. Distinct from the legacy `-egress-dedup-ttl`
+TTL for egress-dedup backend entries. Must exceed the maximum propagation
+delay across HA siblings. Distinct from `-egress-dedup-ttl`
 (the local egress sliding-window dedup TTL for `(groupIdx, subtreeID, SeqNum)`).
 
 ### `-egress-dedup-local-cap` / `EGRESS_DEDUP_LOCAL_CAP` (default `1048576`)
 
 Tier-1 local LRU capacity for the egress dedup gate. Set to 0 to disable
-the per-deployment dedup feature entirely.
+the per-deployment dedup feature entirely, the courtesy ingress mark with it.
 
 ### `-ingress-set-backend` / `INGRESS_SET_BACKEND` (default: inferred)
 
 Tier-2 backend for the courtesy ingress mark: `redis|aerospike|memory|none`.
-Empty infers `redis` when `-ingress-set-redis-addr` is set, else `none`
-(mark disabled). Aerospike knobs mirror the egress store:
-`-ingress-set-aerospike-hosts` / `-ingress-set-aerospike-namespace` (default
-`cache`) / `-ingress-set-aerospike-set` (default `bsp-tx`).
+Empty infers `redis` when `-ingress-set-redis-addr` is set, else `none`: no
+mark reaches the proxy, and each one only updates the local LRU and counts in
+`bsl_ingress_mark_dropped_total`. Aerospike knobs mirror the egress store:
+`-ingress-set-aerospike-hosts` / `INGRESS_SET_AEROSPIKE_HOSTS`,
+`-ingress-set-aerospike-namespace` / `INGRESS_SET_AEROSPIKE_NAMESPACE`
+(default `cache`) and `-ingress-set-aerospike-set` /
+`INGRESS_SET_AEROSPIKE_SET` (default `bsp-tx`).
 
 ### `-ingress-set-redis-addr` / `INGRESS_SET_REDIS_ADDR`
 
 Optional Redis-protocol address for the courtesy SETNX into the local proxy's
 ingress namespace. Lets the local proxy know that a TxID is already on
 the multicast network even when the proxy itself never saw the upstream
-delivery (cross-site bridged TxIDs, side-channel ingress, etc.). Empty
-disables the courtesy mark; the egress dedup gate continues to function.
+delivery (cross-site bridged TxIDs, side-channel ingress, etc.). Empty, with
+no other backend selected, keeps the mark local (see `-ingress-set-backend`);
+the egress dedup gate continues to function.
 
 ### `-ingress-set-prefix` / `INGRESS_SET_PREFIX` (default `bsp:tx:`)
 
@@ -1072,24 +1107,26 @@ TTL for ingress-set marks. SHOULD match the local proxy's
 ### `-ingress-set-local-cap` / `INGRESS_SET_LOCAL_CAP` (default `1048576`)
 
 Tier-1 LRU capacity for the ingress mark (avoids redundant async Redis
-writes for repeated TxIDs).
+writes for repeated TxIDs). `0` selects the default capacity.
 
 ### Deprecated TxID dedup flags
 
 The old `-txid-dedup-addr` / `-txid-dedup-prefix` / `-txid-dedup-ttl`
-remain accepted as aliases for the corresponding `-egress-dedup-*` flags
-(`-txid-dedup-ttl` maps to `-egress-dedup-ttl-redis`) and trigger a startup
-warning. A single-listener deployment that sets only these flags works
-unchanged (deployment-id defaults to hostname).
+(`TXID_DEDUP_ADDR` / `TXID_DEDUP_PREFIX` / `TXID_DEDUP_TTL`) remain accepted
+as aliases for `-egress-dedup-redis-addr`, `-egress-dedup-prefix` and
+`-egress-dedup-ttl-redis` and trigger a startup warning. The address alias
+applies only when `-egress-dedup-redis-addr` is unset; a deprecated prefix or
+TTL, when set, overrides its replacement. A single-listener deployment that
+sets only these flags works unchanged (deployment-id defaults to hostname).
 
 ---
 
 ## Metrics reference
 
-Every `bsl_` series the listener registers, served on `-metrics-addr`
-(default `:9200`) at `/metrics`. Names and labels are generated from the
-registrations in `metrics/metrics.go`; `multicast_manifest_*` (BRC-139
-auto-config) is documented in the BRC-139 spec instead.
+Every `bsl_` and `multicast_manifest_` series the listener registers, served
+on `-metrics-addr` (default `:9200`) at `/metrics` beside the standard Go
+runtime and process collectors (`go_*`, `process_*`). Names and labels follow
+the registrations in `metrics/metrics.go`.
 
 ### Frame pipeline
 
@@ -1098,7 +1135,7 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_frames_received_total` | `worker`, `network_interface_name`, `version` | Multicast frames received |
 | `bsl_frames_forwarded_total` | `worker`, `proto` | Frames forwarded to downstream unicast |
 | `bsl_frames_dropped_total` | `worker`, `reason` | Frames dropped before egress |
-| `bsl_frames_invalid_payload_total` | `worker` | BRC-124/BRC-128 frames dropped because the payload's canonical TxID != the frame's TxID (`-verify-payload-hash`) |
+| `bsl_frames_invalid_payload_total` | `worker` | BRC-124/BRC-128 frames dropped because the payload's canonical TxID != the frame's TxID (`-verify-payload-hash`), and BEEF frames whose ContentID != SHA-256d(object) (`-beef-verify-content`) |
 | `bsl_frames_deduped_total` | `worker` | BRC-124/BRC-128 retransmits suppressed before egress (egress dedup) |
 | `bsl_frames_tx_deduped_total` | `worker` | Frames suppressed by a shared-backend TxID claim (cross-listener dedup) |
 | `bsl_egress_errors_total` | `worker` | Errors sending to downstream |
@@ -1154,6 +1191,15 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_header_forwarded_total` | `worker` | Block headers extracted and forwarded to header egress |
 | `bsl_header_egress_errors_total` | `worker` | Errors sending to header egress downstream |
 
+### Reference lane
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `bsl_lane_objects_total` | `lane` | Objects written to a reference lane (`-lane-*`) |
+| `bsl_lane_bytes_total` | `lane` | Bytes written to a reference lane |
+| `bsl_lane_drops_total` | `lane`, `reason` | Objects a lane did not deliver: `no_lane` (the class has no lane; BRC-134 anchors count here as `lane="anchor"`), `not_strippable`, `bridge_down` (inside the redial backoff), `send_error` (dial or write failed), `bad_size` (a header payload that is not 80 bytes) |
+| `bsl_lane_reconnects_total` | `lane` | Lane connections re-established after a write error or a bridge close |
+
 ### Egress / ingress TxID dedup
 
 | Metric | Labels | Meaning |
@@ -1178,6 +1224,24 @@ auto-config) is documented in the BRC-139 spec instead.
 | `bsl_subtree_group_announces_rejected_total` | `reason` | SubtreeGroupAnnounce datagrams rejected before registry update |
 | `bsl_subtree_group_entries` | none | Live (groupID, subtreeID) pairs in the subtree group registry |
 | `bsl_subtree_group_evictions_total` | none | Subtree group registry entries removed by TTL expiry |
+
+### Auto-shard-config (BRC-139)
+
+Registered always, fed only with `-manifest-consumer-enabled`. BRC-139
+§Divergence telemetry is the normative text for the divergence, pilot and
+quorum series.
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `multicast_manifest_received_total` | none | ShardManifest datagrams accepted and upserted into the manifest registry |
+| `multicast_manifest_pilots_known` | none | Distinct authoritative announcers currently within TTL |
+| `multicast_manifest_quorum_met_bits` | none | Bitmask: bit 0 `shard_bits`, bit 1 `source_mode`, bit 2 `successor` |
+| `multicast_manifest_divergence_total` | `field`, `kind` | Disagreements the evaluator sees, counted on every 1 s evaluation while they last; the listener emits `kind="peer-disagree"` |
+| `multicast_manifest_last_divergence_epoch` | `field` | Unix seconds of the most recent divergence per field; absent until a field first diverges |
+| `multicast_manifest_adoption_total` | `field`, `reason` | Values the evaluator newly reports as adopted (`reason`: `bootstrap`, `quorum-shift`). The pinned `-shard-bits` is counted once as `bootstrap` at the first evaluation |
+| `multicast_manifest_resharding_state` | none | `0` steady, `1` bridging (a Successor is adopted and its `TransitionEpoch` is ahead), `2` cutover-pending |
+| `multicast_manifest_resharding_window_seconds` | none | Seconds until the adopted Successor's `TransitionEpoch` (negative once it has passed); `0` with no Successor |
+| `multicast_manifest_resharding_emit_duplicates_total` | none | Registered, but the listener does not increment it |
 
 ### Process
 

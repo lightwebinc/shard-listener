@@ -23,6 +23,12 @@ a `sink-test-frames` sink. Five scenarios are exercised sequentially:
    announces with no whole block are dropped from the block lane as
    `not_strippable`; verified by sink byte counts and the `bsl_lane_*` metrics.
 
+`sink-test-frames` (`cmd/sink-test-frames`) listens on `127.0.0.1:-port`
+(default 9102). Over UDP it counts decoded frames, or raw datagrams with
+`-raw`, and exits 0 at `-count`; with `-tcp -bytes N` it accepts TCP
+connections and exits 0 once N bytes have arrived. It exits 1 if `-timeout`
+(default 30s) passes first.
+
 The suite requires `shard-proxy` checked out at `../shard-proxy`
 (for `send-test-frames`). `make test-e2e` builds all binaries fresh before
 running:
