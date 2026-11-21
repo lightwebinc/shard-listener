@@ -402,13 +402,14 @@ ADVERTs, `-ssm-bootstrap-manifest` for manifests) because the two are
 published by different hosts.
 
 UDP 9001 is also the default data port, so the manifest socket shares it with
-the data-plane workers (and the BRC-127 announce socket shares it too). The
-control sockets bind with the workers' options, `SO_REUSEPORT` plus
-`SO_REUSEADDR` (`discovery/sharedport.go`), which lets any of them bind
-first under either source mode. On Linux they also set
-`IPV6_MULTICAST_ALL=0`: by default a socket receives multicast for every group
-joined on the host at its port, which would hand the control sockets the whole
-data plane.
+the data-plane workers (and the BRC-127 announce socket shares it too). Each
+control socket is its own socket per group address, bound to that address on
+the port rather than to the wildcard (`discovery/sharedport.go`), with the
+workers' `SO_REUSEPORT` and `SO_REUSEADDR`. It binds beside the workers in any
+order under either source mode, it matches only datagrams sent to its own
+group, and it is in no reuseport group with the workers (that needs the
+identical bound address), so unicast to the port always reaches a worker and
+the data plane's multicast never reaches the control socket.
 
 Endpoints are evicted automatically after 3 × BeaconInterval without a refresh.
 The NACK tracker holds a snapshot of the registry at dispatch time, so evictions

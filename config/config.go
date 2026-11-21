@@ -305,7 +305,7 @@ type Config struct {
 	// the beacon GROUP on its own -port (default 9001) while retry-endpoint
 	// ADVERTs arrive on 9300, so a listener bound only to BeaconPort never
 	// sees a manifest. Mirrors the proxy's -manifest-beacon-port exactly.
-	// Equal to BeaconPort ⇒ one socket carries both (the demux is on
+	// Equal to BeaconPort ⇒ the same sockets carry both (the demux is on
 	// MsgType, so that is safe).
 	AutoConfigBeaconPort     int
 	AutoConfigBootstrap      string        // "optional" (default) | "required"
@@ -541,7 +541,7 @@ func Load() (*Config, error) {
 	flag.BoolVar(&c.AutoConfigEnabled, "manifest-consumer-enabled", envBool("MANIFEST_CONSUMER_ENABLED", false),
 		"opt-in BRC-139 manifest consumer for auto-shard-config (off by default)")
 	flag.IntVar(&c.AutoConfigBeaconPort, "manifest-beacon-port", envInt("MANIFEST_BEACON_PORT", 9001),
-		"UDP port on which the listener joins the beacon group to receive BRC-139 manifests; distinct from -beacon-port (ADVERTs), equal values share one socket")
+		"UDP port on which the listener joins the beacon group to receive BRC-139 manifests; distinct from -beacon-port (ADVERTs), equal values share the same sockets")
 	flag.StringVar(&c.AutoConfigBootstrap, "manifest-bootstrap", envStr("MANIFEST_BOOTSTRAP", "optional"),
 		"manifest bootstrap behavior: 'optional' (default) | 'required'; validated, the listener does not wait for quorum in either")
 	flag.IntVar(&c.AutoConfigPilotQuorum, "pilot-quorum", envInt("PILOT_QUORUM", 2),

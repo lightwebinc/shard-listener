@@ -712,8 +712,8 @@ prefix, so the flag does nothing in an ASM deployment.
 anywhere. The symptom is that ADVERTs and manifests simply never arrive, the
 endpoint registry stays empty and the manifest consumer never reaches pilot
 quorum. A listener that joins both forms hears every sender whichever form it
-uses. Entries that share a UDP port share one socket, so `both` costs an extra
-membership per port, not an extra socket.
+uses. Each form is its own socket, bound to its group address, so `both` costs
+one extra socket and membership per port.
 
 **Rollout order.** The senders are `retry-endpoint` (ADVERT) and
 `shard-manifest` (manifest); the other receiver is `shard-proxy`:
@@ -768,16 +768,16 @@ group; set it to the announcers' `-port`, and mirror the proxy's
 `-manifest-beacon-port`, or no manifest is ever seen and quorum is never
 reached however many announcers run.
 
-Setting it equal to `-beacon-port` is supported and opens a single socket:
-the receive loop demuxes ADVERT from manifest on the MsgType byte.
+Setting it equal to `-beacon-port` is supported: the same sockets then carry
+both, and the receive loop demuxes ADVERT from manifest on the MsgType byte.
 
 The default equals the default `-listen-port` (9001), so the manifest socket
 shares its port with the data-plane workers, and with the BRC-127 announce
-socket when `-subtree-groups` is set. Every one of these sockets binds with
-the workers' options (`SO_REUSEPORT` and `SO_REUSEADDR`), so they bind in any
-order under both source modes, and on Linux the control sockets set
-`IPV6_MULTICAST_ALL=0`, so each receives only the groups it joined itself,
-not the data plane's.
+socket when `-subtree-groups` is set. Each control socket binds its own group
+address on the port, not the wildcard, with the workers' `SO_REUSEPORT` and
+`SO_REUSEADDR`: the sockets bind in any order under both source modes, a
+control socket receives only datagrams sent to its own group, and unicast to
+the port is never handed to a control socket.
 
 Under `-source-mode ssm` this port joins the sources from
 `-ssm-bootstrap-manifest` (the announcers), while `-beacon-port` keeps the

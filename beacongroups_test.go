@@ -55,9 +55,8 @@ func TestBeaconGroups_EqualPortsShareOneSocket(t *testing.T) {
 
 // -control-group-compat=both makes each port carry BOTH the any-source and
 // the source-specific form of the beacon group, so an upgraded listener
-// hears a retry endpoint on either side of the flag day. Entries sharing a
-// port share one socket (BeaconListener.Start buckets them), so this is 4
-// joins on 2 sockets, not 4 binds.
+// hears a retry endpoint on either side of the flag day. Each entry becomes
+// its own socket bound to its group address, so this is 4 sockets on 2 ports.
 func TestBeaconGroups_DualPrefixDuringTransition(t *testing.T) {
 	asm := net.ParseIP("ff05::b:fffd")
 	ssm := net.ParseIP("ff35::b:fffd")

@@ -6,7 +6,10 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/manifest"
@@ -24,10 +27,11 @@ import (
 // IPv6 from -ssm-bootstrap-beacon). When Sources is empty they are joined
 // any-source (IPV6_JOIN_GROUP).
 //
-// Groups entries that share a UDP port share ONE socket, with a join per
-// address on it: the BRC-126/129 transition config, the any-source FF0x
-// beacon group and the source-specific FF3x one, both on -beacon-port, is
-// exactly such a pair.
+// Each Groups entry gets its own socket, bound to the group address on its
+// port (bindGroupSocket): the BRC-126/129 transition config, the any-source
+// FF0x beacon group and the source-specific FF3x one on -beacon-port, is two
+// sockets on one port. A socket bound to its group sees only that group's
+// datagrams, never unicast to the port.
 type BeaconListener struct {
 	Registry *Registry
 	Groups   []*net.UDPAddr    // beacon group addresses to join
@@ -59,11 +63,10 @@ func (bl *BeaconListener) Start(ctx context.Context) error {
 	// Start eviction goroutine
 	go bl.evictLoop(ctx)
 
-	buckets := bucketByPort(bl.Groups)
-	errCh := make(chan error, len(buckets))
-	for _, grps := range buckets {
+	errCh := make(chan error, len(bl.Groups))
+	for _, grp := range bl.Groups {
 		go func() {
-			errCh <- bl.listenGroup(ctx, grps)
+			errCh <- bl.listenGroup(ctx, grp)
 		}()
 	}
 
@@ -76,69 +79,34 @@ func (bl *BeaconListener) Start(ctx context.Context) error {
 	}
 }
 
-// bucketByPort groups the configured beacon addresses by UDP port,
-// preserving first-seen port order and the address order within a port.
-// One bucket becomes one socket and one receive loop: the FF0x/FF3x pair
-// the BRC-126/129 transition puts on -beacon-port is two joins on one
-// socket, not two sockets.
-func bucketByPort(groups []*net.UDPAddr) [][]*net.UDPAddr {
-	idx := make(map[int]int, len(groups))
-	buckets := make([][]*net.UDPAddr, 0, len(groups))
-	for _, grp := range groups {
-		i, seen := idx[grp.Port]
-		if !seen {
-			i = len(buckets)
-			idx[grp.Port] = i
-			buckets = append(buckets, nil)
-		}
-		buckets[i] = append(buckets[i], grp)
+// openGroupConn opens the socket for one beacon group: bound to the group
+// address on its port (bindGroupSocket, which shares the port with the
+// data-plane workers when it is theirs), then joined, any-source under ASM,
+// one MCAST_JOIN_SOURCE_GROUP per source under SSM (netjoin).
+func (bl *BeaconListener) openGroupConn(grp *net.UDPAddr) (*net.UDPConn, error) {
+	ga, ok := netip.AddrFromSlice(grp.IP.To16())
+	if !ok {
+		return nil, fmt.Errorf("beacon listen: bad group address %s", grp.IP)
 	}
-	return buckets
-}
-
-// openGroupConn opens one UDP6 listener on the bucket's shared port and
-// joins every address in it: it binds the wildcard once and adds each
-// membership via netjoin (MCAST_JOIN_SOURCE_GROUP per source under SSM,
-// IPV6_JOIN_GROUP under ASM). One bucket holding two addresses is what
-// -control-group-compat=both produces.
-//
-// The bind carries the data-plane workers' sharing options (shareDataPort):
-// the manifest port defaults to the data port (9001), so this socket and the
-// workers' sockets, plus the BRC-127 announce socket, hold one port. Without
-// them the second bind failed with EADDRINUSE, either every worker or the
-// beacon listener (which then also stops ADVERT discovery).
-func (bl *BeaconListener) openGroupConn(grps []*net.UDPAddr) (*net.UDPConn, error) {
-	if len(grps) == 0 {
-		return nil, fmt.Errorf("beacon listen: empty group bucket")
-	}
-	port := grps[0].Port
-	srcs := bl.sourcesFor(grps[0])
-	uc, err := listenSharedUDP6(port)
+	srcs := bl.sourcesFor(grp)
+	fd, err := bindGroupSocket(bl.Iface, grp)
 	if err != nil {
-		return nil, fmt.Errorf("beacon listen %d: %w", port, err)
+		return nil, fmt.Errorf("beacon listen: %w", err)
 	}
-	raw, err := uc.SyscallConn()
+	if err := netjoin.Join(fd, bl.Iface.Index, ga, srcs); err != nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("beacon join %s (%d sources): %w", grp.IP, len(srcs), err)
+	}
+	f := os.NewFile(uintptr(fd), "beacon")
+	pc, err := net.FilePacketConn(f) // dups the socket; its memberships stay with it
+	_ = f.Close()
 	if err != nil {
-		_ = uc.Close()
-		return nil, fmt.Errorf("beacon listen: SyscallConn: %w", err)
+		return nil, fmt.Errorf("beacon listen: %w", err)
 	}
-	for _, grp := range grps {
-		ga, ok := netip.AddrFromSlice(grp.IP.To16())
-		if !ok {
-			_ = uc.Close()
-			return nil, fmt.Errorf("beacon listen: bad group address %s", grp.IP)
-		}
-		var joinErr error
-		if cerr := raw.Control(func(fd uintptr) {
-			joinErr = netjoin.Join(int(fd), bl.Iface.Index, ga, srcs)
-		}); cerr != nil {
-			_ = uc.Close()
-			return nil, fmt.Errorf("beacon listen: Control: %w", cerr)
-		}
-		if joinErr != nil {
-			_ = uc.Close()
-			return nil, fmt.Errorf("beacon join %s (%d sources): %w", grp.IP, len(srcs), joinErr)
-		}
+	uc, ok := pc.(*net.UDPConn)
+	if !ok {
+		_ = pc.Close()
+		return nil, fmt.Errorf("beacon listen: unexpected conn type %T", pc)
 	}
 	return uc, nil
 }
@@ -153,18 +121,13 @@ func (bl *BeaconListener) sourcesFor(grp *net.UDPAddr) []netip.Addr {
 	return bl.Sources
 }
 
-// listenGroup services one socket: the bucket of beacon addresses that
-// share a UDP port. grp is the bucket's first address and is used only to
-// label logs, a datagram arriving on a socket joined to both the FF0x and
-// FF3x forms of the same group cannot be attributed to one of them without
-// IPV6_RECVPKTINFO, and nothing downstream needs that attribution.
-func (bl *BeaconListener) listenGroup(ctx context.Context, grps []*net.UDPAddr) error {
-	conn, err := bl.openGroupConn(grps)
+// listenGroup services the socket of one beacon group address.
+func (bl *BeaconListener) listenGroup(ctx context.Context, grp *net.UDPAddr) error {
+	conn, err := bl.openGroupConn(grp)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	grp := grps[0]
 
 	// Set a read buffer size
 	_ = conn.SetReadBuffer(1 << 16) // 64 KiB

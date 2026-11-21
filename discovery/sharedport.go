@@ -1,57 +1,58 @@
 package discovery
 
 import (
-	"context"
 	"fmt"
 	"net"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
-// shareDataPort applies, before bind, the options a control-plane receiver
-// needs to share its UDP port with the data plane. The BRC-139 manifest port
-// and the BRC-127 announce port default to the data port, so the listener's
-// worker sockets hold the same wildcard port, and a co-resident retry endpoint
-// may hold it too.
+// bindGroupSocket creates the UDP6 socket for one control-plane group and
+// binds it to the group address itself, on the group's port.
 //
-// The options are the workers' own (listener openRawSocket): SO_REUSEPORT,
-// which FreeBSD needs on every socket that shares a port and Linux uses for a
-// same-user share, and SO_REUSEADDR, the Linux cross-user share. A socket with
-// both binds beside anything a worker binds beside; one missing either fails
-// whichever of the two binds comes second with EADDRINUSE.
+// That port is usually the data port: the BRC-139 manifest port and the
+// BRC-127 announce port default to it. The data-plane workers hold the port as
+// [::]:port in one SO_REUSEPORT group, and a co-resident retry endpoint may
+// hold it too. Bound to its group address rather than the wildcard, this
+// socket is in no reuseport group with them (membership needs the identical
+// bound address), so the kernel never balances unicast meant for the workers
+// onto it, and it matches only datagrams sent to its own group: no unicast, no
+// data-plane multicast. net.ListenPacket would rebind a multicast address as
+// the wildcard, hence the raw socket.
 //
-// Sharing the port has a second effect on Linux: by default a socket receives
-// multicast for every group joined on the host at its port, so a control socket
-// beside the workers would be handed the whole data plane. ownGroupsOnly limits
-// it to the groups it joined itself.
-func shareDataPort(fd int) error {
-	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
-		return fmt.Errorf("SO_REUSEPORT: %w", err)
+// The bind still overlaps the workers' wildcard bind, so the socket carries
+// their sharing options (listener openRawSocket): SO_REUSEPORT, which FreeBSD
+// needs on every socket that shares a port, and SO_REUSEADDR, the Linux
+// cross-user share. Without them the second of the two binds failed with
+// EADDRINUSE, whichever came second.
+//
+// A link- or interface-local group takes the interface as its scope.
+func bindGroupSocket(iface *net.Interface, grp *net.UDPAddr) (int, error) {
+	ip := grp.IP.To16()
+	if ip == nil || !ip.IsMulticast() {
+		return -1, fmt.Errorf("bad group address %s", grp.IP)
 	}
-	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
-		return fmt.Errorf("SO_REUSEADDR: %w", err)
-	}
-	return ownGroupsOnly(fd)
-}
-
-// listenSharedUDP6 binds the wildcard [::]:port with shareDataPort applied.
-func listenSharedUDP6(port int) (*net.UDPConn, error) {
-	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
-		var optErr error
-		if err := c.Control(func(fd uintptr) { optErr = shareDataPort(int(fd)) }); err != nil {
-			return err
-		}
-		return optErr
-	}}
-	pc, err := lc.ListenPacket(context.Background(), "udp6", fmt.Sprintf("[::]:%d", port))
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
-		return nil, err
+		return -1, fmt.Errorf("socket: %w", err)
 	}
-	uc, ok := pc.(*net.UDPConn)
-	if !ok {
-		_ = pc.Close()
-		return nil, fmt.Errorf("unexpected conn type %T", pc)
+	for _, opt := range []struct {
+		name string
+		opt  int
+	}{{"SO_REUSEPORT", unix.SO_REUSEPORT}, {"SO_REUSEADDR", unix.SO_REUSEADDR}} {
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, opt.opt, 1); err != nil {
+			_ = unix.Close(fd)
+			return -1, fmt.Errorf("%s: %w", opt.name, err)
+		}
 	}
-	return uc, nil
+	sa := &unix.SockaddrInet6{Port: grp.Port}
+	copy(sa.Addr[:], ip)
+	if ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() {
+		sa.ZoneId = uint32(iface.Index)
+	}
+	if err := unix.Bind(fd, sa); err != nil {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("bind [%s]:%d: %w", grp.IP, grp.Port, err)
+	}
+	return fd, nil
 }

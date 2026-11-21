@@ -1031,8 +1031,8 @@ func buildSSMSources(ctx context.Context, cfg *config.Config, beefJoinIdx []uint
 //
 // beaconIPs carries one address per -control-group-compat prefix (FF0x
 // and/or FF3x, see config/controlgroup.go), so during the flag day each
-// port yields one entry per prefix. Entries that share a port share one
-// socket; BeaconListener.Start buckets them.
+// port yields one entry per prefix. Each entry becomes its own socket, bound
+// to its group address (BeaconListener.Start).
 func beaconGroups(cfg *config.Config, beaconIPs []net.IP) []*net.UDPAddr {
 	ports := []int{cfg.BeaconPort}
 	if cfg.AutoConfigEnabled && cfg.AutoConfigBeaconPort != cfg.BeaconPort {
