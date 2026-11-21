@@ -6,7 +6,7 @@
 // # Environment variable mapping
 //
 //	Flag                               Env var                            Default          Description
-//	-iface                             MULTICAST_IF                       eth0             NIC for multicast joins and NACK send
+//	-iface                             MULTICAST_IF                       eth0             NIC for multicast joins
 //	-listen-port                       LISTEN_PORT                        9001             UDP port for incoming multicast frames
 //	-mode                              LISTENER_MODE                      collapsed        Role split: collapsed | receiver | delivery
 //	-shard-bits                        SHARD_BITS                         2                Must match proxy (1–12)
@@ -19,7 +19,7 @@
 //	-ssm-publishers-static             SSM_PUBLISHERS_STATIC                               Lab/CI: CSV of data-plane publisher sources
 //	-ssm-bootstrap-refresh             SSM_BOOTSTRAP_REFRESH              30s              DNS re-resolve interval for SSM bootstrap entries
 //	-local-source                      LOCAL_SOURCE                                        Co-located proxy BIND_SOURCE excluded from (S,G) joins
-//	-shard-include                     SHARD_INCLUDE                                       Comma-separated shard indices/ranges (empty=all)
+//	-shard-include                     SHARD_INCLUDE                                       Comma-separated shard indices (empty=all)
 //	-subtree-include                   SUBTREE_INCLUDE                                     Hex subtree IDs to allow (empty=all)
 //	-subtree-exclude                   SUBTREE_EXCLUDE                                     Hex subtree IDs to drop (empty=none)
 //	-egress-addr                       EGRESS_ADDR                        127.0.0.1:9100   Downstream unicast host:port
@@ -67,12 +67,12 @@
 //	-control-group-compat              CONTROL_GROUP_COMPAT               both             Control-group (0xFFFD/0xFFFC) prefix: asm-only | both | derived (BRC-126/129 flag day)
 //	-manifest-consumer-enabled         MANIFEST_CONSUMER_ENABLED          false            Opt-in BRC-139 manifest consumer
 //	-manifest-beacon-port              MANIFEST_BEACON_PORT               9001             UDP port on the beacon group carrying BRC-139 manifests (mirrors the proxy)
-//	-manifest-bootstrap                MANIFEST_BOOTSTRAP                 optional         optional | required (refuse data-plane bind until quorum)
+//	-manifest-bootstrap                MANIFEST_BOOTSTRAP                 optional         optional | required (validated, not acted on)
 //	-pilot-quorum                      PILOT_QUORUM                       2                Min distinct authoritative announcers for adoption
 //	-pilot-hysteresis                  PILOT_HYSTERESIS                   0                Hold time before adoption (0 ⇒ 2 × AnnounceInterval)
 //	-shard-include-from-manifest       SHARD_INCLUDE_FROM_MANIFEST        false            Effective subscription = union(-shard-include, pilot_groups)
-//	-live-resharding                   LIVE_RESHARDING                    false            Opt-in BRC-139 bridging mode (default: restart on adopt)
-//	-bridging-window                   BRIDGING_WINDOW                    0                Local floor on bridging duration (0 ⇒ pilot TransitionEpoch)
+//	-live-resharding                   LIVE_RESHARDING                    false            Opt-in BRC-139 bridging mode (validated, not acted on)
+//	-bridging-window                   BRIDGING_WINDOW                    0                Local floor on bridging duration (parsed, unused)
 //	-subtree-groups                    SUBTREE_GROUPS                                      Comma-separated 32-char hex GroupIDs to subscribe (BRC-127)
 //	-subtree-group-default-ttl         SUBTREE_GROUP_DEFAULT_TTL          900s             Default TTL for group announcements
 //	-announce-scope                    ANNOUNCE_SCOPE                     site             Multicast scope(s) for announcement group joins
@@ -93,7 +93,7 @@
 //	-txid-dedup-prefix                 TXID_DEDUP_PREFIX                                   DEPRECATED: alias for -egress-dedup-prefix
 //	-txid-dedup-ttl                    TXID_DEDUP_TTL                                      DEPRECATED: alias for -egress-dedup-ttl-redis
 //	-deployment-id                     DEPLOYMENT_ID                      hostname         Per-deployment dedup identifier (HA siblings share it)
-//	-node-id                           NODE_ID                            hostname         Informational identifier for metrics labels
+//	-node-id                           NODE_ID                            (=deployment-id) Informational identifier (not attached to metrics)
 //	-egress-dedup-backend              EGRESS_DEDUP_BACKEND               (inferred)       redis | aerospike | memory | none
 //	-egress-dedup-redis-addr           EGRESS_DEDUP_REDIS_ADDR                             Redis-protocol address for per-deployment egress TxID dedup
 //	-egress-dedup-aerospike-hosts      EGRESS_DEDUP_AEROSPIKE_HOSTS                        Aerospike seed nodes (comma-separated host:port)
@@ -211,14 +211,15 @@ type Config struct {
 	SubtreeInclude [][32]byte // empty = all allowed
 	SubtreeExclude [][32]byte // empty = none excluded
 
-	// SSM. See SSM Support Plan.
+	// SSM. See the Source-Specific Multicast section of bsv-multicast DESIGN.md.
 	// SourceMode: "asm" (default) | "ssm"
 	// SSMBootstrap{Beacon,Manifest,SubtreeGroupAnnounce}: per-control-group
 	//   bootstrap source lists (IPv6 literals or DNS names) used to (S,G)
 	//   join the matching control group. Resolved via shared
 	//   bootstrap.Resolver at startup.
 	// SSMPublishersStatic: lab/CI escape hatch for the data-plane source
-	//   set. Production uses manifest-driven discovery.
+	//   set, and the only data-plane source set this binary joins: the
+	//   manifest-announced source set is not applied to joins.
 	// SSMBootstrapRefresh: DNS re-resolve interval (default 30s).
 	// LocalSource: the co-located proxy's BIND_SOURCE on a collapsed node.
 	//   Excluded from every roster-driven (S,G) join: joining the node's
@@ -357,8 +358,10 @@ type Config struct {
 	// Listeners with different DeploymentID values race independently, so
 	// each deployment forwards at most once.
 	//
-	// TxidDedupAddr/Prefix/TTL are preserved as DEPRECATED aliases for
-	// EgressDedupRedisAddr/Prefix/TTL when the new flags are not set.
+	// TxidDedupAddr/Prefix/TTL are preserved as DEPRECATED aliases:
+	// TxidDedupAddr fills EgressDedupRedisAddr when that is not set, and a
+	// set TxidDedupPrefix or TxidDedupTTL overrides EgressDedupPrefix or
+	// EgressDedupTTL2.
 	TxidDedupAddr   string        // DEPRECATED alias for EgressDedupRedisAddr
 	TxidDedupPrefix string        // DEPRECATED alias for EgressDedupPrefix
 	TxidDedupTTL    time.Duration // DEPRECATED alias for EgressDedupTTL2 (-egress-dedup-ttl-redis)
@@ -408,7 +411,7 @@ func Load() (*Config, error) {
 	c := &Config{}
 
 	ifaceFlag := flag.String("iface", envStr("MULTICAST_IF", "eth0"),
-		"network interface for multicast group joins and NACK send")
+		"network interface for multicast group joins")
 	flag.IntVar(&c.ListenPort, "listen-port", envInt("LISTEN_PORT", 9001),
 		"UDP port to receive multicast frames on")
 	flag.StringVar(&c.MCScope, "scope", envStr("MC_SCOPE", "site"),
@@ -432,7 +435,7 @@ func Load() (*Config, error) {
 	flag.DurationVar(&c.SSMBootstrapRefresh, "ssm-bootstrap-refresh", envDuration("SSM_BOOTSTRAP_REFRESH", 30*time.Second),
 		"DNS re-resolve interval for SSM bootstrap entries")
 	shardIncludeFlag := flag.String("shard-include", envStr("SHARD_INCLUDE", ""),
-		"comma-separated shard indices/ranges to subscribe (empty = all)")
+		"comma-separated shard indices to subscribe (empty = all)")
 	subtreeIncludeFlag := flag.String("subtree-include", envStr("SUBTREE_INCLUDE", ""),
 		"comma-separated hex subtree IDs to allow (BRC-124/BRC-128 only; empty = all)")
 	subtreeExcludeFlag := flag.String("subtree-exclude", envStr("SUBTREE_EXCLUDE", ""),
@@ -535,17 +538,17 @@ func Load() (*Config, error) {
 	flag.IntVar(&c.AutoConfigBeaconPort, "manifest-beacon-port", envInt("MANIFEST_BEACON_PORT", 9001),
 		"UDP port on which the listener joins the beacon group to receive BRC-139 manifests; distinct from -beacon-port (ADVERTs), equal values share one socket")
 	flag.StringVar(&c.AutoConfigBootstrap, "manifest-bootstrap", envStr("MANIFEST_BOOTSTRAP", "optional"),
-		"manifest bootstrap behavior: 'optional' (default) | 'required' (refuse data-plane bind until quorum)")
+		"manifest bootstrap behavior: 'optional' (default) | 'required'; validated, the listener does not wait for quorum in either")
 	flag.IntVar(&c.AutoConfigPilotQuorum, "pilot-quorum", envInt("PILOT_QUORUM", 2),
-		"min distinct authoritative announcers required for adoption; 1 allowed but logs a warning")
+		"min distinct authoritative announcers required for adoption; 1 allowed")
 	flag.DurationVar(&c.AutoConfigHysteresis, "pilot-hysteresis", envDuration("PILOT_HYSTERESIS", 0),
 		"hysteresis window before adoption; 0 ⇒ 2 × AnnounceInterval of the candidate manifest")
 	flag.BoolVar(&c.AutoJoinFromManifest, "shard-include-from-manifest", envBool("SHARD_INCLUDE_FROM_MANIFEST", false),
 		"additive auto-join: effective subscription = union(-shard-include, pilot_groups)")
 	flag.BoolVar(&c.AutoConfigLiveResharding, "live-resharding", envBool("LIVE_RESHARDING", false),
-		"opt-in BRC-139 live-resharding bridging mode (default: restart on ShardBits adoption)")
+		"opt-in BRC-139 live-resharding bridging mode; validated, not acted on (a running listener keeps its -shard-bits)")
 	flag.DurationVar(&c.AutoConfigBridgingWindow, "bridging-window", envDuration("BRIDGING_WINDOW", 0),
-		"local floor on bridging duration; 0 ⇒ honor pilot TransitionEpoch verbatim")
+		"local floor on bridging duration, reserved for the bridging mode; parsed, unused")
 	subtreeGroupsFlag := flag.String("subtree-groups", envStr("SUBTREE_GROUPS", ""),
 		"comma-separated 32-char hex group IDs to subscribe (BRC-127)")
 	flag.DurationVar(&c.SubtreeGroupDefaultTTL, "subtree-group-default-ttl",
@@ -589,7 +592,7 @@ func Load() (*Config, error) {
 	flag.StringVar(&c.DeploymentID, "deployment-id", envStr("DEPLOYMENT_ID", ""),
 		"per-deployment dedup identifier; HA siblings must share the same value (default: hostname)")
 	flag.StringVar(&c.NodeID, "node-id", envStr("NODE_ID", ""),
-		"per-node informational identifier used in metrics labels (default: hostname)")
+		"per-node informational identifier, not attached to metrics (default: the -deployment-id value)")
 	flag.StringVar(&c.EgressDedupBackend, "egress-dedup-backend", envStr("EGRESS_DEDUP_BACKEND", ""),
 		"tier-2 egress dedup backend: redis|aerospike|memory|none (empty infers redis when -egress-dedup-redis-addr set, else none)")
 	flag.StringVar(&c.EgressDedupRedisAddr, "egress-dedup-redis-addr", envStr("EGRESS_DEDUP_REDIS_ADDR", ""),
@@ -622,7 +625,7 @@ func Load() (*Config, error) {
 	flag.DurationVar(&c.IngressSetTTL, "ingress-set-ttl", envDuration("INGRESS_SET_TTL", 10*time.Minute),
 		"TTL for ingress-set courtesy marks; SHOULD match the local proxy's -txid-dedup-ttl")
 	flag.IntVar(&c.IngressSetLocalCap, "ingress-set-local-cap", envInt("INGRESS_SET_LOCAL_CAP", 1<<20),
-		"tier-1 local LRU capacity for the ingress-mark dedup (0 = disable local LRU)")
+		"tier-1 local LRU capacity for the ingress-mark dedup (0 = default capacity)")
 	flag.DurationVar(&c.DrainTimeout, "drain-timeout", envDuration("DRAIN_TIMEOUT", 0),
 		"pre-drain delay before closing sockets; /readyz returns 503 during this window (0 = disabled)")
 	flag.StringVar(&c.MetricsAddr, "metrics-addr", envStr("METRICS_ADDR", ":9200"),
@@ -654,7 +657,7 @@ func Load() (*Config, error) {
 
 	flag.Parse()
 
-	// Parse the PoW difficulty floor (Bitcoin compact nBits): hex (0x…/bare) or decimal.
+	// Parse the PoW difficulty floor (Bitcoin compact nBits): hex with a 0x prefix, or decimal.
 	{
 		s := strings.TrimSpace(*minPoWBits)
 		base := 10

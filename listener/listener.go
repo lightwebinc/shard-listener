@@ -21,7 +21,7 @@
 //  3. shard.Engine.GroupIndex: derive groupIdx from TxID
 //  4. filter.Filter.Allow: shard/subtree gating
 //  5. egress.Sender.Send: unicast forward to downstream
-//  6. nack.Tracker.Observe: gap detection (BRC-124/BRC-128 only, non-zero SeqNum)
+//  6. nack.Tracker.ObserveFrom: gap detection (non-zero SeqNum)
 package listener
 
 import (
@@ -77,15 +77,14 @@ const (
 	rebucketMaxBytes = rebucketPathMTU - ipv6UDPHeaderSize
 )
 
-// Worker is a single multicast receive goroutine.
 // GroupSources maps a multicast group (16-byte IPv6 in netip.Addr form)
 // to its SSM source list. Groups absent from the map, or with empty
 // source lists, are joined ASM-style via IPV6_JOIN_GROUP. Each control
-// group's source list is the matching sources.bootstrap.<group> bucket;
-// the data-plane source list is the manifest-derived publisher union
-// (or sources.static for lab/CI).
+// group's source list comes from the matching -ssm-bootstrap-* flag; the
+// data-plane source list is -ssm-publishers-static.
 type GroupSources map[netip.Addr][]netip.Addr
 
+// Worker is a single multicast receive goroutine.
 type Worker struct {
 	id                int
 	iface             *net.Interface
@@ -996,7 +995,7 @@ func (w *Worker) processBundle(raw []byte) {
 	// that arrive, so a dropped parent bundle leaves no hole in any child stream.
 	// Upstream loss is detected on the PARENT stream instead (the identity the
 	// origin's retry cached), by Observe-ing the parent (HashKey, SeqNum) below,
-	// survivorship-gated. Caveat: own-traffic exclusion keys on
+	// for every received parent. Caveat: own-traffic exclusion keys on
 	// HashKey = hash(originalSenderIP, group, subtree), which cannot be recomputed
 	// at the local groups from the opaque parent HashKey, so own-traffic exclusion
 	// does not apply to re-bucketed (cross-generation) flows, a documented

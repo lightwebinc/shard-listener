@@ -21,7 +21,7 @@ import (
 //
 // When Sources is non-empty the beacon groups are joined as SSM (S,G)
 // against the supplied source list (typically the retry-endpoint pods'
-// IPv6 from sources.bootstrap.beacon). When Sources is empty the
+// IPv6 from -ssm-bootstrap-beacon). When Sources is empty the
 // listener uses the stdlib ASM path (net.ListenMulticastUDP).
 //
 // Groups entries that share a UDP port share ONE socket, with a join per
