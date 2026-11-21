@@ -37,8 +37,8 @@ import (
 // receive loop, a missed mirror only narrows repair coverage to the other
 // endpoints a listener walks on MISS.
 //
-// The send runs on a goroutine of the tee's own, the shape the proxy's tee
-// took in shard-proxy v1.41.0. The processing goroutine copies each eligible
+// The send runs on a goroutine of the tee's own, as the proxy's tee does.
+// The processing goroutine copies each eligible
 // datagram into a pooled buffer and queues it without blocking; the sender
 // writes the queue in order. A 4 MiB BEEF record is 477 datagrams, and
 // writing their copies over loopback synchronously cost the processing
