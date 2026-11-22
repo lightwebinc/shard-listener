@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -302,9 +301,8 @@ func run() error {
 	// only wired into the beacon listener when AutoConfigEnabled.
 	manifestReg := commanifest.NewRegistry(0)
 
-	// Workers are constructed below. Pre-declare the slice here so the
-	// auto-config applier's hook closure can capture it for runtime
-	// AddGroup/RemoveGroup against each worker fd.
+	// Workers are constructed below; auto-join receives them through
+	// setWorkers once they exist.
 	var workers []*listener.Worker
 
 	// Start beacon listener for dynamic endpoint discovery (receiver-side).
@@ -365,7 +363,19 @@ func run() error {
 	}
 
 	// Start the manifest evaluator/applier when auto-config is enabled (receiver-side).
+	// autoJoiner keeps the -shard-include-from-manifest subscription: pilot
+	// memberships on every worker, retried until they hold, and the receive
+	// filter's shard set.
+	var autoJoiner *autoJoin
 	if !delivery && cfg.AutoConfigEnabled {
+		if cfg.AutoJoinFromManifest {
+			autoJoiner = newAutoJoin(engine, cfg.ListenPort, startupShards(cfg), ssm.publishers, filt)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				autoJoiner.run(ctx)
+			}()
+		}
 		ev := commanifest.NewEvaluator(commanifest.EvaluatorConfig{
 			Quorum:     cfg.AutoConfigPilotQuorum,
 			Hysteresis: cfg.AutoConfigHysteresis,
@@ -401,10 +411,9 @@ func run() error {
 						"action", "orchestrator will roll the pod with -beef-shard-bits updated")
 				},
 				OnPilotGroupsChange: func(added, removed []uint16) {
-					if !cfg.AutoJoinFromManifest {
-						return
+					if autoJoiner != nil {
+						autoJoiner.pilotsChanged(added, removed)
 					}
-					applyPilotGroups(workers, engine, cfg.ListenPort, startupShards(cfg), ssm.publishers, added, removed)
 				},
 			},
 		}
@@ -503,8 +512,8 @@ func run() error {
 			"legacy_coinbase_frames", "dropped")
 	}
 
-	// Start workers. Collect them so the auto-join applier can drive
-	// runtime AddGroup/RemoveGroup against every worker fd.
+	// Start workers. Collect them so auto-join can drive runtime
+	// AddGroup/RemoveGroup against every worker fd.
 	// Reference lane: one shared class router, one TCP connection per lane,
 	// in place of the per-worker single egress sink.
 	var lanes *egress.Lanes
@@ -715,6 +724,11 @@ func run() error {
 				slog.Error("worker exited with error", "err", err)
 			}
 		}(w)
+	}
+	// Auto-join can act once the workers exist. A join that runs before a
+	// worker's Run has opened its socket fails and is retried.
+	if autoJoiner != nil {
+		setWorkers(autoJoiner, workers)
 	}
 
 	// Wait for signal.
@@ -1037,88 +1051,4 @@ func beaconGroups(cfg *config.Config, beaconIPs []net.IP) []*net.UDPAddr {
 		}
 	}
 	return groups
-}
-
-// groupJoiner is the part of a receive worker that runtime auto-join drives
-// (*listener.Worker).
-type groupJoiner interface {
-	AddGroup(group netip.Addr, sources []netip.Addr) error
-	RemoveGroup(group netip.Addr, sources []netip.Addr) error
-}
-
-// startupShards returns the shard indices the workers join at startup: the
-// -shard-include list, or every shard when it is empty.
-func startupShards(cfg *config.Config) []uint32 {
-	if len(cfg.ShardInclude) > 0 {
-		return cfg.ShardInclude
-	}
-	all := make([]uint32, cfg.NumGroups)
-	for i := range all {
-		all[i] = uint32(i)
-	}
-	return all
-}
-
-// applyPilotGroups joins the BRC-139 pilot groups that were added on every
-// worker and leaves the removed ones. static is the startup shard set
-// (startupShards): those groups are never left, so a pilot that names a group
-// the listener already joined at startup and then expires leaves that
-// startup membership in place. sources is the publisher set the startup
-// data-plane joins use (nil under ASM): under SSM a runtime join must be an
-// (S,G) join on it like its siblings', because a (*,G) join in the SSM range
-// is not routed, and a leave names the same sources as its join.
-func applyPilotGroups[W groupJoiner](workers []W, engine *shard.Engine, port int, static []uint32, sources []netip.Addr, added, removed []uint16) {
-	for _, idx := range added {
-		addr := engine.Addr(uint32(idx), port)
-		ga, ok := netip.AddrFromSlice(addr.IP.To16())
-		if !ok {
-			slog.Warn("auto-join: bad group address", "idx", idx)
-			continue
-		}
-		for _, w := range workers {
-			if err := w.AddGroup(ga, sources); err != nil {
-				var errno syscall.Errno
-				if errors.As(err, &errno) && errno == syscall.ENOBUFS {
-					// mld_max_msf source-filter exhaustion is the
-					// canonical at-scale join failure (category-8).
-					slog.Error("auto-join failed: MLD source-filter exhausted; raise net.ipv6.mld_max_msf",
-						"group", ga.String(), "err", err, "errno", errno.Error(), "syscall", "setsockopt")
-				} else {
-					slog.Warn("auto-join AddGroup failed",
-						"group", ga.String(), "worker", w, "err", err)
-				}
-			}
-		}
-	}
-	for _, idx := range removed {
-		addr := engine.Addr(uint32(idx), port)
-		ga, ok := netip.AddrFromSlice(addr.IP.To16())
-		if !ok {
-			continue
-		}
-		// Groups the startup configuration joined are NEVER left.
-		if inStaticInclude(static, idx) {
-			continue
-		}
-		for _, w := range workers {
-			if err := w.RemoveGroup(ga, sources); err != nil {
-				slog.Warn("auto-join RemoveGroup failed",
-					"group", ga.String(), "worker", w, "err", err)
-			}
-		}
-	}
-	slog.Info("auto-join applied", "added", added, "removed", removed, "sources", len(sources))
-}
-
-// inStaticInclude reports whether the given shard index is in the static
-// startup set (startupShards: the -shard-include list, or every shard).
-// Pilot-driven RemoveGroup MUST skip these entries: startup memberships are
-// never left per the auto-shard-config plan.
-func inStaticInclude(static []uint32, idx uint16) bool {
-	for _, v := range static {
-		if v == uint32(idx) {
-			return true
-		}
-	}
-	return false
 }

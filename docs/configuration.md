@@ -822,6 +822,20 @@ publisher set as the startup data-plane groups (`-ssm-publishers-static`,
 without `-local-source`), and left on it; with no publisher set it is joined
 without a source filter, like them.
 
+The shard filter follows the subscription: with a `-shard-include` list, a
+pilot-added shard's transactions are admitted while a pilot claims it and
+dropped (`shard_filter`) again once none does, the `-shard-include` shards are
+admitted throughout, and the subtree rules (`-subtree-include`,
+`-subtree-exclude`, `-subtree-groups`) apply to pilot shards as to the rest.
+Without `-shard-include` every shard is admitted already.
+
+A pilot-group join or leave that fails, for example a join refused with
+`ENOBUFS` when the socket's source-filter capacity (`net.ipv6.mld_max_msf`) is
+exhausted, installs nothing (a multi-source join rolls back the sources it had
+joined) and is retried on its own, after 2 s and then at doubling intervals up
+to 2 minutes, one log line per attempt, until it succeeds or no pilot claims
+the group any more. Freeing capacity therefore restores the membership.
+
 ### `-live-resharding` / `LIVE_RESHARDING` (default: `false`)
 
 Opt-in BRC-139 bridging mode. The listener acts on neither setting.

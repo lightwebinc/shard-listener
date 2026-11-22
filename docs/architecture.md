@@ -784,11 +784,13 @@ on stdout for log aggregation; `-log-level` is runtime-togglable via
 `host.inventory` event (OS/CPU/mem/NIC incl. IPv4+IPv6, multicast sysctls) and
 a `bsl_host_info` gauge.
 
-**Category-8 OS/NIC logging:** the pilot-driven auto-join path in `main.go`
+**Category-8 OS/NIC logging:** the pilot-driven auto-join path (`autojoin.go`)
 classifies `AddGroup` failures: an `ENOBUFS` from exceeding `net.ipv6.mld_max_msf`
 (the kernel's per-socket source-filter cap, the canonical at-scale SSM join
 failure) is logged at Error with the errno and a remediation hint, distinct from
-generic join failures.
+generic join failures. A failed join is retried with backoff (2 s doubling to
+2 min, one log line per attempt) while a pilot still claims the group, so freed
+capacity restores the membership.
 
 **Tracing** is opt-in (`-trace-sampling > 0` + `-otlp-endpoint`) and reserved
 for control-plane flows. The listener installs the tracer provider but creates no

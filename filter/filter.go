@@ -2,7 +2,9 @@
 // shard-listener. All logic is pure; no I/O is performed.
 //
 // A frame passes the filter if and only if:
-//  1. Its group index is in the shard-include set (or the set is empty = all).
+//  1. Its group index is in the shard set: the shard-include set plus any
+//     shards added at runtime (SetRuntimeShards), or every shard when the
+//     shard-include set is empty.
 //  2. Its SubtreeID is NOT in the subtree-exclude set.
 //  3. Its SubtreeID is in the subtree-include set OR in any subscribed subtree
 //     group (via groupReg), OR both sets are empty (accept all).
@@ -13,13 +15,19 @@
 package filter
 
 import (
+	"sync/atomic"
+
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-listener/subtreegroup"
 )
 
 // Filter holds the compiled include/exclude sets. Construct with [New].
 type Filter struct {
-	shardInclude   map[uint32]struct{}    // nil = all shards accepted
+	shardStatic map[uint32]struct{} // the -shard-include set; nil = all shards accepted
+	// shards is the effective shard set Allow checks: shardStatic plus the
+	// runtime additions (SetRuntimeShards), swapped whole so a worker never
+	// sees a half-built set. nil = all shards accepted.
+	shards         atomic.Pointer[map[uint32]struct{}]
 	subtreeInclude map[[32]byte]struct{}  // nil = no static include
 	subtreeExclude map[[32]byte]struct{}  // nil = no subtrees excluded
 	groupReg       *subtreegroup.Registry // nil = group filtering disabled
@@ -36,10 +44,11 @@ type Filter struct {
 func New(shardInclude []uint32, subtreeInclude, subtreeExclude [][32]byte, groupReg *subtreegroup.Registry) *Filter {
 	f := &Filter{}
 	if len(shardInclude) > 0 {
-		f.shardInclude = make(map[uint32]struct{}, len(shardInclude))
+		f.shardStatic = make(map[uint32]struct{}, len(shardInclude))
 		for _, idx := range shardInclude {
-			f.shardInclude[idx] = struct{}{}
+			f.shardStatic[idx] = struct{}{}
 		}
+		f.SetRuntimeShards(nil)
 	}
 	if len(subtreeInclude) > 0 {
 		f.subtreeInclude = make(map[[32]byte]struct{}, len(subtreeInclude))
@@ -62,8 +71,8 @@ func New(shardInclude []uint32, subtreeInclude, subtreeExclude [][32]byte, group
 // "subtree_exclude", or "subtree_include_miss".
 // groupIdx is derived from the frame's TxID by the caller.
 func (f *Filter) Allow(groupIdx uint32, fr *frame.Frame) (bool, string) {
-	if f.shardInclude != nil {
-		if _, ok := f.shardInclude[groupIdx]; !ok {
+	if shards := f.shards.Load(); shards != nil {
+		if _, ok := (*shards)[groupIdx]; !ok {
 			return false, "shard_filter"
 		}
 	}
@@ -82,4 +91,23 @@ func (f *Filter) Allow(groupIdx uint32, fr *frame.Frame) (bool, string) {
 		}
 	}
 	return true, ""
+}
+
+// SetRuntimeShards replaces the shards admitted beyond the -shard-include set:
+// the BRC-139 pilot shards the listener subscribes to at runtime
+// (-shard-include-from-manifest). The -shard-include set is always kept, and a
+// filter that admits every shard (no -shard-include) is left as it is; the
+// subtree rules are untouched. Safe to call while workers run Allow.
+func (f *Filter) SetRuntimeShards(extra []uint32) {
+	if f.shardStatic == nil {
+		return
+	}
+	m := make(map[uint32]struct{}, len(f.shardStatic)+len(extra))
+	for idx := range f.shardStatic {
+		m[idx] = struct{}{}
+	}
+	for _, idx := range extra {
+		m[idx] = struct{}{}
+	}
+	f.shards.Store(&m)
 }
