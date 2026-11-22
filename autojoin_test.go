@@ -18,20 +18,24 @@ import (
 )
 
 // fakeJoiner records the runtime joins and leaves a worker is asked for, and
-// fails a group's next joins on request (ENOBUFS, source-filter exhaustion).
+// fails a group's next joins (ENOBUFS, source-filter exhaustion) or leaves on
+// request. A failed leave behaves like netjoin.Leave: the first source is gone,
+// the rest are still held.
 type fakeJoiner struct {
-	joined    map[netip.Addr][]netip.Addr // current memberships
-	left      map[netip.Addr][]netip.Addr // sources of each group's last leave
-	addCalls  map[netip.Addr]int
-	failJoins map[netip.Addr]int
+	joined     map[netip.Addr][]netip.Addr // current memberships
+	left       map[netip.Addr][]netip.Addr // sources of each group's last leave
+	addCalls   map[netip.Addr]int
+	failJoins  map[netip.Addr]int
+	failLeaves map[netip.Addr]int
 }
 
 func newFakeJoiner() *fakeJoiner {
 	return &fakeJoiner{
-		joined:    map[netip.Addr][]netip.Addr{},
-		left:      map[netip.Addr][]netip.Addr{},
-		addCalls:  map[netip.Addr]int{},
-		failJoins: map[netip.Addr]int{},
+		joined:     map[netip.Addr][]netip.Addr{},
+		left:       map[netip.Addr][]netip.Addr{},
+		addCalls:   map[netip.Addr]int{},
+		failJoins:  map[netip.Addr]int{},
+		failLeaves: map[netip.Addr]int{},
 	}
 }
 
@@ -46,6 +50,13 @@ func (f *fakeJoiner) AddGroup(g netip.Addr, s []netip.Addr) error {
 }
 
 func (f *fakeJoiner) RemoveGroup(g netip.Addr, s []netip.Addr) error {
+	if f.failLeaves[g] > 0 {
+		f.failLeaves[g]--
+		if cur := f.joined[g]; len(cur) > 1 {
+			f.joined[g] = cur[1:]
+		}
+		return syscall.ENOMEM
+	}
 	f.left[g] = s
 	delete(f.joined, g)
 	return nil
@@ -258,5 +269,25 @@ func TestAutoJoin_FilterFollowsPilots(t *testing.T) {
 	}
 	if !delivered(shard0) {
 		t.Error("startup shard 0 dropped")
+	}
+}
+
+// A leave that fails part-way must not strand the group if the pilot then
+// wants it back: auto-join asserts the group on the worker again (a no-op
+// when the worker still holds every source) instead of trusting its own
+// record of a membership the failed leave cut short.
+func TestAutoJoin_PilotReturnAfterFailedLeave(t *testing.T) {
+	engine := shard.New(0xFF35, shard.DefaultGroupID, 2)
+	publishers := addrs("2001:db8::11", "2001:db8::12")
+	w := newFakeJoiner()
+	g1 := engineGroup(t, engine, 1)
+	w.failLeaves[g1] = 1
+	a, _ := testAutoJoin(engine, []uint32{0}, publishers, nil, w)
+
+	a.pilotsChanged([]uint16{1}, nil)
+	a.pilotsChanged(nil, []uint16{1}) // the leave fails after the first source
+	a.pilotsChanged([]uint16{1}, nil) // the pilot is back
+	if got := w.joined[g1]; !slices.Equal(got, publishers) {
+		t.Errorf("group 1 holds sources %v after the pilot returned, want every publisher %v", got, publishers)
 	}
 }

@@ -51,12 +51,14 @@ const (
 //   - wanted is the set of pilot groups the manifests claim, beyond the
 //     startup shards, which the workers joined in Run and which auto-join
 //     never touches or leaves;
-//   - installed records, per worker, the pilot memberships that worker holds;
+//   - installed records, per worker, the pilot groups that worker has joined,
+//     and so has to leave once they are no longer wanted;
 //   - the receive filter admits the startup shards plus every wanted group,
 //     replaced whole on each change (filter.SetRuntimeShards).
 //
-// A wanted group missing from a worker is joined, an installed one no longer
-// wanted is left. A join or leave that fails is retried with backoff until it
+// A wanted group is asserted on every worker (AddGroup joins whatever sources
+// it lacks and is otherwise a no-op), an installed one no longer wanted is
+// left. A join or leave that fails is retried with backoff until it
 // succeeds or the pilot set stops asking for it, so a membership refused for
 // lack of source-filter capacity (ENOBUFS) is restored once capacity is freed.
 // Under SSM every join and leave names the publisher set, like the startup
@@ -190,8 +192,12 @@ func (a *autoJoin) reconcileLocked() {
 	}
 	for i, w := range a.workers {
 		inst := a.installed[i]
+		// A wanted group is asserted on every pass, held or not: AddGroup is a
+		// no-op for a worker that holds every source, and repairs one whose
+		// membership a failed leave cut short. installed only says what to
+		// leave once the group is no longer wanted.
 		for idx := range a.wanted {
-			if _, ok := inst[idx]; ok || !a.due(idx, now) {
+			if !a.due(idx, now) {
 				continue
 			}
 			ga, ok := a.group(idx)

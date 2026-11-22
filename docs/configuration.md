@@ -831,8 +831,9 @@ Without `-shard-include` every shard is admitted already.
 
 A pilot-group join or leave that fails, for example a join refused with
 `ENOBUFS` when the socket's source-filter capacity (`net.ipv6.mld_max_msf`) is
-exhausted, installs nothing (a multi-source join rolls back the sources it had
-joined) and is retried on its own, after 2 s and then at doubling intervals up
+exhausted, changes nothing (a multi-source join rolls back the sources it had
+joined, and a leave that fails part-way joins the sources it had left again)
+and is retried on its own, after 2 s and then at doubling intervals up
 to 2 minutes, one log line per attempt, until it succeeds or no pilot claims
 the group any more. Freeing capacity therefore restores the membership.
 

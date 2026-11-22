@@ -32,6 +32,7 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -144,8 +145,8 @@ type Worker struct {
 	// setsockopt calls so concurrent AddGroup/RemoveGroup calls from
 	// auto-config / applier goroutines do not race.
 	joinMu       sync.Mutex
-	joinFd       int                     // -1 when worker is not running
-	joinedGroups map[netip.Addr]struct{} // currently-joined data-plane groups
+	joinFd       int                                    // -1 when worker is not running
+	joinedGroups map[netip.Addr]map[netip.Addr]struct{} // joined groups -> the sources held (empty = any-source)
 
 	// procMu serializes processFrame so a recovered frame re-injected by the
 	// NACK tracker (via Reinject, on the tracker goroutine) is mutually
@@ -427,6 +428,11 @@ func (w *Worker) SetBlockPoW(require bool, floorBits uint32) {
 // runtime (BRC-139 auto-join and live-resharding bridging-mode primitive).
 // sources is the SSM source filter; pass nil/empty for an ASM join.
 //
+// The worker records the exact sources it holds for each group, so AddGroup
+// joins only the ones the group is missing: calling it again for a held group
+// is a no-op, and after a leave that failed part-way it installs what the
+// leave took away. A call that fails installs nothing.
+//
 // Safe to call concurrently from goroutines other than the receive loop.
 // Returns an error if the worker has not started yet or has already
 // stopped.
@@ -436,31 +442,71 @@ func (w *Worker) AddGroup(group netip.Addr, sources []netip.Addr) error {
 	if w.joinFd < 0 {
 		return fmt.Errorf("worker %d: AddGroup before Run", w.id)
 	}
-	if _, ok := w.joinedGroups[group]; ok {
-		return nil // idempotent
+	held, joined := w.joinedGroups[group]
+	if len(sources) == 0 {
+		if joined {
+			return nil
+		}
+		if err := netjoin.Join(w.joinFd, w.iface.Index, group, nil); err != nil {
+			return fmt.Errorf("worker %d: AddGroup %s: %w", w.id, group, err)
+		}
+		w.joinedGroups[group] = sourceSet(nil)
+		return nil
 	}
-	if err := joinAllOrNone(w.joinFd, w.iface.Index, group, sources); err != nil {
+	var missing []netip.Addr
+	for _, src := range sources {
+		if _, ok := held[src]; !ok {
+			missing = append(missing, src)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if err := joinAllOrNone(w.joinFd, w.iface.Index, group, missing); err != nil {
 		return fmt.Errorf("worker %d: AddGroup %s: %w", w.id, group, err)
 	}
-	w.joinedGroups[group] = struct{}{}
+	if !joined {
+		held = sourceSet(nil)
+		w.joinedGroups[group] = held
+	}
+	for _, src := range missing {
+		held[src] = struct{}{}
+	}
 	return nil
 }
 
-// joinAllOrNone joins group on fd: any-source when sources is empty, else one
-// (S,G) join per source. netjoin.Join stops at the first failing source and
-// keeps the ones it already joined; a runtime join that failed is not recorded
-// in joinedGroups, so RemoveGroup would never leave those. Here a failure
-// leaves the sources joined before it again, so a failed call installs no
-// membership. (A failed startup join needs no such care: Run closes the
-// socket, and its memberships with it.)
-func joinAllOrNone(fd, ifIndex int, group netip.Addr, sources []netip.Addr) error {
-	if len(sources) == 0 {
-		return netjoin.Join(fd, ifIndex, group, nil)
+// sourceSet builds the record of a group's joined sources; empty means an
+// any-source membership.
+func sourceSet(sources []netip.Addr) map[netip.Addr]struct{} {
+	set := make(map[netip.Addr]struct{}, len(sources))
+	for _, src := range sources {
+		set[src] = struct{}{}
 	}
+	return set
+}
+
+// joinSource and leaveSource issue one (S,G) join or leave; tests replace
+// them to inject a failure.
+var (
+	joinSource = func(fd, ifIndex int, group, src netip.Addr) error {
+		return netjoin.Join(fd, ifIndex, group, []netip.Addr{src})
+	}
+	leaveSource = func(fd, ifIndex int, group, src netip.Addr) error {
+		return netjoin.Leave(fd, ifIndex, group, []netip.Addr{src})
+	}
+)
+
+// joinAllOrNone joins group on fd, one (S,G) join per source. netjoin.Join
+// stops at the first failing source and keeps the ones it already joined,
+// which the record would not show. Here a failure leaves the sources joined
+// before it again, so a failed call installs no membership. (A failed startup
+// join needs no such care: Run closes the socket, and its memberships with
+// it.)
+func joinAllOrNone(fd, ifIndex int, group netip.Addr, sources []netip.Addr) error {
 	for i, src := range sources {
-		if err := netjoin.Join(fd, ifIndex, group, []netip.Addr{src}); err != nil {
-			if i > 0 {
-				_ = netjoin.Leave(fd, ifIndex, group, sources[:i])
+		if err := joinSource(fd, ifIndex, group, src); err != nil {
+			for _, done := range sources[:i] {
+				_ = leaveSource(fd, ifIndex, group, done)
 			}
 			return err
 		}
@@ -468,9 +514,15 @@ func joinAllOrNone(fd, ifIndex int, group netip.Addr, sources []netip.Addr) erro
 	return nil
 }
 
-// RemoveGroup leaves the given multicast group at runtime. Safe to call
-// concurrently. Idempotent (no-op if the group is not currently joined).
-// Returns an error if the worker has not started yet or has already
+// RemoveGroup leaves the given multicast group at runtime: every source the
+// worker holds for it, so the record decides what is left (sources only has
+// to name the same membership). A leave that fails part-way joins the sources
+// it already left again, so the membership stays as it was and a retry, or an
+// AddGroup if the group is wanted back, starts from the real state; should a
+// re-join fail too, the record drops just that source.
+//
+// Safe to call concurrently. Idempotent (no-op if the group is not currently
+// joined). Returns an error if the worker has not started yet or has already
 // stopped.
 func (w *Worker) RemoveGroup(group netip.Addr, sources []netip.Addr) error {
 	w.joinMu.Lock()
@@ -478,11 +530,34 @@ func (w *Worker) RemoveGroup(group netip.Addr, sources []netip.Addr) error {
 	if w.joinFd < 0 {
 		return fmt.Errorf("worker %d: RemoveGroup before Run", w.id)
 	}
-	if _, ok := w.joinedGroups[group]; !ok {
+	held, joined := w.joinedGroups[group]
+	if !joined {
 		return nil
 	}
-	if err := netjoin.Leave(w.joinFd, w.iface.Index, group, sources); err != nil {
-		return fmt.Errorf("worker %d: RemoveGroup %s: %w", w.id, group, err)
+	if len(held) == 0 {
+		if err := netjoin.Leave(w.joinFd, w.iface.Index, group, nil); err != nil {
+			return fmt.Errorf("worker %d: RemoveGroup %s: %w", w.id, group, err)
+		}
+		delete(w.joinedGroups, group)
+		return nil
+	}
+	srcs := make([]netip.Addr, 0, len(held))
+	for src := range held {
+		srcs = append(srcs, src)
+	}
+	sort.Slice(srcs, func(i, j int) bool { return srcs[i].Less(srcs[j]) })
+	for i, src := range srcs {
+		if err := leaveSource(w.joinFd, w.iface.Index, group, src); err != nil {
+			for _, done := range srcs[:i] {
+				if rerr := joinSource(w.joinFd, w.iface.Index, group, done); rerr != nil {
+					delete(held, done) // left and not restored: the record follows
+				}
+			}
+			if len(held) == 0 {
+				delete(w.joinedGroups, group)
+			}
+			return fmt.Errorf("worker %d: RemoveGroup %s: %w", w.id, group, err)
+		}
 	}
 	delete(w.joinedGroups, group)
 	return nil
@@ -519,7 +594,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	w.joinMu.Lock()
 	w.joinFd = fd
-	w.joinedGroups = make(map[netip.Addr]struct{})
+	w.joinedGroups = make(map[netip.Addr]map[netip.Addr]struct{})
 	w.joinMu.Unlock()
 	defer func() {
 		w.joinMu.Lock()
@@ -543,7 +618,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			return fmt.Errorf("worker %d: join group %s (%d sources): %w", w.id, grp.IP, len(srcs), err)
 		}
 		w.joinMu.Lock()
-		w.joinedGroups[ga] = struct{}{}
+		w.joinedGroups[ga] = sourceSet(srcs)
 		w.joinMu.Unlock()
 	}
 

@@ -68,7 +68,7 @@ func TestWorker_AddGroupFailureLeavesNoMembership(t *testing.T) {
 		t.Skip("the kernel still lists a left source in /proc/net/mcfilter6")
 	}
 
-	w := &Worker{id: 0, iface: lo, joinFd: fd, joinedGroups: map[netip.Addr]struct{}{}}
+	w := &Worker{id: 0, iface: lo, joinFd: fd, joinedGroups: map[netip.Addr]map[netip.Addr]struct{}{}}
 	// netjoin rejects the second source, an IPv4 address, after the first joined.
 	if err := w.AddGroup(group, []netip.Addr{good, netip.MustParseAddr("192.0.2.1")}); err == nil {
 		t.Fatal("AddGroup with a non-IPv6 source succeeded")
@@ -78,5 +78,53 @@ func TestWorker_AddGroupFailureLeavesNoMembership(t *testing.T) {
 	}
 	if got := w.JoinedGroups(); len(got) != 0 {
 		t.Errorf("failed AddGroup recorded groups %v", got)
+	}
+}
+
+// A leave that fails on the second source must not leave the first one gone
+// while the record still holds the group: if the pilot then wants the group
+// back, AddGroup would see it held and add nothing, and the first source would
+// stay absent. The failed leave joins what it left again, and a returning
+// pilot finds every source joined.
+func TestWorker_RemoveGroupFailureKeepsMembership(t *testing.T) {
+	lo := loopbackIface(t)
+	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if err := unix.Bind(fd, &unix.SockaddrInet6{}); err != nil {
+		t.Fatal(err)
+	}
+	group := netip.MustParseAddr("ff35::b:7e59")
+	s1, s2 := netip.MustParseAddr("2001:db8::10"), netip.MustParseAddr("2001:db8::11")
+	w := &Worker{id: 0, iface: lo, joinFd: fd, joinedGroups: map[netip.Addr]map[netip.Addr]struct{}{}}
+	if err := w.AddGroup(group, []netip.Addr{s1, s2}); err != nil {
+		t.Skipf("SSM join unavailable here: %v", err)
+	}
+	if !sourceJoined(t, lo, group, s1) || !sourceJoined(t, lo, group, s2) {
+		t.Skip("the kernel does not list the (S,G) joins in /proc/net/mcfilter6")
+	}
+
+	real := leaveSource
+	t.Cleanup(func() { leaveSource = real })
+	leaveSource = func(fd, ifIndex int, g, src netip.Addr) error {
+		if src == s2 {
+			return unix.ENOMEM // the second leave fails
+		}
+		return real(fd, ifIndex, g, src)
+	}
+	if err := w.RemoveGroup(group, []netip.Addr{s1, s2}); err == nil {
+		t.Fatal("RemoveGroup with a failing second leave succeeded")
+	}
+	leaveSource = real
+
+	if err := w.AddGroup(group, []netip.Addr{s1, s2}); err != nil { // the pilot is back
+		t.Fatalf("AddGroup after the failed leave: %v", err)
+	}
+	for _, src := range []netip.Addr{s1, s2} {
+		if !sourceJoined(t, lo, group, src) {
+			t.Errorf("(%s, %s) absent after the group was wanted back", src, group)
+		}
 	}
 }
