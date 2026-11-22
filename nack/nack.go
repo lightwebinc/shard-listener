@@ -23,7 +23,7 @@ type TrackerConfig struct {
 	MaxRetries        int           // Max failed recovery rounds before declaring unrecoverable (tier hops are free)
 	GapTTL            time.Duration // Max lifetime of a gap entry (~Bitcoin block interval)
 	TailTTL           time.Duration // Max idle time before a flow entry is evicted; 0 = GapTTL
-	SeqResetThreshold uint64        // If seqNum <= threshold on an established flow, treat as proxy restart (default 100)
+	SeqResetThreshold uint64        // If the flow's emitter sends seqNum <= threshold on an established flow, treat it as a proxy restart (default 100)
 	// MaxFlows caps the per-source flow table so a burst of thousands of DISTINCT new
 	// sources (a flood, before the idle-age-out sweep frees slots) cannot exhaust memory.
 	// At the cap, a NEW source is not gap-tracked (its frames still forward, only NACK
@@ -185,6 +185,17 @@ type flowState struct {
 	// buffer holding none of its siblings and the object never completes.
 	// Re-stamped on every Observe, so a re-hash that moves the flow follows it.
 	owner int
+}
+
+// setEmitter records source as the flow's emitter for a frame that advances
+// the stream. A frame with no source (re-injected) leaves it, and so does a
+// filled gap: a probe answered by a retransmit can sit beyond lastSeqNum, and
+// its source is the retry endpoint's. A genuine emitter change, a new source
+// continuing the sequence (a relay or proxy failover), still replaces it.
+func (fs *flowState) setEmitter(source net.IP, filled bool) {
+	if source != nil && !filled {
+		fs.source = source
+	}
 }
 
 // ownerUnknown marks a flow whose observing worker is not known, a gap
@@ -508,12 +519,11 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 	// its next tail. Without this reset, a flow that goes quiet once would never
 	// be probed again for the rest of its life.
 	fs.probeMisses = 0
-	// Sources are stable per flow. Keep the latest non-empty source so a recovered
-	// frame re-injected by the tracker (which carries no live source) does not
-	// clobber the real source attribution.
-	if source != nil {
-		fs.source = source
-	}
+	// fs.source is the flow's emitter, the datagram source of the frames that
+	// advance its stream. Only such a frame may set it (see setEmitter): a
+	// retransmit, whether a multicast repair from a retry endpoint carrying that
+	// endpoint's address or a recovered frame re-injected with no source, is a
+	// SeqNum the flow has already passed or is missing, and keeps the emitter.
 
 	// A frame for a gap already given up on: the hole closed after all. Book
 	// it so unrecovered minus late-filled reads as real loss, then fall through
@@ -521,7 +531,9 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 	t.noteLateFill(fs, seqNum)
 
 	// Step 3: auto-fill, close any pending gap whose seqNum matches.
+	filled := false
 	if e, found := fs.pending[seqNum]; found {
+		filled = true
 		t.delPending(fs, seqNum)
 		t.bookFill(fs, e)
 		// A repair that does not advance the stream is now fully handled. It
@@ -540,6 +552,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 	if fs.lastSeqNum == 0 {
 		// First frame for this flow.
 		fs.lastSeqNum = seqNum
+		fs.setEmitter(source, filled)
 		return
 	}
 
@@ -552,12 +565,13 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		if threshold == 0 {
 			threshold = 100
 		}
-		// Only a LIVE wire frame can signal a proxy restart. A recovered frame
-		// re-injected off the unicast NACK channel carries no source (see
-		// Worker.Reinject), a late repair of an early-flow seqNum, e.g. one
-		// arriving after its gap was abandoned, is history replayed, not a
-		// restarted proxy, and must not reset the flow.
-		if source != nil && seqNum <= threshold && fs.lastSeqNum > threshold {
+		// Only the flow's own emitter can signal a proxy restart: a live wire
+		// frame whose source is the emitter's. A recovered frame re-injected off
+		// the unicast NACK channel carries no source (see Worker.Reinject), and
+		// a multicast retransmit carries the retry endpoint's: both are history
+		// replayed, a late repair of an early-flow seqNum for this listener or
+		// another, not a restarted proxy, and must not reset the flow.
+		if source != nil && source.Equal(fs.source) && seqNum <= threshold && fs.lastSeqNum > threshold {
 			// Proxy restarted: evict any pending gaps (unrecoverable now) and
 			// reset the flow counter.
 			for seq, e := range fs.pending {
@@ -574,6 +588,10 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		}
 		return
 	}
+
+	// The frame advances the stream (steps 5 and 6), so its source is the
+	// emitter's, unless it is a probe a retransmit answered.
+	fs.setEmitter(source, filled)
 
 	if seqNum == fs.lastSeqNum+1 {
 		// Step 5: contiguous, update the inter-arrival estimate (the emitter-change

@@ -254,9 +254,13 @@ without the observing worker's id):
 - Out-of-order or retransmitted frames (`seqNum <= lastSeqNum`) are silently
   accepted; they never create new gap entries.
 - `lastSeqNum` only advances forward, with one exception, a proxy restart: a
-  frame off the wire with `SeqNum <= 100` on a flow already past 100 restarts
-  the flow at that `SeqNum`, and the gaps it had pending are booked unrecovered
-  (`reason="restart"`).
+  frame off the wire from the flow's own emitter with `SeqNum <= 100` on a flow
+  already past 100 restarts the flow at that `SeqNum`, and the gaps it had
+  pending are booked unrecovered (`reason="restart"`). The emitter is the
+  source of the frames that advance the flow, so a new source that continues
+  the sequence (a relay or proxy failover) becomes it. A retransmit is never a
+  restart and never becomes the emitter: a multicast repair arrives from the
+  retry endpoint's address, and a unicast repair is re-injected with no source.
 
 **A jump within `-nack-max-forward-jump` is loss, at any rate.** Every
 missing `SeqNum` of a forward jump of up to `-nack-max-forward-jump` frames
