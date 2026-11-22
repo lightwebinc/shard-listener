@@ -625,6 +625,28 @@ sequence identity, and its `HashKey` keeps two senders' bundles with equal
 alone: HA siblings running different releases keep sharing claims through a
 rolling upgrade, and the prefix carries no version.
 
+### Backend failure: refused at startup, fail-open while running
+
+| When the backend is unreachable | What the listener does |
+| --- | --- |
+| At startup, with `-egress-dedup-backend` `redis` or `aerospike` (a set `-egress-dedup-redis-addr` selects `redis`) | Exits with status 1 and does not fall back to the tier-1 LRU. `redis` retries its ping for about 10 seconds first; `aerospike` exits when its connect fails. The ingress-set mark backend (`-ingress-set-*`) is opened the same way and its failure also stops the listener. |
+| While running, a claim's backend call fails or times out | Fails open: the frame is forwarded and counted in `bsl_txid_dedup_errors_total` and `bsl_egress_claim_errors_total`. HA siblings no longer see each other's claims, so each forwards its own copy of a TxID; the tier-1 LRU still suppresses a TxID the same listener already forwarded. Every claim goes to the backend again, so dedup across siblings resumes once it answers. |
+
+The exit is logged as one `ERROR` line, `msg=fatal`, carrying the backend's
+error; the Redis client prints its own `redis: connection pool: failed to
+dial` lines during the retries before it. An address that does not answer,
+then a host with nothing listening on the port:
+
+```
+level=ERROR msg=fatal ... err="egress dedup backend: redis: ping [2001:db8::30]:6379: context deadline exceeded"
+level=ERROR msg=fatal ... err="egress dedup backend: redis: ping [2001:db8::30]:6379: dial tcp [2001:db8::30]:6379: connect: connection refused"
+```
+
+To start a listener while its backend is down, run it with
+`-egress-dedup-backend=none` (tier-1 LRU only, no dedup across siblings)
+until the backend is back. A listener in `-mode=delivery`, or with
+`-egress-dedup-local-cap=0`, builds no dedup gate and opens no backend.
+
 ---
 
 ## Beacon Discovery
@@ -1135,7 +1157,9 @@ with `-egress-dedup-aerospike-namespace` / `EGRESS_DEDUP_AEROSPIKE_NAMESPACE`
 
 Redis-protocol address (Redis/Valkey/Dragonfly) for the per-deployment egress
 TxID dedup. Empty falls back to a tier-1 in-process LRU only, useful for
-single-listener deployments or when the backend is unavailable.
+single-listener deployments or when the backend is unavailable. A set address
+that does not answer at startup stops the listener; see
+[Backend failure](#backend-failure-refused-at-startup-fail-open-while-running).
 
 Final key shape: `<EGRESS_DEDUP_PREFIX><DEPLOYMENT_ID>:<hex-id>`, where the
 id is the TxID for a transaction (see

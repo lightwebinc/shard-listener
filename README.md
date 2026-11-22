@@ -86,7 +86,8 @@ make docker      # build Docker image
 ## Container image
 
 The Dockerfile produces a `gcr.io/distroless/static:nonroot` image with the
-single static binary at `/usr/local/bin/shard-listener`. Configure via
+single static binary at `/usr/local/bin/shard-listener`, and `LICENSE`,
+`NOTICE` and `LICENSE-THIRD-PARTY` in `/usr/share/doc/shard-listener/`. Configure via
 Helm `values.yaml`, container environment variables, or CLI flags.
 
 ## Helm chart
@@ -105,3 +106,4 @@ Releases and release notes live on [GitHub Releases](https://github.com/lightweb
 ## License
 
 See [LICENSE](LICENSE).
+Third-party notices are in [NOTICE](NOTICE) and [LICENSE-THIRD-PARTY](LICENSE-THIRD-PARTY).
