@@ -254,32 +254,33 @@ without the observing worker's id):
 - Out-of-order or retransmitted frames (`seqNum <= lastSeqNum`) are silently
   accepted; they never create new gap entries.
 - `lastSeqNum` only advances forward, with one exception, a proxy restart: a
-  new frame at an old number. A frame off the wire with `SeqNum <= 100` on a
-  flow already past 100 is compared, by its identity (TxID, ContentID, a
-  bundle's first member TxID, the SubtreeID for subtree data), with the frame
-  the flow saw at that `SeqNum` and with the one the numbering retired by the
-  flow's last restart had there. The flow remembers the frames it sees at
-  `SeqNum` 1 to 128 (other than the retired numbering's), and on a restart
-  keeps that set as the retired numbering until the next restart.
-  - The **same** frame as either is a retransmit, whatever its source: a retry
-    endpoint on the emitter's node, or one behind a relay, sends from the
-    emitter's address, and a retired numbering's frames are still repaired for
-    gaps from before the restart. So is an object completed by reassembly,
-    observed again at its first fragment's `SeqNum`.
-  - Otherwise, a frame **different** from the one the flow saw restarts the
-    flow at that `SeqNum`, whatever its source (a restarted proxy, or a
-    failover to a proxy whose counter for the flow is fresh). The gaps it had
-    pending are booked unrecovered (`reason="restart"`), and the frame's
-    source becomes the flow's emitter.
+  new frame at an old number. The flow remembers the frames it sees at
+  `SeqNum` 1 to 128 by their identity (TxID, ContentID, a bundle's first
+  member TxID, the SubtreeID for subtree data), and on a restart keeps that
+  set as the retired numbering until the next restart.
+  - A frame equal to the **retired** numbering's frame at its `SeqNum` is a
+    retransmit of a frame from before the restart, wherever it lands: it does
+    not advance the flow, register gaps or join the current set. Like any
+    frame, it closes a gap pending at its `SeqNum`.
+  - A frame off the wire with `SeqNum <= 100` on a flow already past 100 is
+    compared with the frame the flow saw at that `SeqNum`. The **same** frame
+    is a retransmit, whatever its source: a retry endpoint on the emitter's
+    node, or one behind a relay, sends from the emitter's address. So is an
+    object completed by reassembly, observed again at its first fragment's
+    `SeqNum`.
+  - A **different** frame restarts the flow at that `SeqNum`, whatever its
+    source (a restarted proxy, or a failover to a proxy whose counter for the
+    flow is fresh). The gaps it had pending are booked unrecovered
+    (`reason="restart"`), and the frame's source becomes the flow's emitter.
   - With **nothing to compare** (the flow holds no frame at that `SeqNum`,
     because this listener joined the flow later or never received it, or the
-    frame has no identity), only a frame from the flow's emitter restarts it. The emitter is the source of the frames that advance
-    the flow: a new source becomes it after 8 advancing frames in a row, with
-    no advancing frame from the emitter and no replayed frame (a fill, a late
-    fill or a duplicate) from that source in between. So a relay or proxy
-    failover takes it over, and a repair that happens to advance the flow (a
-    frame this listener lost at the tail, multicast for another listener) does
-    not.
+    frame has no identity), only a frame from the flow's emitter restarts it.
+    The emitter is the source of the frames that advance the flow: a new
+    source becomes it after 8 advancing frames in a row, with no advancing
+    frame from the emitter and no replayed frame (a fill, a late fill or a
+    duplicate) from that source in between. So a relay or proxy failover takes
+    it over, and a repair that happens to advance the flow (a frame this
+    listener lost at the tail, multicast for another listener) does not.
   - A late fill (a frame for a gap already given up on) and a unicast repair,
     re-injected with no source, never restart a flow.
 

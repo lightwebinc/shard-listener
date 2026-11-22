@@ -246,6 +246,47 @@ func TestRetiredNumberingRetransmitIsNotRestart(t *testing.T) {
 	}
 }
 
+// A retired numbering's frame can arrive before the new numbering reaches its
+// SeqNum. It is a retransmit there too: it must not advance the new numbering
+// or register the frames still to come as gaps. Otherwise the new numbering's
+// own frame at that SeqNum arrives as a duplicate and goes unrecorded, and a
+// later retransmit of it, from the emitter's address, finds nothing to compare
+// with and restarts the flow, abandoning a real gap.
+func TestRetiredFrameAboveBaselineDoesNotAdvance(t *testing.T) {
+	rec := newRecorder(t)
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second}, nil, nil, rec, nil)
+	failover := net.ParseIP("2001:db8::11")
+	emitIDs(tr, flowEmitter, 150)
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), failover) // a fresh counter: restart
+
+	tr.Observe(0, [32]byte{}, flowA, 50, frameID(1, 50), retryNode) // the old 50, before the new 2
+	if g := tr.PendingGaps(); g != 0 {
+		t.Errorf("after the retired numbering's 50: PendingGaps = %d, want 0 (it advanced the new numbering)", g)
+	}
+
+	for s := uint64(2); s <= 150; s++ {
+		if s != 140 {
+			tr.Observe(0, [32]byte{}, flowA, s, frameID(2, s), failover)
+		}
+	}
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1 (140)", g)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 50, frameID(2, 50), failover) // a retransmit of the new 50
+
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after a retransmit of the new 50: PendingGaps = %d, want 1 (140 must survive)", g)
+	}
+	tr.Observe(0, [32]byte{}, flowA, 151, frameID(2, 151), failover)
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after the next wire frame: PendingGaps = %d, want 1 (no phantom gaps)", g)
+	}
+	if v := counter(promText(t, rec), "bsl_gaps_abandoned_total", `reason="restart"`); v != 0 {
+		t.Errorf("restart abandons = %v, want 0", v)
+	}
+}
+
 // A late fill is a replay, not an advance: one that lands beyond the baseline
 // (here a gap the restart abandoned; a confirmed tail probe that was given up
 // on is another) must not count toward a candidate emitter, or it can promote

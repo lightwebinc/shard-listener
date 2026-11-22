@@ -247,8 +247,10 @@ const earlyFramesMax = 128
 // earlyFrames is a one-byte fingerprint of the frame a flow saw at each SeqNum
 // 1..earlyFramesMax. A retransmit is the cached frame verbatim, so it matches;
 // a restarted emitter numbers new frames from 1, so they differ. Equal frames
-// always match, so a fingerprint collision (1 in 256) can only delay a
-// restart to the next early frame compared, never invent one.
+// always match, so a fingerprint collision (1 in 256) never invents a
+// restart. It can delay one to the next early frame compared, and a new frame
+// that collides with the retired numbering's reads as its retransmit: the
+// next frame registers it as a gap, and its repair fills it.
 type earlyFrames struct {
 	held [earlyFramesMax / 64]uint64 // bit seq-1 set: fp[seq-1] is held
 	fp   [earlyFramesMax]uint8
@@ -305,21 +307,29 @@ func (fs *flowState) noteFrame(seqNum uint64, id [32]byte) {
 	fs.early.fp[i] = fp
 }
 
+// retiredReplay reports whether the frame at seqNum is the one the numbering
+// the last restart retired had there: a retransmit, for a gap from before the
+// restart, which this numbering must not count (see ObserveFrom).
+func (fs *flowState) retiredReplay(seqNum uint64, id [32]byte) bool {
+	if fs.retired == nil || seqNum > earlyFramesMax {
+		return false
+	}
+	fp, ok := frameFingerprint(id)
+	return ok && fs.retired.holds(seqNum, fp)
+}
+
 // restarted reports whether a live frame at seqNum, at or below the restart
 // threshold on a flow past it, begins a new numbering of the flow (a proxy
 // restart, or a failover to a proxy with a fresh counter). The frame is
-// compared with the one the flow saw at that SeqNum, and with the one the
-// numbering the last restart retired had there. A frame equal to either is a
-// retransmit, whatever its source, because a retry endpoint on the emitter's
-// node, or behind a relay, sends from the emitter's address. A frame that
-// differs from the one the flow saw is a restart, whatever its source. With
-// nothing to compare (this listener joined the flow later, or the frame has
-// no identity of its own), only a frame from the flow's emitter is a restart.
+// compared with the one the flow saw at that SeqNum (a frame of the retired
+// numbering never gets here). The same frame is a retransmit, whatever its
+// source, because a retry endpoint on the emitter's node, or behind a relay,
+// sends from the emitter's address. A different frame is a restart, whatever
+// its source. With nothing to compare (the flow holds no frame at that
+// SeqNum, or the frame has no identity of its own), only a frame from the
+// flow's emitter is a restart.
 func (fs *flowState) restarted(seqNum uint64, id [32]byte, source net.IP) bool {
-	if fp, ok := frameFingerprint(id); ok && seqNum <= earlyFramesMax {
-		if fs.retired.holds(seqNum, fp) {
-			return false
-		}
+	if fp, ok := frameFingerprint(id); ok {
 		if held, ok := fs.early.get(seqNum); ok {
 			return held != fp
 		}
@@ -684,6 +694,17 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		}
 		// A filled PROBE can sit beyond lastSeqNum; fall through so steps 5/6
 		// advance the stream.
+	}
+
+	// A frame of the numbering the last restart retired is a retransmit, for
+	// a gap from before the restart, wherever it lands. It must not move this
+	// numbering: no advance, no gaps, no identity recorded. Above the baseline
+	// it would otherwise register this numbering's frames still to come as
+	// gaps, and the one at its own SeqNum would then arrive as a duplicate and
+	// go unrecorded, leaving a later retransmit of it nothing to compare with.
+	if !filled && fs.retiredReplay(seqNum, txid) {
+		fs.noteReplay(source)
+		return
 	}
 
 	if fs.lastSeqNum == 0 {
