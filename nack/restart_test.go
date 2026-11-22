@@ -117,6 +117,33 @@ func TestRestartFollowsCurrentEmitter(t *testing.T) {
 	}
 }
 
+// A gap's metrics carry the source it was detected under. After an emitter
+// change (a failover source that keeps advancing the flow, past the 8 frames
+// in a row that confirm it), a delayed fill of a gap the old emitter's stream
+// left is booked under the old emitter, as its detection was, not under the
+// flow's new one.
+func TestFillAfterEmitterChangeKeepsGapSource(t *testing.T) {
+	rec := newRecorder(t)
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second}, nil, nil, rec, nil)
+	failover := net.ParseIP("2001:db8::11")
+	emitTo(tr, flowEmitter, 140, 130) // 130 lost under the emitter
+	for s := uint64(141); s <= 150; s++ {
+		tr.Observe(0, [32]byte{}, flowA, s, [32]byte{}, failover) // the failover takes over
+	}
+	tr.Observe(0, [32]byte{}, flowA, 130, [32]byte{}, retryNode) // the delayed fill of 130
+
+	out := promText(t, rec)
+	if v := counter(out, "bsl_gaps_detected_total", `source="2001:db8::10"`); v != 1 {
+		t.Fatalf("setup: gaps detected under the emitter = %v, want 1", v)
+	}
+	if v := counter(out, "bsl_gaps_suppressed_total", `source="2001:db8::10"`); v != 1 {
+		t.Errorf("fill of 130 under the emitter = %v, want 1 (booked where it was detected)", v)
+	}
+	if v := counter(out, "bsl_gaps_suppressed_total", `source="2001:db8::11"`); v != 0 {
+		t.Errorf("fill of 130 under the failover = %v, want 0", v)
+	}
+}
+
 // frameID is a distinct, non-zero frame identity (a TxID) per SeqNum and
 // numbering epoch.
 func frameID(epoch byte, seq uint64) [32]byte {

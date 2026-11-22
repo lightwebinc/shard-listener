@@ -777,7 +777,7 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 			for seq, e := range fs.pending {
 				// gaps from the previous proxy lifetime: unrecoverable now
 				if !e.speculative {
-					t.bookAbandon(fs, seq, fs.source, "restart")
+					t.bookAbandon(fs, seq, e.source, "restart")
 				}
 			}
 			t.pendingTotal -= len(fs.pending)
@@ -1000,13 +1000,17 @@ func (t *Tracker) bookFill(fs *flowState, e *gapEntry) {
 	if t.rec == nil {
 		return
 	}
+	// Under the source the gap was detected under (e.source), not the flow's
+	// current one: after an emitter change a delayed fill would otherwise be
+	// counted under the newer emitter, and the gap's detection and its fill
+	// would carry different source labels.
 	if e.probe {
-		t.rec.TailProbeRecovered(fs.flowType, srcStr(fs.source))
+		t.rec.TailProbeRecovered(fs.flowType, srcStr(e.source))
 	}
 	if e.speculative {
-		t.rec.GapDetected(fs.flowType, srcStr(fs.source))
+		t.rec.GapDetected(fs.flowType, srcStr(e.source))
 	}
-	t.rec.GapSuppressed(fs.flowType, srcStr(fs.source))
+	t.rec.GapSuppressed(fs.flowType, srcStr(e.source))
 }
 
 // confirmProbe turns a tail probe an ACK answered into an ordinary gap: a
@@ -1037,7 +1041,7 @@ func (t *Tracker) confirmProbe(e *gapEntry) bool {
 	}
 	pend.speculative = false
 	if t.rec != nil {
-		t.rec.GapDetected(fs.flowType, srcStr(fs.source))
+		t.rec.GapDetected(fs.flowType, srcStr(pend.source))
 	}
 	return true
 }
@@ -1939,7 +1943,7 @@ func (t *Tracker) abandonGap(e *gapEntry, reason string) {
 		return
 	}
 	t.clearProbing(fs, e.seqNum)
-	t.bookAbandon(fs, e.seqNum, fs.source, reason)
+	t.bookAbandon(fs, e.seqNum, pend.source, reason)
 }
 
 // retiredReturn reports, and clears, the mark ObserveFrom left on e's pending
