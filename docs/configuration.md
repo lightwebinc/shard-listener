@@ -747,8 +747,14 @@ Default off; opt-in via `-manifest-consumer-enabled`. See the
 [Automatic Shard Configuration design](https://github.com/lightwebinc/bsv-multicast/blob/main/DESIGN.md#automatic-shard-configuration)
 for the system-level design. A running listener acts on manifests in two
 ways only: the pilot-group auto-join (`-shard-include-from-manifest`) and
-the `multicast_manifest_*` telemetry. Its `ShardBits` and source mode stay
-as configured (see `-live-resharding`).
+the `multicast_manifest_*` telemetry. It observes; it never restarts. Its
+`-shard-bits`, `-source-mode` and `-beef-shard-bits` are pinned (BRC-139
+manual-pin precedence), and every evaluation is compared with that running
+configuration, so a manifest that agrees with it is no change at all.
+Announcers that disagree are divergence: counted on every evaluation
+(`multicast_manifest_divergence_total`), logged as a warning once when a
+field starts diverging and as info once when it clears, and never adopted (a
+restart would re-read the same flags anyway).
 
 ### `-manifest-consumer-enabled` / `MANIFEST_CONSUMER_ENABLED` (default: `false`)
 
@@ -840,10 +846,10 @@ the group any more. Freeing capacity therefore restores the membership.
 ### `-live-resharding` / `LIVE_RESHARDING` (default: `false`)
 
 Opt-in BRC-139 bridging mode. The listener acts on neither setting.
-`-shard-bits` is a manual pin, so a manifest never changes a running
-listener's `ShardBits`: announcers that disagree with it are counted as
-divergence (`multicast_manifest_divergence_total`), and nothing flips
-`/readyz` or exits. A Successor block that reaches quorum is tracked as a
+`-shard-bits` and `-source-mode` are manual pins, so a manifest never changes
+a running listener's `ShardBits` or source mode: announcers that disagree are
+divergence (see [Auto-Shard-Config](#auto-shard-config-brc-139)), and nothing
+flips `/readyz`, exits or restarts. A Successor block that reaches quorum is tracked as a
 view only (`multicast_manifest_resharding_state` and
 `multicast_manifest_resharding_window_seconds`); the listener does not join
 the successor layout. The flag is still validated: with
@@ -1315,9 +1321,9 @@ quorum series.
 | `multicast_manifest_received_total` | none | ShardManifest datagrams accepted and upserted into the manifest registry |
 | `multicast_manifest_pilots_known` | none | Distinct authoritative announcers currently within TTL |
 | `multicast_manifest_quorum_met_bits` | none | Bitmask: bit 0 `shard_bits`, bit 1 `source_mode`, bit 2 `successor` |
-| `multicast_manifest_divergence_total` | `field`, `kind` | Disagreements the evaluator sees, counted on every 1 s evaluation while they last; the listener emits `kind="peer-disagree"` |
+| `multicast_manifest_divergence_total` | `field`, `kind` | Disagreements the evaluator sees, among announcers or with the running configuration, counted on every 1 s evaluation while they last (the log has one warning when a field starts and one info line when it clears); the listener emits `kind="peer-disagree"` |
 | `multicast_manifest_last_divergence_epoch` | `field` | Unix seconds of the most recent divergence per field; absent until a field first diverges |
-| `multicast_manifest_adoption_total` | `field`, `reason` | Values the evaluator newly reports as adopted (`reason`: `bootstrap`, `quorum-shift`). The pinned `-shard-bits` is counted once as `bootstrap` at the first evaluation |
+| `multicast_manifest_adoption_total` | `field`, `reason` | Values the evaluator newly reports as adopted, compared with the running configuration (`reason`: `bootstrap`, `quorum-shift`). The listener pins `-shard-bits`, `-source-mode` and `-beef-shard-bits`, so a manifest that agrees with them counts nothing, and one that disagrees counts as divergence instead |
 | `multicast_manifest_resharding_state` | none | `0` steady, `1` bridging (a Successor is adopted and its `TransitionEpoch` is ahead), `2` cutover-pending |
 | `multicast_manifest_resharding_window_seconds` | none | Seconds until the adopted Successor's `TransitionEpoch` (negative once it has passed); `0` with no Successor |
 | `multicast_manifest_resharding_emit_duplicates_total` | none | Registered, but the listener does not increment it |
