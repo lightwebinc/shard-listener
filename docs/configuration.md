@@ -813,8 +813,10 @@ When set, the listener's effective subscription =
 `union(-shard-include, pilot_groups)`, where `pilot_groups` is the
 union of `Flags.GroupsValid` payloads from the authoritative
 `Flags.PilotOnly=1` manifests currently within their TTL (the union is
-not quorum-gated). Pilot-added groups are leaved when no pilot still
-claims them; static `-shard-include` entries are NEVER leaved. Under
+not quorum-gated). Pilot-added groups are left when no pilot still
+claims them; a group the startup configuration joined (a `-shard-include`
+entry, or any shard when `-shard-include` is empty, which joins them all) is
+NEVER left, whatever a pilot claimed. Under
 `-source-mode ssm` a pilot-added group is `(S,G)`-joined on the same
 publisher set as the startup data-plane groups (`-ssm-publishers-static`,
 without `-local-source`), and left on it; with no publisher set it is joined

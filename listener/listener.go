@@ -439,10 +439,32 @@ func (w *Worker) AddGroup(group netip.Addr, sources []netip.Addr) error {
 	if _, ok := w.joinedGroups[group]; ok {
 		return nil // idempotent
 	}
-	if err := netjoin.Join(w.joinFd, w.iface.Index, group, sources); err != nil {
+	if err := joinAllOrNone(w.joinFd, w.iface.Index, group, sources); err != nil {
 		return fmt.Errorf("worker %d: AddGroup %s: %w", w.id, group, err)
 	}
 	w.joinedGroups[group] = struct{}{}
+	return nil
+}
+
+// joinAllOrNone joins group on fd: any-source when sources is empty, else one
+// (S,G) join per source. netjoin.Join stops at the first failing source and
+// keeps the ones it already joined; a runtime join that failed is not recorded
+// in joinedGroups, so RemoveGroup would never leave those. Here a failure
+// leaves the sources joined before it again, so a failed call installs no
+// membership. (A failed startup join needs no such care: Run closes the
+// socket, and its memberships with it.)
+func joinAllOrNone(fd, ifIndex int, group netip.Addr, sources []netip.Addr) error {
+	if len(sources) == 0 {
+		return netjoin.Join(fd, ifIndex, group, nil)
+	}
+	for i, src := range sources {
+		if err := netjoin.Join(fd, ifIndex, group, []netip.Addr{src}); err != nil {
+			if i > 0 {
+				_ = netjoin.Leave(fd, ifIndex, group, sources[:i])
+			}
+			return err
+		}
+	}
 	return nil
 }
 

@@ -268,3 +268,29 @@ func TestApplyPilotGroups_ASMJoinsAnySource(t *testing.T) {
 		t.Errorf("join of group 1 used sources %v (joined=%v), want an any-source join", got, ok)
 	}
 }
+
+// With no -shard-include the workers join every shard at startup, so a pilot
+// naming one of them adds nothing, and its expiry must not leave that startup
+// membership: the listener would silently stop receiving the shard. With an
+// explicit -shard-include, a pilot-only group is still left on expiry.
+func TestApplyPilotGroups_StartupShardsAreNeverLeft(t *testing.T) {
+	engine := shard.New(0xFF35, shard.DefaultGroupID, 2)
+	publishers := addrs("2001:db8::11")
+
+	all := &config.Config{NumGroups: 4} // every shard joined at startup
+	w := newFakeJoiner()
+	applyPilotGroups([]*fakeJoiner{w}, engine, 9001, startupShards(all), publishers, nil, []uint16{1, 3})
+	if len(w.removed) != 0 {
+		t.Errorf("pilot expiry left %d startup group(s); with no -shard-include every shard is a startup group", len(w.removed))
+	}
+
+	subset := &config.Config{NumGroups: 4, ShardInclude: []uint32{0}}
+	w = newFakeJoiner()
+	applyPilotGroups([]*fakeJoiner{w}, engine, 9001, startupShards(subset), publishers, nil, []uint16{0, 1})
+	if _, ok := w.removed[engineGroup(t, engine, 1)]; !ok {
+		t.Error("pilot-only group 1 was not left on expiry")
+	}
+	if _, ok := w.removed[engineGroup(t, engine, 0)]; ok {
+		t.Error("-shard-include group 0 was left on expiry")
+	}
+}

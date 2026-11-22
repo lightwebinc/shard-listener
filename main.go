@@ -404,7 +404,7 @@ func run() error {
 					if !cfg.AutoJoinFromManifest {
 						return
 					}
-					applyPilotGroups(workers, engine, cfg.ListenPort, cfg.ShardInclude, ssm.publishers, added, removed)
+					applyPilotGroups(workers, engine, cfg.ListenPort, startupShards(cfg), ssm.publishers, added, removed)
 				},
 			},
 		}
@@ -784,15 +784,7 @@ func primaryIPv6(iface *net.Interface) (out [16]byte, ok bool) {
 // The block control group (FF0X::B:FFFE at the configured scope) is always appended so block
 // announcements are received regardless of shard filtering.
 func buildGroups(cfg *config.Config, engine *shard.Engine, beefJoinIdx []uint32) ([]*net.UDPAddr, error) {
-	var indices []uint32
-	if len(cfg.ShardInclude) > 0 {
-		indices = cfg.ShardInclude
-	} else {
-		indices = make([]uint32, cfg.NumGroups)
-		for i := range indices {
-			indices[i] = uint32(i)
-		}
-	}
+	indices := startupShards(cfg)
 	groups := make([]*net.UDPAddr, 0, len(indices)+1)
 	for _, idx := range indices {
 		addr := engine.Addr(idx, cfg.ListenPort)
@@ -1054,12 +1046,27 @@ type groupJoiner interface {
 	RemoveGroup(group netip.Addr, sources []netip.Addr) error
 }
 
+// startupShards returns the shard indices the workers join at startup: the
+// -shard-include list, or every shard when it is empty.
+func startupShards(cfg *config.Config) []uint32 {
+	if len(cfg.ShardInclude) > 0 {
+		return cfg.ShardInclude
+	}
+	all := make([]uint32, cfg.NumGroups)
+	for i := range all {
+		all[i] = uint32(i)
+	}
+	return all
+}
+
 // applyPilotGroups joins the BRC-139 pilot groups that were added on every
-// worker and leaves the removed ones; static -shard-include entries are never
-// left. sources is the publisher set the startup data-plane joins use (nil
-// under ASM): under SSM a runtime join must be an (S,G) join on it like its
-// siblings', because a (*,G) join in the SSM range is not routed, and a leave
-// names the same sources as its join.
+// worker and leaves the removed ones. static is the startup shard set
+// (startupShards): those groups are never left, so a pilot that names a group
+// the listener already joined at startup and then expires leaves that
+// startup membership in place. sources is the publisher set the startup
+// data-plane joins use (nil under ASM): under SSM a runtime join must be an
+// (S,G) join on it like its siblings', because a (*,G) join in the SSM range
+// is not routed, and a leave names the same sources as its join.
 func applyPilotGroups[W groupJoiner](workers []W, engine *shard.Engine, port int, static []uint32, sources []netip.Addr, added, removed []uint16) {
 	for _, idx := range added {
 		addr := engine.Addr(uint32(idx), port)
@@ -1089,7 +1096,7 @@ func applyPilotGroups[W groupJoiner](workers []W, engine *shard.Engine, port int
 		if !ok {
 			continue
 		}
-		// Static -shard-include entries are NEVER leaved.
+		// Groups the startup configuration joined are NEVER left.
 		if inStaticInclude(static, idx) {
 			continue
 		}
@@ -1103,10 +1110,10 @@ func applyPilotGroups[W groupJoiner](workers []W, engine *shard.Engine, port int
 	slog.Info("auto-join applied", "added", added, "removed", removed, "sources", len(sources))
 }
 
-// inStaticInclude reports whether the given shard index is in the
-// operator's static -shard-include list. Pilot-driven RemoveGroup MUST
-// skip these entries: static includes are never leaved per the
-// auto-shard-config plan.
+// inStaticInclude reports whether the given shard index is in the static
+// startup set (startupShards: the -shard-include list, or every shard).
+// Pilot-driven RemoveGroup MUST skip these entries: startup memberships are
+// never left per the auto-shard-config plan.
 func inStaticInclude(static []uint32, idx uint16) bool {
 	for _, v := range static {
 		if v == uint32(idx) {

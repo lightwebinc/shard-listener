@@ -101,7 +101,8 @@ func boundOn(t *testing.T, port int) int {
 }
 
 // started runs a control listener's Start until the test ends and waits
-// until at least want sockets hold the port. A bind collision fails the test,
+// until at least want sockets hold the port: every socket already there plus
+// every one this listener opens (one per group address). A bind collision fails the test,
 // which is the defect; any other startup error (a host that cannot join a
 // multicast group at all) skips it.
 func started(t *testing.T, port, want int, start func(context.Context) error) {
@@ -165,14 +166,16 @@ func TestBeaconListener_SharesPortWithDataPlaneWorker(t *testing.T) {
 	for name := range beaconShapes(lo, 0) {
 		t.Run(name+"/worker first", func(t *testing.T) {
 			port := freeUDP6Port(t)
+			bl := beaconShapes(lo, port)[name]
 			if _, err := bindLike(t, port, workerOpts...); err != nil {
 				t.Fatalf("worker bind: %v", err)
 			}
-			started(t, port, 2, beaconShapes(lo, port)[name].Start)
+			started(t, port, 1+len(bl.Groups), bl.Start)
 		})
 		t.Run(name+"/beacon first", func(t *testing.T) {
 			port := freeUDP6Port(t)
-			started(t, port, 1, beaconShapes(lo, port)[name].Start)
+			bl := beaconShapes(lo, port)[name]
+			started(t, port, len(bl.Groups), bl.Start)
 			if _, err := bindLike(t, port, workerOpts...); err != nil {
 				t.Fatalf("data-plane worker cannot bind beside the beacon socket: %v", err)
 			}
@@ -185,13 +188,15 @@ func TestControlListeners_ShareOnePort(t *testing.T) {
 	for name := range beaconShapes(lo, 0) {
 		t.Run(name+"/announce first", func(t *testing.T) {
 			port := freeUDP6Port(t)
+			bl := beaconShapes(lo, port)[name]
 			started(t, port, 1, announceListener(lo, port).Start)
-			started(t, port, 2, beaconShapes(lo, port)[name].Start)
+			started(t, port, 1+len(bl.Groups), bl.Start)
 		})
 		t.Run(name+"/beacon first", func(t *testing.T) {
 			port := freeUDP6Port(t)
-			started(t, port, 1, beaconShapes(lo, port)[name].Start)
-			started(t, port, 2, announceListener(lo, port).Start)
+			bl := beaconShapes(lo, port)[name]
+			started(t, port, len(bl.Groups), bl.Start)
+			started(t, port, len(bl.Groups)+1, announceListener(lo, port).Start)
 		})
 	}
 }
@@ -204,8 +209,9 @@ func TestControlListeners_SharePortWithReuseAddrSocket(t *testing.T) {
 			if _, err := bindLike(t, port, unix.SO_REUSEADDR); err != nil {
 				t.Fatalf("retry-endpoint bind: %v", err)
 			}
+			bl := beaconShapes(lo, port)[name]
 			started(t, port, 2, announceListener(lo, port).Start)
-			started(t, port, 3, beaconShapes(lo, port)[name].Start)
+			started(t, port, 2+len(bl.Groups), bl.Start)
 		})
 	}
 }
@@ -221,8 +227,8 @@ func TestControlListeners_DoNotTakeWorkerUnicast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worker bind: %v", err)
 	}
-	started(t, port, 2, beaconShapes(lo, port)["compat pair"].Start)
-	started(t, port, 3, announceListener(lo, port).Start)
+	started(t, port, 3, beaconShapes(lo, port)["compat pair"].Start) // worker + one socket per beacon group
+	started(t, port, 4, announceListener(lo, port).Start)            // + the announce socket
 
 	const n = 64
 	dst := &net.UDPAddr{IP: net.IPv6loopback, Port: port}
