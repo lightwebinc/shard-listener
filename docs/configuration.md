@@ -540,7 +540,7 @@ still probed.
 | `-nack-tail-probe` | `NACK_TAIL_PROBE` | `true` | Master switch |
 | `-nack-tail-probe-idle-factor` | `NACK_TAIL_PROBE_IDLE_FACTOR` | `4.0` | Multiple of the flow's smoothed inter-arrival before silence counts as abnormal |
 | `-nack-tail-probe-min-idle` | `NACK_TAIL_PROBE_MIN_IDLE` | `500ms` | Floor on the idle threshold so fast flows do not probe continuously |
-| `-nack-tail-probe-max-misses` | `NACK_TAIL_PROBE_MAX_MISSES` | `3` | Stop probing a flow after this many consecutive MISS answers (it is genuinely idle); reset by new traffic |
+| `-nack-tail-probe-max-misses` | `NACK_TAIL_PROBE_MAX_MISSES` | `3` | Stop probing a flow after this many consecutive MISS answers (it is genuinely idle); reset by new traffic, which a retransmit of a numbering a restart retired is not |
 
 ---
 

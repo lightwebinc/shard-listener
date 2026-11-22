@@ -397,8 +397,17 @@ type gapEntry struct {
 	owner int
 	// retiredReturn marks that a unicast return for this gap was the retired
 	// numbering's frame at its SeqNum, refused by ObserveFrom. The NACK
-	// exchange then escalates as on a MISS instead of closing the gap.
+	// exchange then escalates as on a MISS instead of closing the gap. Only
+	// that exchange sees it: one exchange per gap is in flight (inFlight).
 	retiredReturn bool
+	// inFlight marks a pending entry with a NACK exchange queued or running.
+	// The sweep dispatches it again only once that exchange ends, however
+	// late its dispatch ran: one exchange per gap at a time.
+	inFlight bool
+	// stored, on an exchange's copy, is the pending entry it was copied from,
+	// so the exchange's end releases that entry and no other. Dereferenced
+	// only under t.mu.
+	stored *gapEntry
 }
 
 // Tracker is the gap state machine. Construct with [New] and call [Start] to
@@ -668,30 +677,21 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		}
 		t.flows[hashKey] = fs
 	}
-	if owner != ownerUnknown {
-		fs.owner = owner
-	}
-	elapsed := now.Sub(fs.lastSeen)
-	fs.lastSeen = now
-	// Traffic resumed: a flow previously confirmed idle becomes eligible to probe
-	// its next tail. Without this reset, a flow that goes quiet once would never
-	// be probed again for the rest of its life.
-	fs.probeMisses = 0
-	// fs.source is the flow's emitter, the datagram source of the frames that
-	// advance its stream (see noteAdvance). A retransmit, a multicast repair or
-	// a recovered frame re-injected with no source, fills or repeats the flow's
-	// past and keeps the emitter (see noteReplay).
-
 	// A frame of the numbering the last restart retired is a retransmit, for
 	// a gap from before the restart, wherever it lands. It must not count for
 	// this numbering at all: no fill, no late fill, no advance, no gaps, no
-	// identity recorded. Filling or advancing would leave this numbering's own
-	// frame at that SeqNum to arrive as a duplicate and go unrecorded, so a
-	// later retransmit of it would find nothing to compare with and fall back
-	// to the emitter's address. A gap pending there stays pending for this
+	// identity recorded, and no sign of life: it does not re-stamp the flow's
+	// worker, refresh its idle clock or reset its probe misses, so a cache
+	// that keeps answering with it cannot keep an idle flow probing or
+	// allocated. Filling or advancing would leave this numbering's own frame
+	// at that SeqNum to arrive as a duplicate and go unrecorded, so a later
+	// retransmit of it would find nothing to compare with and fall back to
+	// the emitter's address. A gap pending there stays pending for this
 	// numbering's frame, and a unicast return of the retired frame for it is
-	// marked so the NACK exchange escalates instead of closing the gap. A tail
-	// probe it answers learns nothing about this numbering: a MISS.
+	// marked so the NACK exchange escalates instead of closing the gap. A
+	// tail probe it answers learns nothing about this numbering: a MISS,
+	// unless a successor frame already proved the loss (registerGaps then
+	// made it an ordinary gap).
 	if fs.retiredReplay(seqNum, txid) {
 		if e, found := fs.pending[seqNum]; found {
 			switch {
@@ -705,6 +705,20 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		fs.noteReplay(source)
 		return
 	}
+
+	if owner != ownerUnknown {
+		fs.owner = owner
+	}
+	elapsed := now.Sub(fs.lastSeen)
+	fs.lastSeen = now
+	// Traffic resumed: a flow previously confirmed idle becomes eligible to probe
+	// its next tail. Without this reset, a flow that goes quiet once would never
+	// be probed again for the rest of its life.
+	fs.probeMisses = 0
+	// fs.source is the flow's emitter, the datagram source of the frames that
+	// advance its stream (see noteAdvance). A retransmit, a multicast repair or
+	// a recovered frame re-injected with no source, fills or repeats the flow's
+	// past and keeps the emitter (see noteReplay).
 
 	// A frame for a gap already given up on: the hole closed after all. Book
 	// it so unrecovered minus late-filled reads as real loss. It is a
@@ -903,7 +917,14 @@ func (t *Tracker) registerGaps(fs *flowState, hashKey uint64, groupIdx uint32, s
 	slab := make([]gapEntry, 0, min(to-from, room))
 	detected := 0
 	for m := from; m < to; m++ {
-		if _, exists := fs.pending[m]; exists {
+		if e, exists := fs.pending[m]; exists {
+			// A tail probe a later frame has now proved lost: an ordinary gap
+			// from here on, booked detected once, as confirmProbe would. A
+			// MISS then escalates and a retired frame leaves it pending.
+			if e.speculative {
+				e.speculative = false
+				detected++
+			}
 			continue
 		}
 		detected++
@@ -1071,7 +1092,15 @@ func (t *Tracker) RequestGapsFrom(owner int, hashKey uint64, groupIdx uint32, su
 	}
 	queued := make([]*gapEntry, 0, len(seqs))
 	for _, seq := range seqs {
-		if _, exists := fs.pending[seq]; exists {
+		if p, exists := fs.pending[seq]; exists {
+			// A tail probe this proves lost: an ordinary gap from here on,
+			// booked detected once (see registerGaps).
+			if p.speculative {
+				p.speculative = false
+				if t.rec != nil {
+					t.rec.GapDetected(fs.flowType, srcStr(fs.source))
+				}
+			}
 			continue
 		}
 		jitter := time.Duration(rand.Int64N(int64(t.cfg.JitterMax) + 1))
@@ -1093,17 +1122,22 @@ func (t *Tracker) RequestGapsFrom(owner int, hashKey uint64, groupIdx uint32, su
 			continue
 		}
 		t.addPending(fs, seq, e)
+		t.beginExchange(e)
 		cp := *e
+		cp.stored = e
 		queued = append(queued, &cp)
 	}
 	t.mu.Unlock()
 
 	// Enqueue outside the lock; a full queue simply defers to the next sweep,
-	// which will pick these up via their nextAttempt.
-	for _, e := range queued {
+	// which will pick these up via their nextAttempt once released.
+	for i, e := range queued {
 		select {
 		case t.nackQueue <- e:
 		default:
+			for _, rest := range queued[i:] {
+				t.endExchange(rest)
+			}
 			return
 		}
 	}
@@ -1244,16 +1278,21 @@ func (t *Tracker) sweepOnce(now time.Time) {
 			// on this lock to book their results, and offering each of a
 			// burst's gaps to a full queue was a copy and a failed send per
 			// gap, every sweep.
-			if !queueFull && now.After(e.nextAttempt) {
-				// Stamp nextAttempt before copying so concurrent sweeps do not
-				// re-enqueue the same gap while a sendNACK goroutine is in-flight.
+			if !queueFull && !e.inFlight && now.After(e.nextAttempt) {
+				// Stamp nextAttempt before copying, and mark the entry in
+				// flight: a dispatch that waits for a sendNACK slot can start
+				// after nextAttempt has passed, and a second exchange for the
+				// same gap must not start beside it.
 				e.nextAttempt = now.Add(t.respTimeout + 100*time.Millisecond)
+				t.beginExchange(e)
 				entry := *e // shallow copy to avoid races
+				entry.stored = e
 				select {
 				case t.nackQueue <- &entry:
 				default:
 					// Queue full: reset so this gap is retried next tick.
 					e.nextAttempt = now
+					e.inFlight = false
 					queueFull = true
 				}
 			}
@@ -1352,7 +1391,9 @@ func (t *Tracker) maybeProbeTail(hashKey uint64, fs *flowState, now time.Time) {
 		"hash_key", hashKey, "seq_num", seq,
 		"idle", now.Sub(fs.lastSeen), "ewma_ipg", fs.ewmaIPG)
 
+	t.beginExchange(e)
 	entry := *e
+	entry.stored = e
 	select {
 	case t.nackQueue <- &entry:
 	default:
@@ -1360,6 +1401,28 @@ func (t *Tracker) maybeProbeTail(hashKey uint64, fs *flowState, now time.Time) {
 		// displace real gap recovery. It will be reconsidered next sweep.
 		t.delPending(fs, seq)
 		fs.probing = 0
+	}
+}
+
+// beginExchange marks e, a pending entry, as having a NACK exchange in
+// flight, with no result from an earlier exchange left on it. Caller holds
+// t.mu.
+func (t *Tracker) beginExchange(e *gapEntry) {
+	e.inFlight = true
+	e.retiredReturn = false
+}
+
+// endExchange releases the pending entry an exchange's copy e was taken
+// from, once that exchange is over, so the sweep may dispatch it again. An
+// entry that is gone, or was replaced at the same SeqNum, is left alone.
+func (t *Tracker) endExchange(e *gapEntry) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if fs, ok := t.flows[e.hashKey]; ok {
+		if pend, found := fs.pending[e.seqNum]; found && pend == e.stored {
+			pend.inFlight = false
+			pend.retiredReturn = false
+		}
 	}
 }
 
@@ -1380,16 +1443,26 @@ func (t *Tracker) clearProbing(fs *flowState, seq uint64) {
 
 // probeMissed retires a tail probe that was answered MISS: the SeqNum was never
 // emitted, so the flow was simply idle. No gap is recorded: nothing was lost.
-func (t *Tracker) probeMissed(e *gapEntry) {
+// It reports false, retiring nothing, when the stored entry is no longer
+// speculative (a later frame proved the loss): that MISS is an ordinary one.
+func (t *Tracker) probeMissed(e *gapEntry) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	fs, ok := t.flows[e.hashKey]
 	if !ok {
-		return
+		return true
+	}
+	pend, ok := fs.pending[e.seqNum]
+	if !ok {
+		return true
+	}
+	if !pend.speculative {
+		return false
 	}
 	t.delPending(fs, e.seqNum)
 	t.missProbe(fs, e.seqNum)
+	return true
 }
 
 // missProbe books a probe of seq as answered MISS, once its pending entry is
@@ -1414,11 +1487,13 @@ func (t *Tracker) dispatchLoop(ctx context.Context) {
 			select {
 			case t.sem <- struct{}{}:
 			case <-ctx.Done():
+				t.endExchange(e)
 				return
 			}
 			go func() {
 				defer func() { <-t.sem }()
 				t.sendNACK(e)
+				t.endExchange(e)
 			}()
 		}
 	}
@@ -1624,12 +1699,13 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 				t.log.Debug("NACK: ACK received, awaiting the data-plane copy", "endpoint", endpoint.Addr, "seq_num", e.seqNum, "flags", resp.Flags)
 				return
 			case MsgTypeMISS:
-				if e.speculative {
-					// A probe MISS is a definitive answer: that SeqNum does not
-					// exist. Escalating tiers would only ask other caches about a
-					// frame that was never sent, so retire the probe here.
+				// A probe MISS is a definitive answer: that SeqNum does not
+				// exist. Escalating tiers would only ask other caches about a
+				// frame that was never sent, so retire the probe here, unless
+				// a later frame proved the loss while the exchange ran (the
+				// stored entry is authoritative, not this copy).
+				if e.speculative && t.probeMissed(e) {
 					t.log.Debug("tail probe: MISS (flow idle, no loss)", "endpoint", endpoint.Addr, "seq_num", e.seqNum)
-					t.probeMissed(e)
 					return
 				}
 				t.log.Debug("NACK: MISS received, advancing endpoint", "endpoint", endpoint.Addr, "seq_num", e.seqNum)
@@ -1843,6 +1919,13 @@ func (t *Tracker) abandonGap(e *gapEntry, reason string) {
 	if !ok {
 		return
 	}
+	// The stored entry is authoritative, not the exchange's copy: a later
+	// frame can prove a probe lost while its exchange runs, and a gap filled
+	// meanwhile is not abandoned at all.
+	pend, ok := fs.pending[e.seqNum]
+	if !ok {
+		return
+	}
 	t.delPending(fs, e.seqNum)
 	if fs.probing == e.seqNum {
 		fs.probing = 0
@@ -1850,7 +1933,7 @@ func (t *Tracker) abandonGap(e *gapEntry, reason string) {
 	// A speculative tail probe that comes back rejected was never an
 	// observed loss, so it is retired silently: booking it would
 	// manufacture phantom loss on an idle flow.
-	if !e.speculative {
+	if !pend.speculative {
 		t.bookAbandon(fs, e.seqNum, fs.source, reason)
 	}
 }

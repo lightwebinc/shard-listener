@@ -2,10 +2,13 @@ package nack_test
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/lightwebinc/shard-listener/metrics"
 	"github.com/lightwebinc/shard-listener/nack"
 )
 
@@ -485,6 +488,299 @@ func TestRetiredReturnAnswersProbeMiss(t *testing.T) {
 	}
 	if v := counter(out, "bsl_tail_probes_miss_total"); v < 1 {
 		t.Errorf("tail probe misses = %v, want at least 1 (the retired frame answers MISS)", v)
+	}
+}
+
+// probeCache is a retry endpoint for tail-probe tests. It records the SeqNum
+// of every NACK and, once released, replies with resp; withData sends a data
+// frame after it, as a unicast return. With only set, it answers NACKs for
+// that SeqNum alone.
+type probeCache struct {
+	conn    net.PacketConn
+	asked   chan uint64
+	answer  chan struct{}
+	release func()
+	last    atomicU64
+	only    uint64
+}
+
+// atomicU64 is the last NACKed SeqNum, read by the recover callback.
+type atomicU64 struct {
+	mu sync.Mutex
+	v  uint64
+}
+
+func (a *atomicU64) set(v uint64) { a.mu.Lock(); a.v = v; a.mu.Unlock() }
+func (a *atomicU64) get() uint64  { a.mu.Lock(); defer a.mu.Unlock(); return a.v }
+
+func newProbeCache(t *testing.T, resp byte, withData bool) *probeCache {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("UDP loopback unavailable: %v", err)
+	}
+	c := &probeCache{conn: conn, asked: make(chan uint64, 256), answer: make(chan struct{})}
+	var once sync.Once
+	c.release = func() { once.Do(func() { close(c.answer) }) }
+	t.Cleanup(func() {
+		c.release()
+		_ = conn.Close()
+	})
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			n, src, err := conn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n < 24 {
+				continue
+			}
+			seq := binary.BigEndian.Uint64(buf[16:24])
+			c.last.set(seq)
+			select {
+			case c.asked <- seq:
+			default:
+			}
+			<-c.answer
+			if c.only != 0 && seq != c.only {
+				continue
+			}
+			var r [nack.ResponseSize]byte
+			nack.EncodeResponse(&nack.Response{MsgType: resp, Flags: 0x02, SeqNum: seq}, r[:])
+			_, _ = conn.WriteTo(r[:], src)
+			if withData {
+				_, _ = conn.WriteTo(dataFrame(), src)
+			}
+		}
+	}()
+	return c
+}
+
+func (c *probeCache) addr() string { return c.conn.LocalAddr().String() }
+
+// waitAsked waits for a NACK for seq.
+func (c *probeCache) waitAsked(t *testing.T, seq uint64) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case s := <-c.asked:
+			if s == seq {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no NACK for %d", seq)
+		}
+	}
+}
+
+// probeTracker is a tracker that probes quiet tails, for a settled flow.
+func probeTracker(t *testing.T, cache *probeCache, rec *metrics.Recorder, tailTTL time.Duration) *nack.Tracker {
+	t.Helper()
+	cfg := nack.TrackerConfig{
+		JitterMax: time.Millisecond, BackoffBase: 20 * time.Millisecond, BackoffMax: 50 * time.Millisecond,
+		MaxRetries: 50, GapTTL: 10 * time.Second, TailTTL: tailTTL,
+		TailProbe: true, TailProbeMinIdle: 50 * time.Millisecond,
+	}
+	return nack.New(cfg, []string{cache.addr()}, nil, rec, nil)
+}
+
+// settleIDs drives flowA from 1 to 150 from the emitter, with a settled rate.
+func settleIDs(tr *nack.Tracker) {
+	for s := uint64(1); s <= 150; s++ {
+		tr.Observe(0, [32]byte{}, flowA, s, frameID(1, s), flowEmitter)
+		time.Sleep(100 * time.Microsecond)
+	}
+}
+
+// A later frame proves a tail probe's loss. From then on it is an ordinary
+// gap: booked detected once, and a frame of the retired numbering at that
+// SeqNum leaves it pending, as it does any gap of this numbering. (A probe of
+// a flow that stays quiet still reads a retired frame as a MISS.)
+func TestProvedProbeKeepsGapAgainstRetiredFrame(t *testing.T) {
+	rec := newRecorder(t)
+	cache := newProbeCache(t, nack.MsgTypeACK, false) // never answers
+	tr := probeTracker(t, cache, rec, 0)
+	settleIDs(tr)
+	failover := net.ParseIP("2001:db8::11")
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), failover) // restart, then quiet
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+	cache.waitAsked(t, 2) // the tail probe for 2
+
+	tr.Observe(0, [32]byte{}, flowA, 3, frameID(2, 3), failover)  // 3 proves 2 lost
+	tr.Observe(0, [32]byte{}, flowA, 2, frameID(1, 2), retryNode) // the retired numbering's 2
+
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after the retired numbering's 2: PendingGaps = %d, want 1 (the proved gap was dropped as a MISS)", g)
+	}
+	if v := counter(promText(t, rec), "bsl_gaps_detected_total"); v != 1 {
+		t.Errorf("gaps detected = %v, want 1 (booked once, when 3 proved it)", v)
+	}
+}
+
+// The same with a cache that answers MISS, after a later frame (or an
+// incomplete object) proved the probe's loss while the exchange ran: the MISS
+// is an ordinary one, so the gap escalates and stays pending instead of being
+// retired as an idle flow's.
+func TestProvedProbeMissEscalates(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		prove func(tr *nack.Tracker)
+	}{
+		{"later frame", func(tr *nack.Tracker) { tr.Observe(0, [32]byte{}, flowA, 152, frameID(1, 152), flowEmitter) }},
+		{"incomplete object", func(tr *nack.Tracker) { tr.RequestGaps(flowA, 0, [32]byte{}, []uint64{151}) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := newRecorder(t)
+			cache := newProbeCache(t, nack.MsgTypeMISS, false)
+			tr := probeTracker(t, cache, rec, 0)
+			settleIDs(tr)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			tr.Start(ctx)
+			cache.waitAsked(t, 151) // the tail probe for 151
+
+			tc.prove(tr)
+			cache.release() // MISS, now that 151 is proved lost
+			time.Sleep(200 * time.Millisecond)
+
+			if g := tr.PendingGaps(); g != 1 {
+				t.Fatalf("PendingGaps = %d, want 1 (the MISS retired a proved gap)", g)
+			}
+			out := promText(t, rec)
+			if v := counter(out, "bsl_gaps_detected_total"); v != 1 {
+				t.Errorf("gaps detected = %v, want 1", v)
+			}
+			if v := counter(out, "bsl_tail_probes_miss_total"); v != 0 {
+				t.Errorf("tail probe misses = %v, want 0", v)
+			}
+		})
+	}
+}
+
+// A proved probe that a cache answers with a unicast-only ACK, on a listener
+// that cannot re-inject, is a real loss with no way back: it is booked
+// unrecovered, not retired silently as an unanswered probe would be.
+func TestProvedProbeNoRecoverIsBookedUnrecovered(t *testing.T) {
+	rec := newRecorder(t)
+	cache := newProbeCache(t, nack.MsgTypeACK, false) // ACK flags: unicast only
+	cache.only = 151                                  // the next probe goes unanswered
+	tr := probeTracker(t, cache, rec, 0)
+	settleIDs(tr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+	cache.waitAsked(t, 151)
+
+	tr.Observe(0, [32]byte{}, flowA, 152, frameID(1, 152), flowEmitter) // 152 proves 151 lost
+	cache.release()
+	time.Sleep(200 * time.Millisecond)
+
+	out := promText(t, rec)
+	if v := counter(out, "bsl_gaps_detected_total"); v != 1 {
+		t.Errorf("gaps detected = %v, want 1", v)
+	}
+	if v := counter(out, "bsl_gaps_abandoned_total", `reason="no_recover"`); v != 1 {
+		t.Errorf("gaps abandoned no_recover = %v, want 1 (a proved loss with no re-injection path)", v)
+	}
+}
+
+// A retired frame observed by another worker (a cache's address hashes to a
+// different receive socket) must not move the flow to that worker. Here the
+// flow then goes quiet: its tail probe is the next gap, and the probe's
+// unicast return is re-injected into the worker that holds the flow.
+func TestRetiredFrameKeepsFlowWorker(t *testing.T) {
+	cache := newProbeCache(t, nack.MsgTypeACK, true)
+	cache.release()
+	tr := probeTracker(t, cache, nil, 0)
+	got := make(chan int, 8)
+	for id := range 2 {
+		tr.RegisterRecover(id, func([]byte) bool { got <- id; return true })
+	}
+	failover := net.ParseIP("2001:db8::11")
+	for s := uint64(1); s <= 150; s++ {
+		tr.ObserveFrom(0, 0, [32]byte{}, flowA, s, frameID(1, s), flowEmitter)
+		time.Sleep(100 * time.Microsecond)
+	}
+	tr.ObserveFrom(0, 0, [32]byte{}, flowA, 1, frameID(2, 1), failover)  // restart
+	tr.ObserveFrom(1, 0, [32]byte{}, flowA, 5, frameID(1, 5), retryNode) // retired 5, at worker 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	select {
+	case id := <-got:
+		if id != 0 {
+			t.Fatalf("the probe's return was re-injected into worker %d, want 0 (the retired frame moved the flow)", id)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no probe return was re-injected")
+	}
+}
+
+// retiredRecover re-injects, as the worker would, the retired numbering's
+// frame at the SeqNum the cache was last asked for.
+func retiredRecover(tr *nack.Tracker, cache *probeCache) func([]byte) bool {
+	return func([]byte) bool {
+		s := cache.last.get()
+		tr.Observe(0, [32]byte{}, flowA, s, frameID(1, s), nil)
+		return true
+	}
+}
+
+// A cache that keeps answering a tail probe with the retired numbering's
+// frame must not keep the probe going: the frame is no sign of life, so the
+// misses add up and probing stops at the limit (3). This numbering's own
+// traffic still resets the count.
+func TestRetiredResponsesStopProbing(t *testing.T) {
+	cache := newProbeCache(t, nack.MsgTypeACK, true)
+	cache.release()
+	tr := probeTracker(t, cache, nil, 0)
+	tr.SetRecoverFunc(retiredRecover(tr, cache))
+	settleIDs(tr)
+	failover := net.ParseIP("2001:db8::11")
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), failover) // restart, then quiet
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	time.Sleep(1200 * time.Millisecond)
+	probes := 0
+	for len(cache.asked) > 0 {
+		if <-cache.asked == 2 {
+			probes++
+		}
+	}
+	if probes != 3 {
+		t.Fatalf("tail probes for 2 = %d, want 3 (then stop)", probes)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 2, frameID(2, 2), failover) // this numbering speaks again
+	cache.waitAsked(t, 3)
+}
+
+// Nor may it keep an idle flow allocated: once probing stops, the flow ages
+// out on its own idle clock.
+func TestRetiredResponsesDoNotKeepFlowAlive(t *testing.T) {
+	cache := newProbeCache(t, nack.MsgTypeACK, true)
+	cache.release()
+	tr := probeTracker(t, cache, nil, 300*time.Millisecond)
+	tr.SetRecoverFunc(retiredRecover(tr, cache))
+	settleIDs(tr)
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), net.ParseIP("2001:db8::11")) // restart, then quiet
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for tr.ActiveFlows() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the idle flow is still allocated after 3 s (ActiveFlows = %d)", tr.ActiveFlows())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

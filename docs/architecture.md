@@ -266,10 +266,16 @@ without the observing worker's id):
     flow, register gaps or join the current set. A gap pending at that
     `SeqNum` waits for the current numbering's frame; when a cache returns the
     retired frame for it on the unicast NACK channel, the exchange moves to
-    the next cache, as on a MISS. A tail probe it answers is answered MISS.
-    The refused frame is still delivered: the tracker only keeps the books. A new frame whose fingerprint collides with the retired one (1 in
-    65,536 per early frame) is refused the same way, and its `SeqNum` is
-    booked unrecovered although the frame was delivered.
+    the next cache, as on a MISS. A tail probe it answers is answered MISS,
+    unless a later frame already proved the probe lost (it is then an
+    ordinary gap, and stays pending). It is no sign of life either: it does
+    not refresh the flow's idle clock, reset its probe misses or move the
+    flow to the worker that received it, so a cache that keeps answering
+    with it neither keeps a quiet flow probing nor keeps it allocated. The
+    refused frame is still delivered: the tracker only keeps the books. A
+    new frame whose fingerprint collides with the retired one (1 in 65,536
+    per early frame) is refused the same way, and its `SeqNum` is booked
+    unrecovered although the frame was delivered.
   - A frame off the wire with `SeqNum <= 100` on a flow already past 100 is
     compared with the frame the flow saw at that `SeqNum`. The **same** frame
     is a retransmit, whatever its source: a retry endpoint on the emitter's
@@ -335,10 +341,11 @@ workers waiting on the lock for more than a tenth of the time.
   `bsl_gaps_unrecovered_total` is incremented.
 - Entries past `nextAttempt` with fewer than `nack-max-retries` failed rounds
   are enqueued on `nackQueue` (an entry that has spent them is evicted,
-  `reason="retries"`). `nextAttempt` is advanced immediately before enqueue to
-  prevent the same gap from being re-dispatched before a response arrives.
-  Once the queue has refused a gap, the rest of that sweep leaves due gaps
-  due, for the next sweep.
+  `reason="retries"`). `nextAttempt` is advanced immediately before enqueue,
+  and a gap has one exchange at a time: an entry whose exchange is queued or
+  running is not enqueued again until it ends, however long it waited for a
+  sender slot. Once the queue has refused a gap, the rest of that sweep leaves
+  due gaps due, for the next sweep.
 - `nackQueue` consumers send 64-byte NACK datagrams (carrying `HashKey`,
   `StartSeq`, `EndSeq`, and `SubtreeID`) to the current endpoint in the
   sorted registry.
@@ -359,7 +366,10 @@ workers waiting on the lock for more than a tenth of the time.
   probe of a `SeqNum` the numbering a restart retired held: the cache may hold
   that numbering's frame, so its ACK confirms nothing, and the frame that comes
   back decides (this numbering's fills the probe, booked detected and repaired;
-  the retired one's answers it MISS).
+  the retired one's answers it MISS). A later frame that proves the probe's
+  `SeqNum` lost, or an incomplete object that asks for it, also makes the probe
+  an ordinary gap, booked detected once: from then on a MISS escalates it like
+  any other gap instead of retiring it as an idle flow's.
 - **MISS**: endpoint index is advanced immediately (no backoff). The next sweep
   dispatch targets the next endpoint in the sorted registry snapshot. A MISS
   from the last endpoint counts as a failed round with backoff instead.
