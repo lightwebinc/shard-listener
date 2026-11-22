@@ -170,6 +170,7 @@ func TestApplier_StableManifestEqualToRunningFiresNothing(t *testing.T) {
 	a := &Applier{Registry: reg, Evaluator: ev, Rec: rec, Running: running, Interval: 10 * time.Millisecond, Hooks: calls.hooks()}
 
 	w, stop := startApplier(a)
+	defer stop() // a waitFor failure must not leave the applier running; stop is idempotent
 	// Several evaluations, each of both announcers, before asserting that
 	// nothing happened: zero effects with no evaluation would prove nothing.
 	w.waitFor(t, "three evaluations of both announcers", func() bool {
@@ -210,6 +211,7 @@ func TestApplier_DivergenceLoggedOnceAndCleared(t *testing.T) {
 	a := &Applier{Registry: reg, Evaluator: ev, Rec: rec, Running: running, Interval: 10 * time.Millisecond, Hooks: calls.hooks()}
 
 	w, stop := startApplier(a)
+	defer stop() // a waitFor failure must not leave the applier running; stop is idempotent
 	// The divergence is evaluated, on more than one tick, before the
 	// announcers change.
 	w.waitFor(t, "two evaluations reporting the shard_bits divergence", func() bool {
