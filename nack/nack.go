@@ -1036,7 +1036,7 @@ func (t *Tracker) confirmProbe(e *gapEntry) bool {
 	if !ok {
 		return false
 	}
-	pend, ok := fs.pending[e.seqNum]
+	pend, ok := exchangeEntry(fs, e)
 	if !ok || !pend.speculative {
 		return false
 	}
@@ -1420,6 +1420,21 @@ func (t *Tracker) beginExchange(e *gapEntry) {
 	e.retiredReturn = false
 }
 
+// exchangeEntry returns the pending entry an exchange's copy e acts on: the
+// one stored at its SeqNum, and only while it is the entry e was taken from.
+// An entry that replaced it at the same SeqNum (filled, then registered
+// again) belongs to a later exchange, which this one must not touch: its
+// MISS, ACK, rejection, timeout or fill would otherwise land on the new
+// entry. A copy without a stored pointer acts on whatever is stored.
+// Caller holds t.mu.
+func exchangeEntry(fs *flowState, e *gapEntry) (*gapEntry, bool) {
+	pend, ok := fs.pending[e.seqNum]
+	if !ok || (e.stored != nil && pend != e.stored) {
+		return nil, false
+	}
+	return pend, true
+}
+
 // endExchange releases the pending entry an exchange's copy e was taken
 // from, once that exchange is over, so the sweep may dispatch it again. An
 // entry that is gone, or was replaced at the same SeqNum, is left alone.
@@ -1461,7 +1476,7 @@ func (t *Tracker) probeMissed(e *gapEntry) bool {
 	if !ok {
 		return true
 	}
-	pend, ok := fs.pending[e.seqNum]
+	pend, ok := exchangeEntry(fs, e)
 	if !ok {
 		return true
 	}
@@ -1783,7 +1798,7 @@ func (t *Tracker) throttleGap(e *gapEntry, flags byte) {
 	if !ok {
 		return
 	}
-	entry, ok := fs.pending[e.seqNum]
+	entry, ok := exchangeEntry(fs, e)
 	if !ok {
 		return
 	}
@@ -1817,7 +1832,7 @@ func (t *Tracker) advanceEndpoint(e *gapEntry, immediate bool, numEndpoints int)
 	if !ok {
 		return
 	}
-	entry, ok := fs.pending[e.seqNum]
+	entry, ok := exchangeEntry(fs, e)
 	if !ok {
 		return
 	}
@@ -1930,7 +1945,7 @@ func (t *Tracker) abandonGap(e *gapEntry, reason string) {
 	// The stored entry is authoritative, not the exchange's copy: a later
 	// frame can prove a probe lost while its exchange runs, and a gap filled
 	// meanwhile is not abandoned at all.
-	pend, ok := fs.pending[e.seqNum]
+	pend, ok := exchangeEntry(fs, e)
 	if !ok {
 		return
 	}
@@ -1957,7 +1972,7 @@ func (t *Tracker) retiredReturn(e *gapEntry) bool {
 	defer t.mu.Unlock()
 
 	if fs, ok := t.flows[e.hashKey]; ok {
-		if pend, found := fs.pending[e.seqNum]; found && pend.retiredReturn {
+		if pend, found := exchangeEntry(fs, e); found && pend.retiredReturn {
 			pend.retiredReturn = false
 			return true
 		}
@@ -1972,7 +1987,7 @@ func (t *Tracker) cancelGap(e *gapEntry) {
 	defer t.mu.Unlock()
 
 	if fs, ok := t.flows[e.hashKey]; ok {
-		if pend, found := fs.pending[e.seqNum]; found {
+		if pend, found := exchangeEntry(fs, e); found {
 			t.delPending(fs, e.seqNum)
 			// e is a shallow copy taken at dispatch; the stored entry is
 			// authoritative for the speculative flag.
