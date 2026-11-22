@@ -312,7 +312,7 @@ type Config struct {
 	AutoConfigPilotQuorum    int           // default 2
 	AutoConfigHysteresis     time.Duration // 0 ⇒ 2 × AnnounceInterval (per BRC-139)
 	AutoJoinFromManifest     bool          // listener-only: union(-shard-include, pilot_groups)
-	AutoConfigLiveResharding bool          // opt-in bridging mode (default: restart on adopt)
+	AutoConfigLiveResharding bool          // opt-in bridging mode; validated, not acted on (the listener observes, never restarts)
 	AutoConfigBridgingWindow time.Duration // 0 ⇒ honor pilot TransitionEpoch verbatim
 
 	// BRC-148 BEEF object plane (listener side). The plane is joined when
@@ -539,7 +539,7 @@ func Load() (*Config, error) {
 			"'derived' = BRC-126/129 conformant, FF3x under -source-mode=ssm. "+
 			"Upgrade receivers to 'both' before moving any sender to 'derived'")
 	flag.BoolVar(&c.AutoConfigEnabled, "manifest-consumer-enabled", envBool("MANIFEST_CONSUMER_ENABLED", false),
-		"opt-in BRC-139 manifest consumer for auto-shard-config (off by default)")
+		"opt-in BRC-139 manifest consumer (off by default): pilot-group auto-join and telemetry; -shard-bits and -source-mode stay as configured, and disagreement is reported as divergence")
 	flag.IntVar(&c.AutoConfigBeaconPort, "manifest-beacon-port", envInt("MANIFEST_BEACON_PORT", 9001),
 		"UDP port on which the listener joins the beacon group to receive BRC-139 manifests; distinct from -beacon-port (ADVERTs), equal values share the same sockets")
 	flag.StringVar(&c.AutoConfigBootstrap, "manifest-bootstrap", envStr("MANIFEST_BOOTSTRAP", "optional"),

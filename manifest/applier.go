@@ -5,15 +5,18 @@
 // The applier runs on a 1-second tick. It is deliberately simple: every
 // tick it evicts expired registry entries, runs the evaluator, and
 // publishes the new view to whichever pluggable hooks the caller
-// supplied. Restart-on-adopt vs. live-resharding is the caller's
-// concern; this package only provides change notifications.
+// supplied. The first evaluation is compared with the configuration the
+// process runs ([Running]), not with a zero value, and divergence from it is
+// reported, never acted on: the listener observes; it does not restart.
 package manifest
 
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"net/netip"
 	"reflect"
+	"slices"
 	"sort"
 	"time"
 
@@ -23,14 +26,25 @@ import (
 )
 
 // Hooks are pluggable change handlers fired by [Applier]. Any field can
-// be nil; nil means "ignore this kind of change."
+// be nil; nil means "ignore this kind of change." Each fires once per
+// transition: the first evaluation is compared with [Applier.Running],
+// each later one with the evaluation before it.
+//
+// A hook must not restart the process to apply a new value: the restarted
+// process re-reads the same flags, runs the old value and sees the same
+// transition again. With the evaluator built from [Running.Pin] the value
+// hooks (ShardBits, source mode, domain ShardBits) never fire, because
+// adoption cannot move a pinned value; disagreement is divergence.
 type Hooks struct {
-	// OnShardBitsChange fires when the evaluator's adopted ShardBits
-	// differs from the previously-published value. The caller decides
-	// restart-vs-bridge based on its own policy.
+	// OnShardBitsChange fires when the adopted ShardBits moves away from
+	// the running value, then from the previous one. The evaluator reports
+	// 0 until it adopts a value; 0 never reads as a transition.
 	OnShardBitsChange func(prev, next uint8)
 
-	// OnSourceModeChange fires on a SourceModeSSM transition.
+	// OnSourceModeChange fires on a SourceModeSSM transition. The
+	// evaluator reports ASM (false) until it adopts a mode, so a process
+	// running SSM must pin the mode ([Running.Pin]) or this can report a
+	// transition that is only the absence of adoption.
 	OnSourceModeChange func(prevSSM, nextSSM bool)
 
 	// OnPilotGroupsChange fires when the auto-join set diffs (added or
@@ -46,16 +60,66 @@ type Hooks struct {
 	// adopted (cutover or quorum loss).
 	OnSuccessorChange func(before, after *commanifest.SuccessorView)
 
-	// OnDomainShardBitsChange fires when a BRC-148 object plane's adopted
-	// ShardBits transitions, keyed by DomainID (domain 0x0 is governed by
-	// OnShardBitsChange, never here). Restart-vs-bridge is the caller's
-	// policy; with a per-domain pin the plane never adopts from quorum.
+	// OnDomainShardBitsChange fires when the adopted ShardBits of an object
+	// plane the process runs ([Running.DomainShardBits]) moves away from
+	// its running width, then from the previous one, keyed by DomainID
+	// (domain 0x0 is OnShardBitsChange). Planes the process does not run
+	// never fire, and a plane the evaluator has not adopted (absent, or
+	// width 0) keeps its previous width.
 	OnDomainShardBitsChange func(domain, prev, next uint8)
+}
+
+// Running is the configuration the process runs with: the values it was
+// started from (CLI/env). The [Applier] compares the adopted view with it,
+// never with a zero value, so a manifest that agrees with the running
+// configuration fires nothing.
+//
+// A restart re-reads the same flags and comes back with the same Running
+// view: nothing adopted at run time survives it. Build the evaluator with
+// [Running.Pin] so adoption never moves a value the process cannot apply,
+// and announcers that disagree surface as divergence instead.
+type Running struct {
+	ShardBits     uint8 // transaction plane (domain 0x0) shard-bit width
+	SourceModeSSM bool  // true when the data plane runs SSM
+
+	// DomainShardBits is the shard-bit width of each BRC-148 object plane
+	// the process runs, keyed by DomainID. Per-domain transitions are
+	// reported only for these planes.
+	DomainShardBits map[uint8]uint8
+}
+
+// Pin returns an evaluator pin that holds every running value. The CLI
+// value is the local authority (BRC-139 manual pin precedence): adoption
+// never moves it, and an authoritative announcer that disagrees with it is
+// reported in [commanifest.Adopted.DivergenceFields].
+func (r Running) Pin() commanifest.Pin {
+	return commanifest.Pin{
+		ShardBits:        r.ShardBits,
+		HasShardBitsPin:  true,
+		SourceModeSSM:    r.SourceModeSSM,
+		HasSourceModePin: true,
+		DomainShardBits:  maps.Clone(r.DomainShardBits),
+	}
+}
+
+// adopted returns the running configuration as an adopted view: the
+// baseline the first evaluation is compared with.
+func (r Running) adopted() commanifest.Adopted {
+	v := commanifest.Adopted{ShardBits: r.ShardBits, SourceModeSSM: r.SourceModeSSM}
+	if len(r.DomainShardBits) > 0 {
+		v.Domains = make(map[uint8]commanifest.DomainAdoption, len(r.DomainShardBits))
+		for id, bits := range r.DomainShardBits {
+			v.Domains[id] = commanifest.DomainAdoption{ShardBits: bits}
+		}
+	}
+	return v
 }
 
 // Applier is the periodic evaluator+notifier. Field zero values are
 // safe; callers should set Registry, Evaluator, and at least one Hook
-// before calling [Applier.Run].
+// before calling [Applier.Run]. It never restarts the process:
+// divergence from the running configuration is logged when it starts and
+// when it clears, and counted on every tick.
 type Applier struct {
 	Registry  *commanifest.Registry
 	Evaluator *commanifest.Evaluator
@@ -63,6 +127,15 @@ type Applier struct {
 	Rec       *metrics.Recorder
 	Log       *slog.Logger
 	Interval  time.Duration // default 1s
+
+	// Running is the configuration this process runs with: the baseline
+	// the first evaluation is compared with. See [Running].
+	Running Running
+
+	// evaluated, when set, is called after each evaluation, once its hooks,
+	// metrics and logs are done, with the view the applier compared. Tests
+	// wait on it instead of sleeping.
+	evaluated func(commanifest.Adopted)
 }
 
 // Run loops on Interval, evicting expired entries, evaluating, and
@@ -80,7 +153,8 @@ func (a *Applier) Run(ctx context.Context) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
-	var prev commanifest.Adopted
+	prev := a.Running.adopted()
+	var diverging []string
 	for {
 		select {
 		case <-ctx.Done():
@@ -91,9 +165,60 @@ func (a *Applier) Run(ctx context.Context) {
 		snap := a.Registry.Snapshot()
 		next := a.Evaluator.Evaluate(snap)
 		a.publishMetrics(next)
+		next = a.settle(prev, next)
 		a.fireHooks(prev, next, log)
+		diverging = a.logDivergence(log, diverging, next.DivergenceFields)
 		prev = next
+		if a.evaluated != nil {
+			a.evaluated(next)
+		}
 	}
+}
+
+// settle returns next as the applier compares it. A ShardBits of 0 means
+// nothing adopted yet (the transaction plane runs 1-12) and keeps the
+// previous value. Domains holds exactly the planes the process runs, each
+// keeping its previous width until the evaluator adopts a non-zero one.
+// The pilot groups and the source set are compared as evaluated.
+func (a *Applier) settle(prev, next commanifest.Adopted) commanifest.Adopted {
+	if next.ShardBits == 0 {
+		next.ShardBits = prev.ShardBits
+	}
+	var doms map[uint8]commanifest.DomainAdoption
+	if len(a.Running.DomainShardBits) > 0 {
+		doms = make(map[uint8]commanifest.DomainAdoption, len(a.Running.DomainShardBits))
+		for id := range a.Running.DomainShardBits {
+			d := next.Domains[id]
+			if d.ShardBits == 0 {
+				d.ShardBits = prev.Domains[id].ShardBits
+			}
+			doms[id] = d
+		}
+	}
+	next.Domains = doms
+	return next
+}
+
+// logDivergence logs each divergence field once when it appears and once
+// when it clears (the counter records every tick) and returns the fields
+// now diverging. The running configuration stays in effect either way.
+func (a *Applier) logDivergence(log *slog.Logger, was, now []string) []string {
+	for _, f := range now {
+		if !slices.Contains(was, f) {
+			log.Warn("manifest divergence: authoritative announcers disagree with each other or with the running configuration",
+				"field", f,
+				"running_shard_bits", a.Running.ShardBits,
+				"running_source_mode_ssm", a.Running.SourceModeSSM,
+				"running_domain_shard_bits", a.Running.DomainShardBits,
+				"effect", "none: the running configuration stays in effect, and a restart would re-read the same flags")
+		}
+	}
+	for _, f := range was {
+		if !slices.Contains(now, f) {
+			log.Info("manifest divergence cleared", "field", f)
+		}
+	}
+	return slices.Clone(now)
 }
 
 func (a *Applier) publishMetrics(v commanifest.Adopted) {
@@ -175,7 +300,9 @@ type domainChange struct {
 }
 
 // domainShardBitsChanges returns the per-domain ShardBits transitions between
-// two adopted views, in ascending DomainID order.
+// two settled views, in ascending DomainID order. Both hold the same planes
+// (the ones the process runs), so a domain present in only one map, which
+// would read as a change from or to its zero value, does not occur.
 func domainShardBitsChanges(prev, next map[uint8]commanifest.DomainAdoption) []domainChange {
 	var out []domainChange
 	for id := uint8(0); id <= 0x0E; id++ {
@@ -189,9 +316,8 @@ func domainShardBitsChanges(prev, next map[uint8]commanifest.DomainAdoption) []d
 }
 
 // reasonForChange picks an adoption-reason label for telemetry. A change
-// from zero ⇒ "bootstrap"; otherwise "quorum-shift". Pin-driven changes
-// are handled by the evaluator (Pin entry is the value reported), so the
-// applier sees those as a one-shot bootstrap on first observation.
+// from zero ⇒ "bootstrap"; otherwise "quorum-shift". A pinned value equal to
+// the running configuration is no change at all, so it is never counted.
 func reasonForChange(hadPrev bool) string {
 	if hadPrev {
 		return "quorum-shift"
