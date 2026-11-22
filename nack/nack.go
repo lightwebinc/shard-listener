@@ -1927,15 +1927,19 @@ func (t *Tracker) abandonGap(e *gapEntry, reason string) {
 		return
 	}
 	t.delPending(fs, e.seqNum)
-	if fs.probing == e.seqNum {
-		fs.probing = 0
-	}
 	// A speculative tail probe that comes back rejected was never an
-	// observed loss, so it is retired silently: booking it would
-	// manufacture phantom loss on an idle flow.
-	if !pend.speculative {
-		t.bookAbandon(fs, e.seqNum, fs.source, reason)
+	// observed loss, so it is retired without booking: booking it would
+	// manufacture phantom loss on an idle flow. It still counts against the
+	// consecutive-miss budget. A probe at a SeqNum the retired numbering held
+	// ends here on every attempt when confirmProbe refuses its ACK and there
+	// is no re-injection path, and would otherwise be issued again on every
+	// sweep until the flow expires.
+	if pend.speculative {
+		t.retireProbe(fs, e.seqNum)
+		return
 	}
+	t.clearProbing(fs, e.seqNum)
+	t.bookAbandon(fs, e.seqNum, fs.source, reason)
 }
 
 // retiredReturn reports, and clears, the mark ObserveFrom left on e's pending

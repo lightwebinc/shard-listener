@@ -762,6 +762,43 @@ func TestRetiredResponsesStopProbing(t *testing.T) {
 	cache.waitAsked(t, 3)
 }
 
+// The same budget holds on a listener that cannot re-inject. A cache's
+// unicast-only ACK for a tail probe at a SeqNum the retired numbering held is
+// refused as confirmation (it may be that numbering's frame), so the probe
+// ends as an unconfirmed one: retired without booking a loss, but counted
+// against the miss budget, so probing stops at the limit (3) instead of
+// repeating until the flow expires.
+func TestRefusedProbeACKCountsAgainstMissBudget(t *testing.T) {
+	rec := newRecorder(t)
+	cache := newProbeCache(t, nack.MsgTypeACK, false) // ACK flags: unicast only, no frame
+	cache.release()
+	tr := probeTracker(t, cache, rec, 0) // no recover callback
+	settleIDs(tr)
+	failover := net.ParseIP("2001:db8::11")
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), failover) // restart, then quiet
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	time.Sleep(1200 * time.Millisecond)
+	probes := 0
+	for len(cache.asked) > 0 {
+		if <-cache.asked == 2 {
+			probes++
+		}
+	}
+	if probes != 3 {
+		t.Fatalf("tail probes for 2 = %d, want 3 (then stop)", probes)
+	}
+	out := promText(t, rec)
+	if v := counter(out, "bsl_gaps_unrecovered_total"); v != 0 {
+		t.Errorf("gaps unrecovered = %v, want 0 (a probe nothing confirmed is no loss)", v)
+	}
+	if v := counter(out, "bsl_gaps_abandoned_total", `reason="no_recover"`); v != 0 {
+		t.Errorf("gaps abandoned no_recover = %v, want 0", v)
+	}
+}
+
 // Nor may it keep an idle flow allocated: once probing stops, the flow ages
 // out on its own idle clock.
 func TestRetiredResponsesDoNotKeepFlowAlive(t *testing.T) {

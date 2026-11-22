@@ -271,7 +271,10 @@ without the observing worker's id):
     ordinary gap, and stays pending). It is no sign of life either: it does
     not refresh the flow's idle clock, reset its probe misses or move the
     flow to the worker that received it, so a cache that keeps answering
-    with it neither keeps a quiet flow probing nor keeps it allocated. The
+    with it neither keeps a quiet flow probing nor keeps it allocated. A
+    probe whose ACK confirms nothing (a `SeqNum` the retired numbering held)
+    and that ends without a frame, on a listener that cannot re-inject one,
+    is retired the same way: no loss booked, one probe miss counted. The
     refused frame is still delivered: the tracker only keeps the books. A
     new frame whose fingerprint collides with the retired one (1 in 65,536
     per early frame) is refused the same way, and its `SeqNum` is booked
