@@ -85,9 +85,11 @@ func TestRetransmitFillKeepsEmitter(t *testing.T) {
 	}
 }
 
-// A genuine emitter change, a new source continuing the sequence (relay or
-// proxy failover), makes the new source the one whose restart counts; the old
-// emitter's late low frame is then history, not a restart.
+// A genuine emitter change, a new source that keeps advancing the flow (relay
+// or proxy failover; 9 frames here, past the 8 in a row that confirm it),
+// makes the new source the one whose restart counts; the old emitter's late
+// low frame is then history, not a restart. Frames without identities: the
+// source rule decides.
 func TestRestartFollowsCurrentEmitter(t *testing.T) {
 	tr := newTestTracker()
 	failover := net.ParseIP("2001:db8::11")
@@ -108,5 +110,123 @@ func TestRestartFollowsCurrentEmitter(t *testing.T) {
 	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, failover) // the current emitter restarts
 	if g := tr.PendingGaps(); g != 0 {
 		t.Fatalf("after the current emitter's restart: PendingGaps = %d, want 0 (flushed)", g)
+	}
+}
+
+// frameID is a distinct, non-zero frame identity (a TxID) per SeqNum and
+// numbering epoch.
+func frameID(epoch byte, seq uint64) [32]byte {
+	var id [32]byte
+	id[0], id[1], id[2], id[31] = epoch, byte(seq), byte(seq>>8), 0x5A
+	return id
+}
+
+// emitIDs is emitTo with each frame's identity, epoch 1.
+func emitIDs(tr *nack.Tracker, src net.IP, last uint64, gaps ...uint64) {
+	skip := map[uint64]bool{}
+	for _, g := range gaps {
+		skip[g] = true
+	}
+	for s := uint64(1); s <= last; s++ {
+		if !skip[s] {
+			tr.Observe(0, [32]byte{}, flowA, s, frameID(1, s), src)
+		}
+	}
+}
+
+// A repair can advance a flow: a frame this listener lost at the tail,
+// multicast for another listener's probe or NACK before this listener knew
+// it was missing (no pending entry, filled == false). A short run of them must
+// not take the emitter over, or the emitter's later restart is read as a
+// retransmit and the flow is never reset. Frames without identities exercise
+// the source rule, the only evidence for such frames.
+func TestRepairAboveBaselineKeepsEmitter(t *testing.T) {
+	rec := newRecorder(t)
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second}, nil, nil, rec, nil)
+	emitTo(tr, flowEmitter, 150, 130)
+	for s := uint64(151); s <= 153; s++ {
+		tr.Observe(0, [32]byte{}, flowA, s, [32]byte{}, retryNode) // repairs above the baseline
+	}
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1 (130)", g)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, flowEmitter) // the emitter restarts
+
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("after the emitter's restart: PendingGaps = %d, want 0 (the repairs took the emitter over)", g)
+	}
+	if v := counter(promText(t, rec), "bsl_gaps_abandoned_total", `reason="restart"`, `source="2001:db8::10"`); v != 1 {
+		t.Errorf("restart abandons attributed to the emitter = %v, want 1", v)
+	}
+}
+
+// A retransmit of an early frame can come from the emitter's own address: a
+// retry endpoint on the emitter's node, or one behind a relay that re-emits
+// every frame from its own address. It is the same frame again, so it is not
+// a restart, whatever its source: the flow keeps its gaps and its baseline.
+func TestRetransmitFromEmitterAddressKeepsFlow(t *testing.T) {
+	rec := newRecorder(t)
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second}, nil, nil, rec, nil)
+	emitIDs(tr, flowEmitter, 150, 130)
+
+	tr.Observe(0, [32]byte{}, flowA, 5, frameID(1, 5), flowEmitter) // a retransmit of 5
+
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after a retransmit of 5 from the emitter's address: PendingGaps = %d, want 1 (130 must survive)", g)
+	}
+	if v := counter(promText(t, rec), "bsl_gaps_abandoned_total", `reason="restart"`); v != 0 {
+		t.Fatalf("a retransmit was booked as a proxy restart (%v gaps abandoned)", v)
+	}
+	tr.Observe(0, [32]byte{}, flowA, 151, frameID(1, 151), flowEmitter)
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after the next wire frame: PendingGaps = %d, want 1 (no phantom gaps)", g)
+	}
+}
+
+// A restart is a new frame at an old number, whatever its source: here a
+// submitter failed over to a proxy whose counter for the flow is fresh, so
+// the new numbering arrives from a new address.
+func TestNewFrameAtOldNumberRestartsFromAnySource(t *testing.T) {
+	rec := newRecorder(t)
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second}, nil, nil, rec, nil)
+	failover := net.ParseIP("2001:db8::11")
+	emitIDs(tr, flowEmitter, 150, 130)
+
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), failover) // a new frame numbered 1
+
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("after a new frame at SeqNum 1: PendingGaps = %d, want 0 (flushed)", g)
+	}
+	if v := counter(promText(t, rec), "bsl_gaps_abandoned_total", `reason="restart"`, `source="2001:db8::10"`); v != 1 {
+		t.Errorf("restart abandons attributed to the old emitter = %v, want 1", v)
+	}
+	tr.Observe(0, [32]byte{}, flowA, 2, frameID(2, 2), failover)
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("after the new numbering's next frame: PendingGaps = %d, want 0 (contiguous)", g)
+	}
+}
+
+// A late fill answers a gap this flow registered and gave up on: it is a
+// retransmit, so it never restarts the flow, even from the emitter's address.
+func TestLateFillIsNeverRestart(t *testing.T) {
+	rec := newRecorder(t)
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second, MaxPendingPerFlow: 1}, nil, nil, rec, nil)
+	emitTo(tr, flowEmitter, 150, 4, 5) // 4 pending, 5 abandoned for capacity
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1 (4)", g)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 5, [32]byte{}, flowEmitter) // 5 turns up after all
+
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after the late fill of 5: PendingGaps = %d, want 1 (4 must survive)", g)
+	}
+	out := promText(t, rec)
+	if v := counter(out, "bsl_gaps_late_filled_total"); v != 1 {
+		t.Errorf("late fills = %v, want 1", v)
+	}
+	if v := counter(out, "bsl_gaps_abandoned_total", `reason="restart"`); v != 0 {
+		t.Errorf("a late fill was booked as a proxy restart (%v gaps abandoned)", v)
 	}
 }

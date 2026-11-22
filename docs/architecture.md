@@ -254,13 +254,28 @@ without the observing worker's id):
 - Out-of-order or retransmitted frames (`seqNum <= lastSeqNum`) are silently
   accepted; they never create new gap entries.
 - `lastSeqNum` only advances forward, with one exception, a proxy restart: a
-  frame off the wire from the flow's own emitter with `SeqNum <= 100` on a flow
-  already past 100 restarts the flow at that `SeqNum`, and the gaps it had
-  pending are booked unrecovered (`reason="restart"`). The emitter is the
-  source of the frames that advance the flow, so a new source that continues
-  the sequence (a relay or proxy failover) becomes it. A retransmit is never a
-  restart and never becomes the emitter: a multicast repair arrives from the
-  retry endpoint's address, and a unicast repair is re-injected with no source.
+  new frame at an old number. A frame off the wire with `SeqNum <= 100` on a
+  flow already past 100 is compared with the frame the flow saw at that
+  `SeqNum`, by its identity (TxID, ContentID, a bundle's first member TxID,
+  the SubtreeID for subtree data); the flow remembers the frames it sees at
+  `SeqNum` 1 to 128.
+  - A **different** frame restarts the flow at that `SeqNum`, whatever its
+    source (a restarted proxy, or a failover to a proxy whose counter for the
+    flow is fresh), and the gaps it had pending are booked unrecovered
+    (`reason="restart"`).
+  - The **same** frame is a retransmit, whatever its source: a retry endpoint
+    on the emitter's node, or one behind a relay, sends from the emitter's
+    address. So is an object completed by reassembly, observed again at its
+    first fragment's `SeqNum`.
+  - With **nothing to compare** (this listener joined the flow after that
+    `SeqNum`, or the frame has no identity), only a frame from the flow's
+    emitter restarts it. The emitter is the source of the frames that advance
+    the flow: a new source becomes it after advancing the flow 8 times in a
+    row, so a relay or proxy failover takes it over and a repair that happens
+    to advance the flow (a frame this listener lost at the tail, multicast for
+    another listener) does not.
+  - A late fill (a frame for a gap already given up on) and a unicast repair,
+    re-injected with no source, never restart a flow.
 
 **A jump within `-nack-max-forward-jump` is loss, at any rate.** Every
 missing `SeqNum` of a forward jump of up to `-nack-max-forward-jump` frames

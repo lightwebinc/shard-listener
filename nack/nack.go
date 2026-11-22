@@ -23,7 +23,7 @@ type TrackerConfig struct {
 	MaxRetries        int           // Max failed recovery rounds before declaring unrecoverable (tier hops are free)
 	GapTTL            time.Duration // Max lifetime of a gap entry (~Bitcoin block interval)
 	TailTTL           time.Duration // Max idle time before a flow entry is evicted; 0 = GapTTL
-	SeqResetThreshold uint64        // If the flow's emitter sends seqNum <= threshold on an established flow, treat it as a proxy restart (default 100)
+	SeqResetThreshold uint64        // A live frame with seqNum <= threshold on an established flow is a proxy restart if it is a new frame at that number (see ObserveFrom; default 100)
 	// MaxFlows caps the per-source flow table so a burst of thousands of DISTINCT new
 	// sources (a flood, before the idle-age-out sweep frees slots) cannot exhaust memory.
 	// At the cap, a NEW source is not gap-tracked (its frames still forward, only NACK
@@ -185,17 +185,121 @@ type flowState struct {
 	// buffer holding none of its siblings and the object never completes.
 	// Re-stamped on every Observe, so a re-hash that moves the flow follows it.
 	owner int
+	// candidate is a source other than the emitter that has advanced the flow
+	// candidateRun times in a row. It becomes the emitter at emitterConfirm
+	// (see noteAdvance).
+	candidate    net.IP
+	candidateRun int
+	// early holds the frames the flow saw at SeqNums 1..earlyFramesMax, the
+	// evidence that tells a retransmit of an early frame from a restarted
+	// emitter's new one (see restarted). nil until the flow holds one.
+	early *earlyFrames
 }
 
-// setEmitter records source as the flow's emitter for a frame that advances
-// the stream. A frame with no source (re-injected) leaves it, and so does a
-// filled gap: a probe answered by a retransmit can sit beyond lastSeqNum, and
-// its source is the retry endpoint's. A genuine emitter change, a new source
-// continuing the sequence (a relay or proxy failover), still replaces it.
-func (fs *flowState) setEmitter(source net.IP, filled bool) {
-	if source != nil && !filled {
+// emitterConfirm is how many advancing frames in a row a new source must send
+// before it becomes the flow's emitter. A repair can advance a flow too:
+// a frame this listener lost at the tail, answered for another listener's
+// probe or NACK before this listener knew it was missing. One such frame, or
+// a short run of them, must not take the emitter over; a relay or proxy that
+// took the stream over keeps advancing it.
+const emitterConfirm = 8
+
+// noteAdvance records the source of a frame that advances the stream. The
+// first source a flow sees is its emitter. A different source becomes the
+// emitter once it has advanced the flow emitterConfirm times in a row, with
+// no advancing frame from the emitter and no replayed frame from itself in
+// between. A frame with no source (re-injected) changes nothing.
+func (fs *flowState) noteAdvance(source net.IP) {
+	switch {
+	case source == nil:
+	case fs.source == nil:
 		fs.source = source
+	case source.Equal(fs.source):
+		fs.candidate, fs.candidateRun = nil, 0
+	case source.Equal(fs.candidate):
+		fs.candidateRun++
+		if fs.candidateRun >= emitterConfirm {
+			fs.source, fs.candidate, fs.candidateRun = source, nil, 0
+		}
+	default:
+		fs.candidate, fs.candidateRun = source, 1
 	}
+}
+
+// noteReplay records the source of a frame from the flow's past: a fill, a
+// late fill or a duplicate. A source that replays the flow is a retry
+// endpoint, so it stops being a candidate emitter.
+func (fs *flowState) noteReplay(source net.IP) {
+	if source != nil && source.Equal(fs.candidate) {
+		fs.candidate, fs.candidateRun = nil, 0
+	}
+}
+
+// earlyFramesMax bounds the SeqNums whose frame a flow remembers: 1..128, the
+// default restart threshold (100) with room to spare.
+const earlyFramesMax = 128
+
+// earlyFrames is a one-byte fingerprint of the frame a flow saw at each SeqNum
+// 1..earlyFramesMax. A retransmit is the cached frame verbatim, so it matches;
+// a restarted emitter numbers new frames from 1, so they differ. Equal frames
+// always match, so a fingerprint collision (1 in 256) can only delay a
+// restart to the next early frame compared, never invent one.
+type earlyFrames struct {
+	held [earlyFramesMax / 64]uint64 // bit seq-1 set: fp[seq-1] is held
+	fp   [earlyFramesMax]uint8
+}
+
+// frameFingerprint folds a frame's identity (its TxID or ContentID) to one
+// byte. ok is false for a frame with no identity of its own (zero).
+func frameFingerprint(id [32]byte) (fp uint8, ok bool) {
+	if id == ([32]byte{}) {
+		return 0, false
+	}
+	w := binary.LittleEndian.Uint64(id[0:8]) ^ binary.LittleEndian.Uint64(id[8:16]) ^
+		binary.LittleEndian.Uint64(id[16:24]) ^ binary.LittleEndian.Uint64(id[24:32])
+	w ^= w >> 32
+	w ^= w >> 16
+	w ^= w >> 8
+	return uint8(w), true
+}
+
+// noteFrame records the identity of the frame the flow now holds at seqNum,
+// when seqNum is early and the frame has an identity.
+func (fs *flowState) noteFrame(seqNum uint64, id [32]byte) {
+	if seqNum > earlyFramesMax {
+		return
+	}
+	fp, ok := frameFingerprint(id)
+	if !ok {
+		return
+	}
+	if fs.early == nil {
+		fs.early = &earlyFrames{}
+	}
+	i := seqNum - 1
+	fs.early.held[i/64] |= 1 << (i % 64)
+	fs.early.fp[i] = fp
+}
+
+// restarted reports whether a live frame at seqNum, at or below the restart
+// threshold on a flow past it, begins a new numbering of the flow (a proxy
+// restart, or a failover to a proxy with a fresh counter). The frame is
+// compared with the one the flow saw at that SeqNum. A different frame is a
+// restart, whatever its source; the same frame is a retransmit, whatever its
+// source, because a retry endpoint on the emitter's node, or behind a relay,
+// sends from the emitter's address. With nothing to compare (this listener
+// joined the flow later, or the frame has no identity of its own), only a
+// frame from the flow's emitter is a restart.
+func (fs *flowState) restarted(seqNum uint64, id [32]byte, source net.IP) bool {
+	if fs.early != nil && seqNum <= earlyFramesMax {
+		if fp, ok := frameFingerprint(id); ok {
+			i := seqNum - 1
+			if fs.early.held[i/64]&(1<<(i%64)) != 0 {
+				return fs.early.fp[i] != fp
+			}
+		}
+	}
+	return source.Equal(fs.source)
 }
 
 // ownerUnknown marks a flow whose observing worker is not known, a gap
@@ -479,6 +583,13 @@ func (t *Tracker) Observe(groupIdx uint32, subtreeID [32]byte, hashKey, seqNum u
 // is recorded on the flow and copied onto every gap it registers, so a unicast
 // retransmit is re-injected into the worker that holds the flow's reassembly
 // state and per-flow sequence position.
+//
+// txid is the frame's identity: its TxID or ContentID (a fragment's object's,
+// so a reassembled object observed at its first fragment's SeqNum matches
+// it), a bundle's first member TxID, the SubtreeID for subtree data (the flow
+// is that subtree), or zero when it has none. It tells a retransmit of an
+// early frame from a restarted emitter's new frame at the same SeqNum (see
+// Step 4).
 func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, hashKey, seqNum uint64, txid [32]byte, source net.IP) {
 	if seqNum == 0 {
 		return
@@ -520,15 +631,14 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 	// be probed again for the rest of its life.
 	fs.probeMisses = 0
 	// fs.source is the flow's emitter, the datagram source of the frames that
-	// advance its stream. Only such a frame may set it (see setEmitter): a
-	// retransmit, whether a multicast repair from a retry endpoint carrying that
-	// endpoint's address or a recovered frame re-injected with no source, is a
-	// SeqNum the flow has already passed or is missing, and keeps the emitter.
+	// advance its stream (see noteAdvance). A retransmit, a multicast repair or
+	// a recovered frame re-injected with no source, fills or repeats the flow's
+	// past and keeps the emitter (see noteReplay).
 
 	// A frame for a gap already given up on: the hole closed after all. Book
-	// it so unrecovered minus late-filled reads as real loss, then fall through
-	//: it is an old seqNum and step 4 treats it as the retransmit it is.
-	t.noteLateFill(fs, seqNum)
+	// it so unrecovered minus late-filled reads as real loss. It is a
+	// retransmit, so step 4 never reads it as a restart.
+	late := t.noteLateFill(fs, seqNum)
 
 	// Step 3: auto-fill, close any pending gap whose seqNum matches.
 	filled := false
@@ -536,6 +646,8 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		filled = true
 		t.delPending(fs, seqNum)
 		t.bookFill(fs, e)
+		fs.noteFrame(seqNum, txid)
+		fs.noteReplay(source)
 		// A repair that does not advance the stream is now fully handled. It
 		// must NOT fall through to step 4: a repaired early-flow seqNum (≤ the
 		// reset threshold) otherwise reads as a proxy restart, flushing every
@@ -552,7 +664,8 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 	if fs.lastSeqNum == 0 {
 		// First frame for this flow.
 		fs.lastSeqNum = seqNum
-		fs.setEmitter(source, filled)
+		fs.noteFrame(seqNum, txid)
+		fs.noteAdvance(source)
 		return
 	}
 
@@ -565,13 +678,15 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 		if threshold == 0 {
 			threshold = 100
 		}
-		// Only the flow's own emitter can signal a proxy restart: a live wire
-		// frame whose source is the emitter's. A recovered frame re-injected off
-		// the unicast NACK channel carries no source (see Worker.Reinject), and
-		// a multicast retransmit carries the retry endpoint's: both are history
-		// replayed, a late repair of an early-flow seqNum for this listener or
-		// another, not a restarted proxy, and must not reset the flow.
-		if source != nil && source.Equal(fs.source) && seqNum <= threshold && fs.lastSeqNum > threshold {
+		// A restart is a NEW frame at an old number, sent live: a retransmit
+		// of an early frame, for this listener or another, is the same frame
+		// again, whatever address it comes from. restarted compares the two,
+		// and falls back to the emitter's address only when there is nothing
+		// to compare. A recovered frame re-injected off the unicast NACK
+		// channel carries no source (see Worker.Reinject) and a late fill
+		// answers a gap this flow registered: both are retransmits and never
+		// reset the flow.
+		if source != nil && !late && seqNum <= threshold && fs.lastSeqNum > threshold && fs.restarted(seqNum, txid, source) {
 			// Proxy restarted: evict any pending gaps (unrecoverable now) and
 			// reset the flow counter.
 			for seq, e := range fs.pending {
@@ -584,14 +699,27 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 			fs.pending = make(map[uint64]*gapEntry)
 			fs.probing = 0 // any in-flight probe went with the pending set
 			fs.lastSeqNum = seqNum
+			// A new numbering: its early frames replace the old ones, and
+			// the source that restarted it is its emitter.
+			fs.early = nil
+			fs.noteFrame(seqNum, txid)
+			fs.source, fs.candidate, fs.candidateRun = source, nil, 0
 			return
 		}
+		if late {
+			fs.noteFrame(seqNum, txid)
+		}
+		fs.noteReplay(source)
 		return
 	}
 
-	// The frame advances the stream (steps 5 and 6), so its source is the
-	// emitter's, unless it is a probe a retransmit answered.
-	fs.setEmitter(source, filled)
+	// The frame advances the stream (steps 5 and 6). Its source counts toward
+	// the emitter unless it is a probe a retransmit answered (a fill, noted as
+	// a replay above).
+	if !filled {
+		fs.noteFrame(seqNum, txid)
+		fs.noteAdvance(source)
+	}
 
 	if seqNum == fs.lastSeqNum+1 {
 		// Step 5: contiguous, update the inter-arrival estimate (the emitter-change
