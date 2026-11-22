@@ -1,6 +1,7 @@
 package nack_test
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -284,6 +285,105 @@ func TestRetiredFrameAboveBaselineDoesNotAdvance(t *testing.T) {
 	}
 	if v := counter(promText(t, rec), "bsl_gaps_abandoned_total", `reason="restart"`); v != 0 {
 		t.Errorf("restart abandons = %v, want 0", v)
+	}
+}
+
+// After a restart at B/1, the new numbering's 2 is missing when the retired
+// numbering's 2 arrives. The retired frame must not fill that gap: filling it
+// would leave the new 2 to arrive as a duplicate, unrecorded, and a later
+// retransmit of the new 2 from the emitter's address, past the threshold,
+// would then find nothing to compare with and restart the flow, abandoning a
+// real gap. The new 2 fills its own gap and is recorded.
+func TestRetiredFrameDoesNotFillCurrentGap(t *testing.T) {
+	rec := newRecorder(t)
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second}, nil, nil, rec, nil)
+	failover := net.ParseIP("2001:db8::11")
+	emitIDs(tr, flowEmitter, 150)
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), failover) // a fresh counter: restart
+	tr.Observe(0, [32]byte{}, flowA, 3, frameID(2, 3), failover) // the new 2 is missing
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1 (2)", g)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 2, frameID(1, 2), retryNode) // the retired numbering's 2
+	if g := tr.PendingGaps(); g != 1 {
+		t.Errorf("after the retired numbering's 2: PendingGaps = %d, want 1 (it filled the new numbering's gap)", g)
+	}
+	tr.Observe(0, [32]byte{}, flowA, 2, frameID(2, 2), retryNode) // the new 2, repaired
+	for s := uint64(4); s <= 150; s++ {
+		if s != 140 {
+			tr.Observe(0, [32]byte{}, flowA, s, frameID(2, s), failover)
+		}
+	}
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1 (140)", g)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 2, frameID(2, 2), failover) // a retransmit of the new 2
+
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after a retransmit of the new 2: PendingGaps = %d, want 1 (140 must survive)", g)
+	}
+	tr.Observe(0, [32]byte{}, flowA, 151, frameID(2, 151), failover)
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after the next wire frame: PendingGaps = %d, want 1 (no phantom gaps)", g)
+	}
+	if v := counter(promText(t, rec), "bsl_gaps_abandoned_total", `reason="restart"`); v != 0 {
+		t.Errorf("restart abandons = %v, want 0", v)
+	}
+}
+
+// The same refusal on the unicast return channel: a cache that still holds
+// the retired numbering's frame at the gap's SeqNum returns it. The worker
+// re-injects (delivers) it, but it is not the gap's repair, so the NACK
+// exchange must not close the gap; it moves on as on a MISS.
+func TestRetiredUnicastReturnDoesNotCloseGap(t *testing.T) {
+	mockConn, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("UDP loopback unavailable: %v", err)
+	}
+	defer func() { _ = mockConn.Close() }()
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			_, src, err := mockConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = mockConn.WriteTo(dataFrame(), src)
+			var resp [nack.ResponseSize]byte
+			nack.EncodeResponse(&nack.Response{MsgType: nack.MsgTypeACK, Flags: 0x02, SeqNum: 2}, resp[:])
+			_, _ = mockConn.WriteTo(resp[:], src)
+		}
+	}()
+
+	cfg := nack.TrackerConfig{JitterMax: 0, BackoffBase: time.Second, BackoffMax: 2 * time.Second, MaxRetries: 50, GapTTL: 10 * time.Second}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, nil, nil)
+	failover := net.ParseIP("2001:db8::11")
+	emitIDs(tr, flowEmitter, 150)
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), failover) // a fresh counter: restart
+	tr.Observe(0, [32]byte{}, flowA, 3, frameID(2, 3), failover) // the new 2 is missing
+
+	returned := make(chan struct{}, 64)
+	tr.SetRecoverFunc(func([]byte) bool {
+		// What the worker does with the return: re-inject it, here the
+		// retired numbering's 2, through the pipeline (no datagram source).
+		tr.Observe(0, [32]byte{}, flowA, 2, frameID(1, 2), nil)
+		returned <- struct{}{}
+		return true
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	select {
+	case <-returned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the NACK for 2 was never answered")
+	}
+	time.Sleep(200 * time.Millisecond) // the exchange settles after the re-injection
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after the retired numbering's 2 came back unicast: PendingGaps = %d, want 1 (the wrong frame closed the gap)", g)
 	}
 }
 

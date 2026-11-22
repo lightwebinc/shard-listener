@@ -255,13 +255,21 @@ without the observing worker's id):
   accepted; they never create new gap entries.
 - `lastSeqNum` only advances forward, with one exception, a proxy restart: a
   new frame at an old number. The flow remembers the frames it sees at
-  `SeqNum` 1 to 128 by their identity (TxID, ContentID, a bundle's first
-  member TxID, the SubtreeID for subtree data), and on a restart keeps that
-  set as the retired numbering until the next restart.
-  - A frame equal to the **retired** numbering's frame at its `SeqNum` is a
-    retransmit of a frame from before the restart, wherever it lands: it does
-    not advance the flow, register gaps or join the current set. Like any
-    frame, it closes a gap pending at its `SeqNum`.
+  `SeqNum` 1 to 128 by a two-byte fingerprint of their identity (TxID,
+  ContentID, a bundle's first member TxID, the SubtreeID for subtree data),
+  and on a restart keeps that set as the retired numbering until the next
+  restart.
+  - A frame the current set holds at its `SeqNum` is the current numbering's
+    (a duplicate). Otherwise a frame equal to the **retired** numbering's
+    frame at its `SeqNum` is a retransmit of a frame from before the restart,
+    wherever it lands: it does not fill a gap, advance the flow, register gaps
+    or join the current set. A gap pending at that `SeqNum` waits for the
+    current numbering's frame; when a cache returns the retired frame for it
+    on the unicast NACK channel, the exchange moves to the next cache, as on a
+    MISS. The refused frame is still delivered: the tracker only keeps the
+    books. A new frame whose fingerprint collides with the retired one (1 in
+    65,536 per early frame) is refused the same way, and its `SeqNum` is
+    booked unrecovered although the frame was delivered.
   - A frame off the wire with `SeqNum <= 100` on a flow already past 100 is
     compared with the frame the flow saw at that `SeqNum`. The **same** frame
     is a retransmit, whatever its source: a retry endpoint on the emitter's
