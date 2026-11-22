@@ -194,6 +194,11 @@ type flowState struct {
 	// evidence that tells a retransmit of an early frame from a restarted
 	// emitter's new one (see restarted). nil until the flow holds one.
 	early *earlyFrames
+	// retired is early as it stood when the last restart retired that
+	// numbering. Its frames can still be retransmitted, for any listener's
+	// gap from before the restart, and must not read as a second restart.
+	// One numbering back, kept until the next restart replaces it.
+	retired *earlyFrames
 }
 
 // emitterConfirm is how many advancing frames in a row a new source must send
@@ -249,6 +254,24 @@ type earlyFrames struct {
 	fp   [earlyFramesMax]uint8
 }
 
+// get returns the fingerprint held for seq, if any. A nil e holds none.
+func (e *earlyFrames) get(seq uint64) (uint8, bool) {
+	if e == nil || seq == 0 || seq > earlyFramesMax {
+		return 0, false
+	}
+	i := seq - 1
+	if e.held[i/64]&(1<<(i%64)) == 0 {
+		return 0, false
+	}
+	return e.fp[i], true
+}
+
+// holds reports whether e holds fp for seq.
+func (e *earlyFrames) holds(seq uint64, fp uint8) bool {
+	held, ok := e.get(seq)
+	return ok && held == fp
+}
+
 // frameFingerprint folds a frame's identity (its TxID or ContentID) to one
 // byte. ok is false for a frame with no identity of its own (zero).
 func frameFingerprint(id [32]byte) (fp uint8, ok bool) {
@@ -264,13 +287,14 @@ func frameFingerprint(id [32]byte) (fp uint8, ok bool) {
 }
 
 // noteFrame records the identity of the frame the flow now holds at seqNum,
-// when seqNum is early and the frame has an identity.
+// when seqNum is early and the frame has an identity. A frame of the retired
+// numbering is not recorded: it is a retransmit, not this numbering's frame.
 func (fs *flowState) noteFrame(seqNum uint64, id [32]byte) {
-	if seqNum > earlyFramesMax {
+	if seqNum == 0 || seqNum > earlyFramesMax {
 		return
 	}
 	fp, ok := frameFingerprint(id)
-	if !ok {
+	if !ok || fs.retired.holds(seqNum, fp) {
 		return
 	}
 	if fs.early == nil {
@@ -284,19 +308,20 @@ func (fs *flowState) noteFrame(seqNum uint64, id [32]byte) {
 // restarted reports whether a live frame at seqNum, at or below the restart
 // threshold on a flow past it, begins a new numbering of the flow (a proxy
 // restart, or a failover to a proxy with a fresh counter). The frame is
-// compared with the one the flow saw at that SeqNum. A different frame is a
-// restart, whatever its source; the same frame is a retransmit, whatever its
-// source, because a retry endpoint on the emitter's node, or behind a relay,
-// sends from the emitter's address. With nothing to compare (this listener
-// joined the flow later, or the frame has no identity of its own), only a
-// frame from the flow's emitter is a restart.
+// compared with the one the flow saw at that SeqNum, and with the one the
+// numbering the last restart retired had there. A frame equal to either is a
+// retransmit, whatever its source, because a retry endpoint on the emitter's
+// node, or behind a relay, sends from the emitter's address. A frame that
+// differs from the one the flow saw is a restart, whatever its source. With
+// nothing to compare (this listener joined the flow later, or the frame has
+// no identity of its own), only a frame from the flow's emitter is a restart.
 func (fs *flowState) restarted(seqNum uint64, id [32]byte, source net.IP) bool {
-	if fs.early != nil && seqNum <= earlyFramesMax {
-		if fp, ok := frameFingerprint(id); ok {
-			i := seqNum - 1
-			if fs.early.held[i/64]&(1<<(i%64)) != 0 {
-				return fs.early.fp[i] != fp
-			}
+	if fp, ok := frameFingerprint(id); ok && seqNum <= earlyFramesMax {
+		if fs.retired.holds(seqNum, fp) {
+			return false
+		}
+		if held, ok := fs.early.get(seqNum); ok {
+			return held != fp
 		}
 	}
 	return source.Equal(fs.source)
@@ -699,9 +724,10 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 			fs.pending = make(map[uint64]*gapEntry)
 			fs.probing = 0 // any in-flight probe went with the pending set
 			fs.lastSeqNum = seqNum
-			// A new numbering: its early frames replace the old ones, and
-			// the source that restarted it is its emitter.
-			fs.early = nil
+			// A new numbering: the old one's early frames are retired, still
+			// recognized as retransmits, and the source that restarted it is
+			// its emitter.
+			fs.retired, fs.early = fs.early, nil
 			fs.noteFrame(seqNum, txid)
 			fs.source, fs.candidate, fs.candidateRun = source, nil, 0
 			return
@@ -714,11 +740,16 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 	}
 
 	// The frame advances the stream (steps 5 and 6). Its source counts toward
-	// the emitter unless it is a probe a retransmit answered (a fill, noted as
-	// a replay above).
+	// the emitter unless it is a retransmit: a probe a retransmit answered (a
+	// fill, noted as a replay above) or a late fill (a confirmed tail probe
+	// given up on, say), which is a replay too.
 	if !filled {
 		fs.noteFrame(seqNum, txid)
-		fs.noteAdvance(source)
+		if late {
+			fs.noteReplay(source)
+		} else {
+			fs.noteAdvance(source)
+		}
 	}
 
 	if seqNum == fs.lastSeqNum+1 {

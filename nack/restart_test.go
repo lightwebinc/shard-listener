@@ -207,6 +207,69 @@ func TestNewFrameAtOldNumberRestartsFromAnySource(t *testing.T) {
 	}
 }
 
+// After a restart, frames of the numbering it retired can still be
+// retransmitted, for any listener's gap from before the restart. Such a frame
+// differs from the new numbering's frame at its SeqNum, but it is the retired
+// numbering's frame, so it is a retransmit, not a second restart. A frame new
+// to both numberings still restarts the flow.
+func TestRetiredNumberingRetransmitIsNotRestart(t *testing.T) {
+	rec := newRecorder(t)
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second}, nil, nil, rec, nil)
+	failover := net.ParseIP("2001:db8::11")
+	emitIDs(tr, flowEmitter, 150)
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), failover) // a fresh counter: restart
+	for s := uint64(2); s <= 150; s++ {
+		if s != 140 {
+			tr.Observe(0, [32]byte{}, flowA, s, frameID(2, s), failover)
+		}
+	}
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1 (140)", g)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(1, 1), retryNode) // a delayed retransmit of the old 1
+
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after a retransmit of the retired numbering's 1: PendingGaps = %d, want 1 (140 must survive)", g)
+	}
+	tr.Observe(0, [32]byte{}, flowA, 151, frameID(2, 151), failover)
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("after the next wire frame: PendingGaps = %d, want 1 (no phantom gaps)", g)
+	}
+	if v := counter(promText(t, rec), "bsl_gaps_abandoned_total", `reason="restart"`); v != 0 {
+		t.Errorf("restart abandons = %v, want 0 (the first restart had no gaps to abandon)", v)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(3, 1), failover) // a frame new to both: restart
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("after a new frame at 1: PendingGaps = %d, want 0 (flushed)", g)
+	}
+}
+
+// A late fill is a replay, not an advance: one that lands beyond the baseline
+// (here a gap the restart abandoned; a confirmed tail probe that was given up
+// on is another) must not count toward a candidate emitter, or it can promote
+// a source the emitter's next restart is then measured against.
+func TestLateFillDoesNotConfirmEmitter(t *testing.T) {
+	tr := newTestTracker()
+	relay := net.ParseIP("2001:db8::30")
+	emitTo(tr, flowEmitter, 150, 140)                            // 140 pending
+	tr.Observe(0, [32]byte{}, flowA, 3, [32]byte{}, flowEmitter) // restart: 140 abandoned, baseline 3
+	for s := uint64(4); s <= 10; s++ {
+		tr.Observe(0, [32]byte{}, flowA, s, [32]byte{}, relay) // 7 advances from another source
+	}
+	tr.Observe(0, [32]byte{}, flowA, 140, [32]byte{}, relay) // a late fill beyond the baseline
+	if g := tr.PendingGaps(); g == 0 {
+		t.Fatal("setup: the jump to 140 registered no gaps")
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 2, [32]byte{}, flowEmitter) // the emitter restarts
+
+	if g := tr.PendingGaps(); g != 0 {
+		t.Fatalf("after the emitter's restart: PendingGaps = %d, want 0 (the late fill promoted the other source)", g)
+	}
+}
+
 // A late fill answers a gap this flow registered and gave up on: it is a
 // retransmit, so it never restarts the flow, even from the emitter's address.
 func TestLateFillIsNeverRestart(t *testing.T) {

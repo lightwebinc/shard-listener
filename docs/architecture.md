@@ -255,25 +255,31 @@ without the observing worker's id):
   accepted; they never create new gap entries.
 - `lastSeqNum` only advances forward, with one exception, a proxy restart: a
   new frame at an old number. A frame off the wire with `SeqNum <= 100` on a
-  flow already past 100 is compared with the frame the flow saw at that
-  `SeqNum`, by its identity (TxID, ContentID, a bundle's first member TxID,
-  the SubtreeID for subtree data); the flow remembers the frames it sees at
-  `SeqNum` 1 to 128.
-  - A **different** frame restarts the flow at that `SeqNum`, whatever its
-    source (a restarted proxy, or a failover to a proxy whose counter for the
-    flow is fresh), and the gaps it had pending are booked unrecovered
-    (`reason="restart"`).
-  - The **same** frame is a retransmit, whatever its source: a retry endpoint
-    on the emitter's node, or one behind a relay, sends from the emitter's
-    address. So is an object completed by reassembly, observed again at its
-    first fragment's `SeqNum`.
-  - With **nothing to compare** (this listener joined the flow after that
-    `SeqNum`, or the frame has no identity), only a frame from the flow's
-    emitter restarts it. The emitter is the source of the frames that advance
-    the flow: a new source becomes it after advancing the flow 8 times in a
-    row, so a relay or proxy failover takes it over and a repair that happens
-    to advance the flow (a frame this listener lost at the tail, multicast for
-    another listener) does not.
+  flow already past 100 is compared, by its identity (TxID, ContentID, a
+  bundle's first member TxID, the SubtreeID for subtree data), with the frame
+  the flow saw at that `SeqNum` and with the one the numbering retired by the
+  flow's last restart had there. The flow remembers the frames it sees at
+  `SeqNum` 1 to 128 (other than the retired numbering's), and on a restart
+  keeps that set as the retired numbering until the next restart.
+  - The **same** frame as either is a retransmit, whatever its source: a retry
+    endpoint on the emitter's node, or one behind a relay, sends from the
+    emitter's address, and a retired numbering's frames are still repaired for
+    gaps from before the restart. So is an object completed by reassembly,
+    observed again at its first fragment's `SeqNum`.
+  - Otherwise, a frame **different** from the one the flow saw restarts the
+    flow at that `SeqNum`, whatever its source (a restarted proxy, or a
+    failover to a proxy whose counter for the flow is fresh). The gaps it had
+    pending are booked unrecovered (`reason="restart"`), and the frame's
+    source becomes the flow's emitter.
+  - With **nothing to compare** (the flow holds no frame at that `SeqNum`,
+    because this listener joined the flow later or never received it, or the
+    frame has no identity), only a frame from the flow's emitter restarts it. The emitter is the source of the frames that advance
+    the flow: a new source becomes it after 8 advancing frames in a row, with
+    no advancing frame from the emitter and no replayed frame (a fill, a late
+    fill or a duplicate) from that source in between. So a relay or proxy
+    failover takes it over, and a repair that happens to advance the flow (a
+    frame this listener lost at the tail, multicast for another listener) does
+    not.
   - A late fill (a frame for a gap already given up on) and a unicast repair,
     re-injected with no source, never restart a flow.
 

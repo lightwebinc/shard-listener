@@ -34,7 +34,13 @@ func TestReassembledEarlyObjectDoesNotRestartFlow(t *testing.T) {
 	tr := nack.New(nack.TrackerConfig{GapTTL: time.Minute}, nil, iface, nil, nil)
 	eng := shard.New(0xFF05, shard.DefaultGroupID, 2)
 	w := New(0, iface, 9999, nil, eng, filter.New(nil, nil, nil, nil), egr, nil, tr, nil, false)
-	w.SetReassemblyBuffer(reassembly.New(reassembly.DefaultMaxSlots, time.Minute, false, w.DeliverReassembled))
+	// The object reaches the tracker through DeliverReassembled; count the
+	// completions so the test fails if reassembly never gets there.
+	var completed []frame.Frame
+	w.SetReassemblyBuffer(reassembly.New(reassembly.DefaultMaxSlots, time.Minute, false, func(payload []byte, f *frame.Frame) {
+		completed = append(completed, *f)
+		w.DeliverReassembled(payload, f)
+	}))
 
 	emitter := &unix.SockaddrInet6{Addr: [16]byte{0x20, 0x01, 0x0d, 0xb8, 15: 0x10}}
 	const hashKey = uint64(0x1234_5678_9ABC_DEF0)
@@ -64,6 +70,12 @@ func TestReassembledEarlyObjectDoesNotRestartFlow(t *testing.T) {
 			t.Fatal(err)
 		}
 		w.handleDatagram(buf[:n], emitter, false, nil)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("objects completed = %d, want 1", len(completed))
+	}
+	if got := completed[0]; got.SeqNum != 50 || got.TxID != txid {
+		t.Fatalf("completed object: SeqNum %d TxID %x, want 50 and %x (its first fragment's)", got.SeqNum, got.TxID[:2], txid[:2])
 	}
 	if g := tr.PendingGaps(); g != 0 {
 		t.Fatalf("after the object completed: PendingGaps = %d, want 0 (the object read as a restart)", g)
