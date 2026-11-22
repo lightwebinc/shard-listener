@@ -131,6 +131,11 @@ type Applier struct {
 	// Running is the configuration this process runs with: the baseline
 	// the first evaluation is compared with. See [Running].
 	Running Running
+
+	// evaluated, when set, is called after each evaluation, once its hooks,
+	// metrics and logs are done, with the view the applier compared. Tests
+	// wait on it instead of sleeping.
+	evaluated func(commanifest.Adopted)
 }
 
 // Run loops on Interval, evicting expired entries, evaluating, and
@@ -164,6 +169,9 @@ func (a *Applier) Run(ctx context.Context) {
 		a.fireHooks(prev, next, log)
 		diverging = a.logDivergence(log, diverging, next.DivergenceFields)
 		prev = next
+		if a.evaluated != nil {
+			a.evaluated(next)
+		}
 	}
 }
 

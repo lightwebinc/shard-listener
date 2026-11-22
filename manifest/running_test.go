@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,18 +88,67 @@ func (c *valueHookCalls) hooks() Hooks {
 	}
 }
 
-// startApplier runs a until the returned stop is called; stop returns the
-// applier's log.
-func startApplier(a *Applier) (stop func() string) {
+// evalWatch records the applier's evaluations (through Applier.evaluated), so
+// a test waits for evaluation progress, bounded, instead of sleeping.
+type evalWatch struct {
+	mu        sync.Mutex
+	n         int    // evaluations so far
+	pilots    []int  // PilotsKnown, per evaluation
+	diverging []bool // shard_bits reported diverging, per evaluation
+}
+
+func (w *evalWatch) observe(v commanifest.Adopted) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.n++
+	w.pilots = append(w.pilots, v.PilotsKnown)
+	w.diverging = append(w.diverging, slices.Contains(v.DivergenceFields, "shard_bits"))
+}
+
+// count is how many evaluations so far satisfy f.
+func (w *evalWatch) count(f func(i int) bool) int {
+	n := 0
+	for i := range w.n {
+		if f(i) {
+			n++
+		}
+	}
+	return n
+}
+
+// waitFor polls until cond holds for the evaluations so far, under the
+// watch's lock, and fails the test if it does not within 10 s.
+func (w *evalWatch) waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		w.mu.Lock()
+		ok, n := cond(), w.n
+		w.mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s (%d evaluations so far)", what, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// startApplier runs a until the returned stop is called, watching its
+// evaluations; stop returns the applier's log.
+func startApplier(a *Applier) (w *evalWatch, stop func() string) {
 	var logs bytes.Buffer
 	a.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	w = &evalWatch{}
+	a.evaluated = w.observe
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		a.Run(ctx)
 		close(done)
 	}()
-	return func() string {
+	return w, func() string {
 		cancel()
 		<-done
 		return logs.String()
@@ -119,8 +169,12 @@ func TestApplier_StableManifestEqualToRunningFiresNothing(t *testing.T) {
 	calls := &valueHookCalls{}
 	a := &Applier{Registry: reg, Evaluator: ev, Rec: rec, Running: running, Interval: 10 * time.Millisecond, Hooks: calls.hooks()}
 
-	stop := startApplier(a)
-	time.Sleep(150 * time.Millisecond)
+	w, stop := startApplier(a)
+	// Several evaluations, each of both announcers, before asserting that
+	// nothing happened: zero effects with no evaluation would prove nothing.
+	w.waitFor(t, "three evaluations of both announcers", func() bool {
+		return w.count(func(i int) bool { return w.pilots[i] == 2 }) >= 3
+	})
 	logs := stop()
 
 	calls.mu.Lock()
@@ -155,11 +209,20 @@ func TestApplier_DivergenceLoggedOnceAndCleared(t *testing.T) {
 	calls := &valueHookCalls{}
 	a := &Applier{Registry: reg, Evaluator: ev, Rec: rec, Running: running, Interval: 10 * time.Millisecond, Hooks: calls.hooks()}
 
-	stop := startApplier(a)
-	time.Sleep(100 * time.Millisecond) // several ticks of divergence
+	w, stop := startApplier(a)
+	// The divergence is evaluated, on more than one tick, before the
+	// announcers change.
+	w.waitFor(t, "two evaluations reporting the shard_bits divergence", func() bool {
+		return w.count(func(i int) bool { return w.diverging[i] }) >= 2
+	})
 	reg.Upsert(mustAddr("2001:db8::1"), announcerManifest(1, 2, false))
 	reg.Upsert(mustAddr("2001:db8::2"), announcerManifest(2, 2, false))
-	time.Sleep(100 * time.Millisecond) // agreement
+	w.mu.Lock()
+	switched := w.n
+	w.mu.Unlock()
+	w.waitFor(t, "an evaluation after the change with the divergence cleared", func() bool {
+		return w.n > switched && !w.diverging[w.n-1]
+	})
 	logs := stop()
 
 	if n := strings.Count(logs, "manifest divergence:"); n != 1 {
