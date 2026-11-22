@@ -550,7 +550,7 @@ still probed.
 | `-nack-tail-probe` | `NACK_TAIL_PROBE` | `true` | Master switch |
 | `-nack-tail-probe-idle-factor` | `NACK_TAIL_PROBE_IDLE_FACTOR` | `4.0` | Multiple of the flow's smoothed inter-arrival before silence counts as abnormal |
 | `-nack-tail-probe-min-idle` | `NACK_TAIL_PROBE_MIN_IDLE` | `500ms` | Floor on the idle threshold so fast flows do not probe continuously |
-| `-nack-tail-probe-max-misses` | `NACK_TAIL_PROBE_MAX_MISSES` | `3` | Stop probing a flow after this many consecutive MISS answers (it is genuinely idle); reset by new traffic |
+| `-nack-tail-probe-max-misses` | `NACK_TAIL_PROBE_MAX_MISSES` | `3` | Stop probing a flow after this many consecutive probes that found nothing: MISS answers, and probes that end unconfirmed with no loss booked (it is genuinely idle); reset by new traffic, which a retransmit of a numbering a restart retired is not |
 
 ---
 
@@ -1236,7 +1236,7 @@ the registrations in `metrics/metrics.go`.
 | `bsl_gaps_detected_total` | `flow`, `source` | Sequence gaps detected (missing frames) |
 | `bsl_gaps_suppressed_total` | `flow`, `source` | Gaps closed by their frame: a repair (unicast on the NACK socket, or a multicast copy on the data plane) or a late, reordered original. An ACK alone never closes a gap |
 | `bsl_gaps_unrecovered_total` | `flow`, `source` | Gaps evicted after retries exhausted or TTL exceeded |
-| `bsl_gaps_abandoned_total` | `flow`, `source`, `reason` | The same events, with the why: `ttl`, `retries`, `restart` (proxy restart evicted the flow's gaps), `rejected` (a repair the pipeline refused), `no_recover` (unicast-only repair with no re-injection path), `capacity` (a missing SeqNum past the flow's pending bound, 16 x `-nack-max-forward-jump`, or past `-nack-max-pending` across all flows) |
+| `bsl_gaps_abandoned_total` | `flow`, `source`, `reason` | The same events, with the why: `ttl`, `retries`, `restart` (a new frame at an early `SeqNum` restarted the flow's sequence and evicted its gaps; a retransmit, the same frame again, never counts; see [architecture: Gap tracking](architecture.md#gap-tracking-nack--norm-inspired)), `rejected` (a repair the pipeline refused), `no_recover` (unicast-only repair with no re-injection path), `capacity` (a missing SeqNum past the flow's pending bound, 16 x `-nack-max-forward-jump`, or past `-nack-max-pending` across all flows) |
 | `bsl_gaps_late_filled_total` | `flow`, `source` | Frames that arrived for a gap after it was abandoned: a multicast retransmit that outran the NACK deadline. A flow's real loss is `unrecovered − late_filled`; an abandoned seqNum is remembered for two minutes for this |
 | `bsl_nacks_dispatched_total` | `flow`, `source` | NACK datagrams sent to retry endpoints |
 | `bsl_nack_send_errors_total` | `endpoint` | NACK datagrams that failed to send (`WriteTo` error); that walk tier was never asked |

@@ -1151,13 +1151,22 @@ func (w *Worker) processBundle(raw []byte) {
 		// of re-bucketing (one NACK per lost parent, proportional to loss), not a
 		// per-parent-avoidable one.
 		if w.tracker != nil && b.SeqNum != 0 {
-			var zero [32]byte // a bundle has no single TxID
-			w.tracker.ObserveFrom(w.id, uint32(b.GroupIdx), b.SubtreeID, b.HashKey, b.SeqNum, zero, w.curSource)
+			w.tracker.ObserveFrom(w.id, uint32(b.GroupIdx), b.SubtreeID, b.HashKey, b.SeqNum, bundleIdentity(b), w.curSource)
 		}
 		return
 	}
 
 	w.deliverBundle(b, raw, true)
+}
+
+// bundleIdentity is the identity the gap tracker compares a bundle by: its
+// first member's TxID when the bundle carries member TxIDs, else zero (none).
+// A repaired bundle is the cached frame verbatim, so it carries the same one.
+func bundleIdentity(b *bundle.Bundle) [32]byte {
+	if b.TxIDsPresent() && len(b.Members) > 0 {
+		return b.Members[0].TxID
+	}
+	return [32]byte{}
 }
 
 // deliverBundle filters, optionally gap-tracks, dedups, and delivers one
@@ -1184,8 +1193,7 @@ func (w *Worker) deliverBundle(b *bundle.Bundle, raw []byte, track bool) {
 	// whose local SeqNum is a phantom (the caller tracks the parent instead).
 	observe := func() {
 		if track && w.tracker != nil && b.SeqNum != 0 {
-			var zero [32]byte // a bundle has no single TxID
-			w.tracker.ObserveFrom(w.id, groupIdx, b.SubtreeID, b.HashKey, b.SeqNum, zero, w.curSource)
+			w.tracker.ObserveFrom(w.id, groupIdx, b.SubtreeID, b.HashKey, b.SeqNum, bundleIdentity(b), w.curSource)
 		}
 	}
 

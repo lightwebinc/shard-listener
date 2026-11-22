@@ -254,9 +254,52 @@ without the observing worker's id):
 - Out-of-order or retransmitted frames (`seqNum <= lastSeqNum`) are silently
   accepted; they never create new gap entries.
 - `lastSeqNum` only advances forward, with one exception, a proxy restart: a
-  frame off the wire with `SeqNum <= 100` on a flow already past 100 restarts
-  the flow at that `SeqNum`, and the gaps it had pending are booked unrecovered
-  (`reason="restart"`).
+  new frame at an old number. The flow remembers the frames it sees at
+  `SeqNum` 1 to 128 by a two-byte fingerprint of their identity (TxID,
+  ContentID, a bundle's first member TxID, the SubtreeID for subtree data),
+  and on a restart keeps that set as the retired numbering until the next
+  restart.
+  - A frame the current set holds at its `SeqNum` is the current numbering's
+    (a duplicate). Otherwise a frame equal to the **retired** numbering's
+    frame at its `SeqNum` is a retransmit of a frame from before the restart,
+    wherever it lands: it does not fill a gap, book a late fill, advance the
+    flow, register gaps or join the current set. A gap pending at that
+    `SeqNum` waits for the current numbering's frame; when a cache returns the
+    retired frame for it on the unicast NACK channel, the exchange moves to
+    the next cache, as on a MISS. A tail probe it answers is answered MISS,
+    unless a later frame already proved the probe lost (it is then an
+    ordinary gap, and stays pending). It is no sign of life either: it does
+    not refresh the flow's idle clock, reset its probe misses or move the
+    flow to the worker that received it, so a cache that keeps answering
+    with it neither keeps a quiet flow probing nor keeps it allocated. A
+    probe whose ACK confirms nothing (a `SeqNum` the retired numbering held)
+    and that ends without a frame, on a listener that cannot re-inject one,
+    is retired the same way: no loss booked, one probe miss counted. The
+    refused frame is still delivered: the tracker only keeps the books. A
+    new frame whose fingerprint collides with the retired one (1 in 65,536
+    per early frame) is refused the same way, and its `SeqNum` is booked
+    unrecovered although the frame was delivered.
+  - A frame off the wire with `SeqNum <= 100` on a flow already past 100 is
+    compared with the frame the flow saw at that `SeqNum`. The **same** frame
+    is a retransmit, whatever its source: a retry endpoint on the emitter's
+    node, or one behind a relay, sends from the emitter's address. So is an
+    object completed by reassembly, observed again at its first fragment's
+    `SeqNum`.
+  - A **different** frame restarts the flow at that `SeqNum`, whatever its
+    source (a restarted proxy, or a failover to a proxy whose counter for the
+    flow is fresh). The gaps it had pending are booked unrecovered
+    (`reason="restart"`), and the frame's source becomes the flow's emitter.
+  - With **nothing to compare** (the flow holds no frame at that `SeqNum`,
+    because this listener joined the flow later or never received it, or the
+    frame has no identity), only a frame from the flow's emitter restarts it.
+    The emitter is the source of the frames that advance the flow: a new
+    source becomes it after 8 advancing frames in a row, with no advancing
+    frame from the emitter and no replayed frame (a fill, a late fill or a
+    duplicate) from that source in between. So a relay or proxy failover takes
+    it over, and a repair that happens to advance the flow (a frame this
+    listener lost at the tail, multicast for another listener) does not.
+  - A late fill (a frame for a gap already given up on) and a unicast repair,
+    re-injected with no source, never restart a flow.
 
 **A jump within `-nack-max-forward-jump` is loss, at any rate.** Every
 missing `SeqNum` of a forward jump of up to `-nack-max-forward-jump` frames
@@ -301,10 +344,11 @@ workers waiting on the lock for more than a tenth of the time.
   `bsl_gaps_unrecovered_total` is incremented.
 - Entries past `nextAttempt` with fewer than `nack-max-retries` failed rounds
   are enqueued on `nackQueue` (an entry that has spent them is evicted,
-  `reason="retries"`). `nextAttempt` is advanced immediately before enqueue to
-  prevent the same gap from being re-dispatched before a response arrives.
-  Once the queue has refused a gap, the rest of that sweep leaves due gaps
-  due, for the next sweep.
+  `reason="retries"`). `nextAttempt` is advanced immediately before enqueue,
+  and a gap has one exchange at a time: an entry whose exchange is queued or
+  running is not enqueued again until it ends, however long it waited for a
+  sender slot. Once the queue has refused a gap, the rest of that sweep leaves
+  due gaps due, for the next sweep.
 - `nackQueue` consumers send 64-byte NACK datagrams (carrying `HashKey`,
   `StartSeq`, `EndSeq`, and `SubtreeID`) to the current endpoint in the
   sorted registry.
@@ -321,7 +365,14 @@ workers waiting on the lock for more than a tenth of the time.
   impaired link is asked for again and, once `nack-max-retries` rounds are spent,
   booked unrecovered rather than repaired. BRC-126 lets a listener cancel on such
   an ACK; this one does not. An ACK that answers a tail probe also confirms the
-  loss: the probe becomes an ordinary gap, booked detected.
+  loss: the probe becomes an ordinary gap, booked detected. The exception is a
+  probe of a `SeqNum` the numbering a restart retired held: the cache may hold
+  that numbering's frame, so its ACK confirms nothing, and the frame that comes
+  back decides (this numbering's fills the probe, booked detected and repaired;
+  the retired one's answers it MISS). A later frame that proves the probe's
+  `SeqNum` lost, or an incomplete object that asks for it, also makes the probe
+  an ordinary gap, booked detected once: from then on a MISS escalates it like
+  any other gap instead of retiring it as an idle flow's.
 - **MISS**: endpoint index is advanced immediately (no backoff). The next sweep
   dispatch targets the next endpoint in the sorted registry snapshot. A MISS
   from the last endpoint counts as a failed round with backoff instead.
