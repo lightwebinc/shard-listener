@@ -64,23 +64,23 @@ func TestBuildSSMSources_BlockBroadcastJoinsPublishers(t *testing.T) {
 	t.Cleanup(cancel)
 	cfg := ssmTestConfig()
 
-	gs, _, manifestSrcs, _, err := buildSSMSources(ctx, cfg, nil)
+	src, err := buildSSMSources(ctx, cfg, nil)
 	if err != nil {
 		t.Fatalf("buildSSMSources: %v", err)
 	}
 	publishers := addrs("2001:db8::10", "2001:db8::11")
 
-	if got := gs[groupAddr(t, cfg, shard.GroupBlockBroadcast)]; !slices.Equal(got, publishers) {
+	if got := src.groups[groupAddr(t, cfg, shard.GroupBlockBroadcast)]; !slices.Equal(got, publishers) {
 		t.Errorf("block broadcast (0xFFFE) sources = %v, want the publishers %v", got, publishers)
 	}
 	for idx := shard.GroupIdx(0); idx < shard.GroupIdx(cfg.NumGroups); idx++ {
-		if got := gs[groupAddr(t, cfg, idx)]; !slices.Equal(got, publishers) {
+		if got := src.groups[groupAddr(t, cfg, idx)]; !slices.Equal(got, publishers) {
 			t.Errorf("shard group %d sources = %v, want the publishers %v", idx, got, publishers)
 		}
 	}
 	// The announcer list keeps its one job: the beacon group's manifest port.
-	if want := addrs("2001:db8::50"); !slices.Equal(manifestSrcs, want) {
-		t.Errorf("manifest sources = %v, want %v", manifestSrcs, want)
+	if want := addrs("2001:db8::50"); !slices.Equal(src.manifest, want) {
+		t.Errorf("manifest sources = %v, want %v", src.manifest, want)
 	}
 }
 
@@ -93,11 +93,11 @@ func TestBuildSSMSources_BlockBroadcastIgnoresManifestList(t *testing.T) {
 	cfg := ssmTestConfig()
 	cfg.SSMPublishersStatic = nil
 
-	gs, _, _, _, err := buildSSMSources(ctx, cfg, nil)
+	src, err := buildSSMSources(ctx, cfg, nil)
 	if err != nil {
 		t.Fatalf("buildSSMSources: %v", err)
 	}
-	if got, ok := gs[groupAddr(t, cfg, shard.GroupBlockBroadcast)]; ok {
+	if got, ok := src.groups[groupAddr(t, cfg, shard.GroupBlockBroadcast)]; ok {
 		t.Errorf("block broadcast (0xFFFE) sources = %v, want none without -ssm-publishers-static", got)
 	}
 	if !strings.Contains(logs.String(), "no publisher sources") {
@@ -116,12 +116,12 @@ func TestBuildSSMSources_LocalSourceOnlyPublishers(t *testing.T) {
 	cfg.SSMPublishersStatic = []string{"2001:db8::10"}
 	cfg.LocalSource = "2001:db8::10"
 
-	gs, _, _, _, err := buildSSMSources(ctx, cfg, nil)
+	src, err := buildSSMSources(ctx, cfg, nil)
 	if err != nil {
 		t.Fatalf("buildSSMSources: %v", err)
 	}
 	for _, idx := range []shard.GroupIdx{shard.GroupBlockBroadcast, 0} {
-		if got, ok := gs[groupAddr(t, cfg, idx)]; ok {
+		if got, ok := src.groups[groupAddr(t, cfg, idx)]; ok {
 			t.Errorf("group %#x sources = %v, want none (own source only)", uint16(idx), got)
 		}
 	}
@@ -139,11 +139,64 @@ func TestBuildSSMSources_BlockBroadcastExcludesOwnSource(t *testing.T) {
 	cfg := ssmTestConfig()
 	cfg.LocalSource = "2001:db8::10"
 
-	gs, _, _, _, err := buildSSMSources(ctx, cfg, nil)
+	src, err := buildSSMSources(ctx, cfg, nil)
 	if err != nil {
 		t.Fatalf("buildSSMSources: %v", err)
 	}
-	if got, want := gs[groupAddr(t, cfg, shard.GroupBlockBroadcast)], addrs("2001:db8::11"); !slices.Equal(got, want) {
+	if got, want := src.groups[groupAddr(t, cfg, shard.GroupBlockBroadcast)], addrs("2001:db8::11"); !slices.Equal(got, want) {
 		t.Errorf("block broadcast (0xFFFE) sources = %v, want %v (own source excluded)", got, want)
+	}
+	// The same set feeds runtime auto-join (autoJoin).
+	if got, want := src.publishers, addrs("2001:db8::11"); !slices.Equal(got, want) {
+		t.Errorf("publishers = %v, want %v (own source excluded)", got, want)
+	}
+}
+
+// The proxies emit BRC-132 subtree data (0xFFFB) and BRC-127 subtree group
+// announcements (0xFFFC). With no subtree-announce list of its own, both join
+// the publisher set: left without sources they were joined (*,G), which
+// PIM-SSM does not route, so neither class ever arrived.
+func TestBuildSSMSources_SubtreeAnnounceDefaultsToPublishers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cfg := ssmTestConfig() // no -ssm-bootstrap-subtree-announce
+	cfg.LocalSource = "2001:db8::10"
+
+	src, err := buildSSMSources(ctx, cfg, nil)
+	if err != nil {
+		t.Fatalf("buildSSMSources: %v", err)
+	}
+	want := addrs("2001:db8::11") // the publishers, own source excluded
+	for _, idx := range []shard.GroupIdx{shard.GroupSubtreeDataAnnounce, shard.GroupSubtreeGroupAnnounce} {
+		if got := src.groups[groupAddr(t, cfg, idx)]; !slices.Equal(got, want) {
+			t.Errorf("group %#x sources = %v, want the publishers %v", uint16(idx), got, want)
+		}
+	}
+	// The BRC-127 announce listener joins 0xFFFC from this roster.
+	if !slices.Equal(src.subtreeAnnounce, want) {
+		t.Errorf("subtree-announce roster = %v, want the publishers %v", src.subtreeAnnounce, want)
+	}
+}
+
+// An explicit subtree-announce list stays authoritative: it names every
+// emitter, and the publisher set is not mixed in.
+func TestBuildSSMSources_SubtreeAnnounceExplicitList(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cfg := ssmTestConfig()
+	cfg.SSMBootstrapSubtreeAnn = []string{"2001:db8::60"}
+
+	src, err := buildSSMSources(ctx, cfg, nil)
+	if err != nil {
+		t.Fatalf("buildSSMSources: %v", err)
+	}
+	want := addrs("2001:db8::60")
+	for _, idx := range []shard.GroupIdx{shard.GroupSubtreeDataAnnounce, shard.GroupSubtreeGroupAnnounce} {
+		if got := src.groups[groupAddr(t, cfg, idx)]; !slices.Equal(got, want) {
+			t.Errorf("group %#x sources = %v, want the explicit list %v", uint16(idx), got, want)
+		}
+	}
+	if !slices.Equal(src.subtreeAnnounce, want) {
+		t.Errorf("subtree-announce roster = %v, want %v", src.subtreeAnnounce, want)
 	}
 }

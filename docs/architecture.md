@@ -88,10 +88,10 @@ Source lists per group come from two places:
 
 | Group                          | Source set                                                                                    |
 | ------------------------------ | --------------------------------------------------------------------------------------------- |
-| Data groups (`FF35::B:idx`), BEEF band, BlockBroadcast (`:FFFE`) | `-ssm-publishers-static`: the proxies' `-bind-source` addresses (the proxy emits all three) |
+| Data groups (`FF35::B:idx`, startup and auto-join), BEEF band, BlockBroadcast (`:FFFE`) | `-ssm-publishers-static`: the proxies' `-bind-source` addresses (the proxy emits all three) |
 | Beacon (`:FFFD`)               | `-ssm-bootstrap-beacon`: the retry-endpoint pod IPs (retry-endpoint emits NACK ADVERTs)       |
 | Manifest port of the beacon group | `-ssm-bootstrap-manifest`: the shard-manifest pod IPs                                      |
-| Subtree data, subtree group announce (`:FFFB`, `:FFFC`) | `-ssm-bootstrap-subtree-announce`                                    |
+| Subtree data, subtree group announce (`:FFFB`, `:FFFC`) | `-ssm-bootstrap-subtree-announce`, which must name the proxies (they emit both); unset, the `-ssm-publishers-static` set |
 
 BlockBroadcast follows the publishers, not the manifest announcers: block
 announces, anchors and coinbase frames leave from the emitting proxy's own
@@ -400,6 +400,16 @@ same group**: shard-manifest announces on UDP 9001 while ADVERTs arrive on
 Under SSM each port joins its own source roster (`-ssm-bootstrap-beacon` for
 ADVERTs, `-ssm-bootstrap-manifest` for manifests) because the two are
 published by different hosts.
+
+UDP 9001 is also the default data port, so the manifest socket shares it with
+the data-plane workers (and the BRC-127 announce socket shares it too). Each
+control socket is its own socket per group address, bound to that address on
+the port rather than to the wildcard (`discovery/sharedport.go`), with the
+workers' `SO_REUSEPORT` and `SO_REUSEADDR`. It binds beside the workers in any
+order under either source mode, it matches only datagrams sent to its own
+group, and it is in no reuseport group with the workers (that needs the
+identical bound address), so unicast to the port always reaches a worker and
+the data plane's multicast never reaches the control socket.
 
 Endpoints are evicted automatically after 3 × BeaconInterval without a refresh.
 The NACK tracker holds a snapshot of the registry at dispatch time, so evictions
@@ -774,11 +784,13 @@ on stdout for log aggregation; `-log-level` is runtime-togglable via
 `host.inventory` event (OS/CPU/mem/NIC incl. IPv4+IPv6, multicast sysctls) and
 a `bsl_host_info` gauge.
 
-**Category-8 OS/NIC logging:** the pilot-driven auto-join path in `main.go`
+**Category-8 OS/NIC logging:** the pilot-driven auto-join path (`autojoin.go`)
 classifies `AddGroup` failures: an `ENOBUFS` from exceeding `net.ipv6.mld_max_msf`
 (the kernel's per-socket source-filter cap, the canonical at-scale SSM join
 failure) is logged at Error with the errno and a remediation hint, distinct from
-generic join failures.
+generic join failures. A failed join is retried with backoff (2 s doubling to
+2 min, one log line per attempt) while a pilot still claims the group, so freed
+capacity restores the membership.
 
 **Tracing** is opt-in (`-trace-sampling > 0` + `-otlp-endpoint`) and reserved
 for control-plane flows. The listener installs the tracer provider but creates no

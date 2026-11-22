@@ -148,27 +148,19 @@ func (sl *SubtreeGroupAnnounceListener) listenGroup(ctx context.Context, grp *ne
 	}
 }
 
-// openAnnounceSocket creates a UDP6 socket with SO_REUSEPORT, binds to
-// [::]:port, and joins the specified multicast group. SO_REUSEPORT is
-// required so the announce listener coexists with the data worker, which
-// also binds the same port with SO_REUSEPORT.
+// openAnnounceSocket creates a UDP6 socket bound to the group address on its
+// port and joins the group. The announce port is the data port, so the socket
+// is made by bindGroupSocket: it binds beside the data-plane workers, the
+// beacon listener's manifest socket and a co-resident retry endpoint, and
+// receives only its own group's datagrams, never unicast meant for a worker.
 //
 // When sources is empty the join is ASM (IPV6_JOIN_GROUP); when
 // non-empty the join is SSM (one MCAST_JOIN_SOURCE_GROUP per source via
 // netjoin).
 func openAnnounceSocket(iface *net.Interface, grp *net.UDPAddr, sources []netip.Addr) (int, error) {
-	fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	fd, err := bindGroupSocket(iface, grp)
 	if err != nil {
-		return -1, fmt.Errorf("socket: %w", err)
-	}
-	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
-		_ = unix.Close(fd)
-		return -1, fmt.Errorf("SO_REUSEPORT: %w", err)
-	}
-	sa := &unix.SockaddrInet6{Port: grp.Port}
-	if err := unix.Bind(fd, sa); err != nil {
-		_ = unix.Close(fd)
-		return -1, fmt.Errorf("bind [::]::%d: %w", grp.Port, err)
+		return -1, err
 	}
 	ga, ok := netip.AddrFromSlice(grp.IP.To16())
 	if !ok {

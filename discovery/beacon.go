@@ -6,7 +6,10 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/lightwebinc/shard-common/frame"
 	"github.com/lightwebinc/shard-common/manifest"
@@ -21,13 +24,14 @@ import (
 //
 // When Sources is non-empty the beacon groups are joined as SSM (S,G)
 // against the supplied source list (typically the retry-endpoint pods'
-// IPv6 from -ssm-bootstrap-beacon). When Sources is empty the
-// listener uses the stdlib ASM path (net.ListenMulticastUDP).
+// IPv6 from -ssm-bootstrap-beacon). When Sources is empty they are joined
+// any-source (IPV6_JOIN_GROUP).
 //
-// Groups entries that share a UDP port share ONE socket, with a join per
-// address on it. Two wildcard binds on the same port collide, and the
-// BRC-126/129 transition config, the any-source FF0x beacon group and the
-// source-specific FF3x one, both on -beacon-port: is exactly such a pair.
+// Each Groups entry gets its own socket, bound to the group address on its
+// port (bindGroupSocket): the BRC-126/129 transition config, the any-source
+// FF0x beacon group and the source-specific FF3x one on -beacon-port, is two
+// sockets on one port. A socket bound to its group sees only that group's
+// datagrams, never unicast to the port.
 type BeaconListener struct {
 	Registry *Registry
 	Groups   []*net.UDPAddr    // beacon group addresses to join
@@ -59,11 +63,10 @@ func (bl *BeaconListener) Start(ctx context.Context) error {
 	// Start eviction goroutine
 	go bl.evictLoop(ctx)
 
-	buckets := bucketByPort(bl.Groups)
-	errCh := make(chan error, len(buckets))
-	for _, grps := range buckets {
+	errCh := make(chan error, len(bl.Groups))
+	for _, grp := range bl.Groups {
 		go func() {
-			errCh <- bl.listenGroup(ctx, grps)
+			errCh <- bl.listenGroup(ctx, grp)
 		}()
 	}
 
@@ -76,76 +79,34 @@ func (bl *BeaconListener) Start(ctx context.Context) error {
 	}
 }
 
-// bucketByPort groups the configured beacon addresses by UDP port,
-// preserving first-seen port order and the address order within a port.
-// One bucket becomes one socket: a second wildcard bind on a port already
-// held fails, so the FF0x/FF3x pair the BRC-126/129 transition puts on
-// -beacon-port has to be two joins on one socket, not two sockets.
-func bucketByPort(groups []*net.UDPAddr) [][]*net.UDPAddr {
-	idx := make(map[int]int, len(groups))
-	buckets := make([][]*net.UDPAddr, 0, len(groups))
-	for _, grp := range groups {
-		i, seen := idx[grp.Port]
-		if !seen {
-			i = len(buckets)
-			idx[grp.Port] = i
-			buckets = append(buckets, nil)
-		}
-		buckets[i] = append(buckets[i], grp)
+// openGroupConn opens the socket for one beacon group: bound to the group
+// address on its port (bindGroupSocket, which shares the port with the
+// data-plane workers when it is theirs), then joined, any-source under ASM,
+// one MCAST_JOIN_SOURCE_GROUP per source under SSM (netjoin).
+func (bl *BeaconListener) openGroupConn(grp *net.UDPAddr) (*net.UDPConn, error) {
+	ga, ok := netip.AddrFromSlice(grp.IP.To16())
+	if !ok {
+		return nil, fmt.Errorf("beacon listen: bad group address %s", grp.IP)
 	}
-	return buckets
-}
-
-// openGroupConn opens one UDP6 listener on the bucket's shared port and
-// joins every address in it. A single ASM address keeps the stdlib path
-// (net.ListenMulticastUDP: bind + IPV6_JOIN_GROUP, byte-for-byte what
-// earlier releases did). Everything else, any SSM roster, or more than
-// one address on the port, which is what -control-group-compat=both
-// produces: binds the wildcard once and adds each membership via netjoin
-// (MCAST_JOIN_SOURCE_GROUP per source under SSM, IPV6_JOIN_GROUP under
-// ASM).
-func (bl *BeaconListener) openGroupConn(grps []*net.UDPAddr) (*net.UDPConn, error) {
-	if len(grps) == 0 {
-		return nil, fmt.Errorf("beacon listen: empty group bucket")
-	}
-	port := grps[0].Port
-	srcs := bl.sourcesFor(grps[0])
-	if len(srcs) == 0 && len(grps) == 1 {
-		return net.ListenMulticastUDP("udp6", bl.Iface, grps[0])
-	}
-	// Bind the wildcard on the shared port (so we receive datagrams sent
-	// to any joined group address) and add the memberships explicitly.
-	pc, err := net.ListenPacket("udp6", fmt.Sprintf("[::]:%d", port))
+	srcs := bl.sourcesFor(grp)
+	fd, err := bindGroupSocket(bl.Iface, grp)
 	if err != nil {
-		return nil, fmt.Errorf("beacon listen %d: %w", port, err)
+		return nil, fmt.Errorf("beacon listen: %w", err)
+	}
+	if err := netjoin.Join(fd, bl.Iface.Index, ga, srcs); err != nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("beacon join %s (%d sources): %w", grp.IP, len(srcs), err)
+	}
+	f := os.NewFile(uintptr(fd), "beacon")
+	pc, err := net.FilePacketConn(f) // dups the socket; its memberships stay with it
+	_ = f.Close()
+	if err != nil {
+		return nil, fmt.Errorf("beacon listen: %w", err)
 	}
 	uc, ok := pc.(*net.UDPConn)
 	if !ok {
 		_ = pc.Close()
 		return nil, fmt.Errorf("beacon listen: unexpected conn type %T", pc)
-	}
-	raw, err := uc.SyscallConn()
-	if err != nil {
-		_ = uc.Close()
-		return nil, fmt.Errorf("beacon listen: SyscallConn: %w", err)
-	}
-	for _, grp := range grps {
-		ga, ok := netip.AddrFromSlice(grp.IP.To16())
-		if !ok {
-			_ = uc.Close()
-			return nil, fmt.Errorf("beacon listen: bad group address %s", grp.IP)
-		}
-		var joinErr error
-		if cerr := raw.Control(func(fd uintptr) {
-			joinErr = netjoin.Join(int(fd), bl.Iface.Index, ga, srcs)
-		}); cerr != nil {
-			_ = uc.Close()
-			return nil, fmt.Errorf("beacon listen: Control: %w", cerr)
-		}
-		if joinErr != nil {
-			_ = uc.Close()
-			return nil, fmt.Errorf("beacon join %s (%d sources): %w", grp.IP, len(srcs), joinErr)
-		}
 	}
 	return uc, nil
 }
@@ -160,18 +121,13 @@ func (bl *BeaconListener) sourcesFor(grp *net.UDPAddr) []netip.Addr {
 	return bl.Sources
 }
 
-// listenGroup services one socket: the bucket of beacon addresses that
-// share a UDP port. grp is the bucket's first address and is used only to
-// label logs, a datagram arriving on a socket joined to both the FF0x and
-// FF3x forms of the same group cannot be attributed to one of them without
-// IPV6_RECVPKTINFO, and nothing downstream needs that attribution.
-func (bl *BeaconListener) listenGroup(ctx context.Context, grps []*net.UDPAddr) error {
-	conn, err := bl.openGroupConn(grps)
+// listenGroup services the socket of one beacon group address.
+func (bl *BeaconListener) listenGroup(ctx context.Context, grp *net.UDPAddr) error {
+	conn, err := bl.openGroupConn(grp)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	grp := grps[0]
 
 	// Set a read buffer size
 	_ = conn.SetReadBuffer(1 << 16) // 64 KiB

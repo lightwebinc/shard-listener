@@ -96,14 +96,24 @@ CSV of source IPs that emit subtree-announce frames. Used as the SSM
 source set for both `GroupSubtreeDataAnnounce` (0xFFFB) and
 `GroupSubtreeGroupAnnounce` (0xFFFC).
 
+The proxy emits both groups' traffic itself (BRC-132 subtree data and BRC-127
+subtree group announcements, from its own `-bind-source`), so this list must
+name the proxies, plus any other host that announces. Left unset, it
+defaults to the `-ssm-publishers-static` set, which covers the proxies; set
+it only when other hosts announce too, and then list the proxies as well. An
+explicit list is used as given and never merged with the publisher set.
+
 ### `-ssm-publishers-static` / `SSM_PUBLISHERS_STATIC` (default: `""`)
 
 **Lab / CI escape hatch.** Pre-declared publisher source list (the
 proxies' `-bind-source` addresses), applied to every group the proxies emit
-to: every shard group, the BEEF plane groups the listener joins, and
-`GroupBlockBroadcast` (0xFFFE). Block announces, anchors and coinbase frames
-all leave from the emitting proxy's own source (BRC-129, BRC-133), so block
-broadcast shares the data plane's source set. Manifest-driven discovery is
+to: every shard group (including the groups `-shard-include-from-manifest`
+joins at runtime), the BEEF plane groups the listener joins,
+`GroupBlockBroadcast` (0xFFFE), and the subtree groups (0xFFFB, 0xFFFC) when
+`-ssm-bootstrap-subtree-announce` is unset. Block announces, anchors and
+coinbase frames all leave from the emitting proxy's own source (BRC-129,
+BRC-133), so block broadcast shares the data plane's source set, and so do
+the subtree groups the proxy emits. Manifest-driven discovery is
 the production design; the stock binary does not apply the
 manifest-announced source set to its joins (see
 [architecture: SSM mode](architecture.md#ssm-rfc-4607-mode)), so this list
@@ -702,8 +712,8 @@ prefix, so the flag does nothing in an ASM deployment.
 anywhere. The symptom is that ADVERTs and manifests simply never arrive, the
 endpoint registry stays empty and the manifest consumer never reaches pilot
 quorum. A listener that joins both forms hears every sender whichever form it
-uses. Entries that share a UDP port share one socket, so `both` costs an extra
-membership per port, not an extra socket.
+uses. Each form is its own socket, bound to its group address, so `both` costs
+one extra socket and membership per port.
 
 **Rollout order.** The senders are `retry-endpoint` (ADVERT) and
 `shard-manifest` (manifest); the other receiver is `shard-proxy`:
@@ -758,8 +768,16 @@ group; set it to the announcers' `-port`, and mirror the proxy's
 `-manifest-beacon-port`, or no manifest is ever seen and quorum is never
 reached however many announcers run.
 
-Setting it equal to `-beacon-port` is supported and opens a single socket:
-the receive loop demuxes ADVERT from manifest on the MsgType byte.
+Setting it equal to `-beacon-port` is supported: the same sockets then carry
+both, and the receive loop demuxes ADVERT from manifest on the MsgType byte.
+
+The default equals the default `-listen-port` (9001), so the manifest socket
+shares its port with the data-plane workers, and with the BRC-127 announce
+socket when `-subtree-groups` is set. Each control socket binds its own group
+address on the port, not the wildcard, with the workers' `SO_REUSEPORT` and
+`SO_REUSEADDR`: the sockets bind in any order under both source modes, a
+control socket receives only datagrams sent to its own group, and unicast to
+the port is never handed to a control socket.
 
 Under `-source-mode ssm` this port joins the sources from
 `-ssm-bootstrap-manifest` (the announcers), while `-beacon-port` keeps the
@@ -795,8 +813,29 @@ When set, the listener's effective subscription =
 `union(-shard-include, pilot_groups)`, where `pilot_groups` is the
 union of `Flags.GroupsValid` payloads from the authoritative
 `Flags.PilotOnly=1` manifests currently within their TTL (the union is
-not quorum-gated). Pilot-added groups are leaved when no pilot still
-claims them; static `-shard-include` entries are NEVER leaved.
+not quorum-gated). Pilot-added groups are left when no pilot still
+claims them; a group the startup configuration joined (a `-shard-include`
+entry, or any shard when `-shard-include` is empty, which joins them all) is
+NEVER left, whatever a pilot claimed. Under
+`-source-mode ssm` a pilot-added group is `(S,G)`-joined on the same
+publisher set as the startup data-plane groups (`-ssm-publishers-static`,
+without `-local-source`), and left on it; with no publisher set it is joined
+without a source filter, like them.
+
+The shard filter follows the subscription: with a `-shard-include` list, a
+pilot-added shard's transactions are admitted while a pilot claims it and
+dropped (`shard_filter`) again once none does, the `-shard-include` shards are
+admitted throughout, and the subtree rules (`-subtree-include`,
+`-subtree-exclude`, `-subtree-groups`) apply to pilot shards as to the rest.
+Without `-shard-include` every shard is admitted already.
+
+A pilot-group join or leave that fails, for example a join refused with
+`ENOBUFS` when the socket's source-filter capacity (`net.ipv6.mld_max_msf`) is
+exhausted, changes nothing (a multi-source join rolls back the sources it had
+joined, and a leave that fails part-way joins the sources it had left again)
+and is retried on its own, after 2 s and then at doubling intervals up
+to 2 minutes, one log line per attempt, until it succeeds or no pilot claims
+the group any more. Freeing capacity therefore restores the membership.
 
 ### `-live-resharding` / `LIVE_RESHARDING` (default: `false`)
 
