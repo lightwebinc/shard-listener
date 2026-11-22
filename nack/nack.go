@@ -920,10 +920,14 @@ func (t *Tracker) registerGaps(fs *flowState, hashKey uint64, groupIdx uint32, s
 		if e, exists := fs.pending[m]; exists {
 			// A tail probe a later frame has now proved lost: an ordinary gap
 			// from here on, booked detected once, as confirmProbe would. A
-			// MISS then escalates and a retired frame leaves it pending.
+			// MISS then escalates and a retired frame leaves it pending. It is
+			// booked under the source the probe was opened for (e.source), as
+			// its fill or abandonment will be, not the frame that proved it.
 			if e.speculative {
 				e.speculative = false
-				detected++
+				if t.rec != nil {
+					t.rec.GapDetected(fs.flowType, srcStr(e.source))
+				}
 			}
 			continue
 		}
@@ -1098,11 +1102,11 @@ func (t *Tracker) RequestGapsFrom(owner int, hashKey uint64, groupIdx uint32, su
 	for _, seq := range seqs {
 		if p, exists := fs.pending[seq]; exists {
 			// A tail probe this proves lost: an ordinary gap from here on,
-			// booked detected once (see registerGaps).
+			// booked detected once, under its own source (see registerGaps).
 			if p.speculative {
 				p.speculative = false
 				if t.rec != nil {
-					t.rec.GapDetected(fs.flowType, srcStr(fs.source))
+					t.rec.GapDetected(fs.flowType, srcStr(p.source))
 				}
 			}
 			continue

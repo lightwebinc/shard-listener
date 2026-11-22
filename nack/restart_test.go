@@ -688,6 +688,35 @@ func TestProvedProbeMissEscalates(t *testing.T) {
 	}
 }
 
+// A probe proved lost by another source's frame is booked detected under the
+// source it was opened for, as its fill is, not under the frame that proved
+// it: the per-source detected and suppressed counters stay in step.
+func TestProvedProbeDetectedUnderItsSource(t *testing.T) {
+	rec := newRecorder(t)
+	cache := newProbeCache(t, nack.MsgTypeACK, false) // holds the probe unanswered
+	tr := probeTracker(t, cache, rec, 0)
+	settleIDs(tr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+	cache.waitAsked(t, 151) // the tail probe for 151, opened for the emitter
+
+	other := net.ParseIP("2001:db8::11")
+	tr.Observe(0, [32]byte{}, flowA, 152, frameID(1, 152), other)     // 152 proves 151 lost
+	tr.Observe(0, [32]byte{}, flowA, 151, frameID(1, 151), retryNode) // and its repair fills it
+
+	out := promText(t, rec)
+	if v := counter(out, "bsl_gaps_detected_total", `source="2001:db8::10"`); v != 1 {
+		t.Errorf("151 detected under the emitter = %v, want 1", v)
+	}
+	if v := counter(out, "bsl_gaps_detected_total", `source="2001:db8::11"`); v != 0 {
+		t.Errorf("151 detected under the source of 152 = %v, want 0", v)
+	}
+	if v := counter(out, "bsl_gaps_suppressed_total", `source="2001:db8::10"`); v != 1 {
+		t.Errorf("151 filled under the emitter = %v, want 1", v)
+	}
+}
+
 // A proved probe that a cache answers with a unicast-only ACK, on a listener
 // that cannot re-inject, is a real loss with no way back: it is booked
 // unrecovered, not retired silently as an unanswered probe would be.
