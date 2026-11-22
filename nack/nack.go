@@ -682,27 +682,34 @@ func (t *Tracker) ObserveFrom(owner int, groupIdx uint32, subtreeID [32]byte, ha
 	// a recovered frame re-injected with no source, fills or repeats the flow's
 	// past and keeps the emitter (see noteReplay).
 
-	// A frame for a gap already given up on: the hole closed after all. Book
-	// it so unrecovered minus late-filled reads as real loss. It is a
-	// retransmit, so step 4 never reads it as a restart.
-	late := t.noteLateFill(fs, seqNum)
-
 	// A frame of the numbering the last restart retired is a retransmit, for
 	// a gap from before the restart, wherever it lands. It must not count for
-	// this numbering at all: no fill, no advance, no gaps, no identity
-	// recorded. Filling or advancing would leave this numbering's own frame at
-	// that SeqNum to arrive as a duplicate and go unrecorded, so a later
-	// retransmit of it would find nothing to compare with and fall back to the
-	// emitter's address. Its gap, if one is pending, stays pending for this
-	// numbering's frame; a unicast return of the retired frame for it is
-	// marked so the NACK exchange escalates instead of closing the gap.
+	// this numbering at all: no fill, no late fill, no advance, no gaps, no
+	// identity recorded. Filling or advancing would leave this numbering's own
+	// frame at that SeqNum to arrive as a duplicate and go unrecorded, so a
+	// later retransmit of it would find nothing to compare with and fall back
+	// to the emitter's address. A gap pending there stays pending for this
+	// numbering's frame, and a unicast return of the retired frame for it is
+	// marked so the NACK exchange escalates instead of closing the gap. A tail
+	// probe it answers learns nothing about this numbering: a MISS.
 	if fs.retiredReplay(seqNum, txid) {
-		if e, found := fs.pending[seqNum]; found && source == nil {
-			e.retiredReturn = true
+		if e, found := fs.pending[seqNum]; found {
+			switch {
+			case e.speculative:
+				t.delPending(fs, seqNum)
+				t.missProbe(fs, seqNum)
+			case source == nil:
+				e.retiredReturn = true
+			}
 		}
 		fs.noteReplay(source)
 		return
 	}
+
+	// A frame for a gap already given up on: the hole closed after all. Book
+	// it so unrecovered minus late-filled reads as real loss. It is a
+	// retransmit, so step 4 never reads it as a restart.
+	late := t.noteLateFill(fs, seqNum)
 
 	// Step 3: auto-fill, close any pending gap whose seqNum matches.
 	filled := false
@@ -986,22 +993,32 @@ func (t *Tracker) bookFill(fs *flowState, e *gapEntry) {
 // from here on a MISS escalates, an exhausted budget books it unrecovered and
 // a fill books it repaired, exactly as for a gap a successor frame exposed.
 // A no-op for an entry that is not a pending probe. Must NOT be called with
-// t.mu held.
-func (t *Tracker) confirmProbe(e *gapEntry) {
+// t.mu held. It reports whether the probe was confirmed.
+//
+// After a restart, a probe of a SeqNum the retired numbering held is not
+// confirmed: the cache may hold that numbering's frame, so its ACK says
+// nothing about this one. The frame that comes back decides: this
+// numbering's fills the probe (booked detected and repaired then), the
+// retired one's answers it MISS (see ObserveFrom).
+func (t *Tracker) confirmProbe(e *gapEntry) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	fs, ok := t.flows[e.hashKey]
 	if !ok {
-		return
+		return false
 	}
 	pend, ok := fs.pending[e.seqNum]
 	if !ok || !pend.speculative {
-		return
+		return false
+	}
+	if _, retired := fs.retired.get(e.seqNum); retired {
+		return false
 	}
 	pend.speculative = false
 	if t.rec != nil {
 		t.rec.GapDetected(fs.flowType, srcStr(fs.source))
 	}
+	return true
 }
 
 // RequestGaps registers explicit missing SeqNums on a flow and dispatches NACKs
@@ -1372,7 +1389,13 @@ func (t *Tracker) probeMissed(e *gapEntry) {
 		return
 	}
 	t.delPending(fs, e.seqNum)
-	if fs.probing == e.seqNum {
+	t.missProbe(fs, e.seqNum)
+}
+
+// missProbe books a probe of seq as answered MISS, once its pending entry is
+// gone. Caller holds t.mu.
+func (t *Tracker) missProbe(fs *flowState, seq uint64) {
+	if fs.probing == seq {
 		fs.probing = 0
 	}
 	fs.probeMisses++
@@ -1558,9 +1581,9 @@ func (t *Tracker) sendNACK(e *gapEntry) {
 			switch resp.MsgType {
 			case MsgTypeACK:
 				// Whatever its flags, an ACK says a cache holds the frame, so
-				// a tail probe it answers found a real loss.
-				if e.speculative {
-					t.confirmProbe(e)
+				// a tail probe it answers found a real loss (unless the frame
+				// may be the retired numbering's: see confirmProbe).
+				if e.speculative && t.confirmProbe(e) {
 					e.speculative = false
 				}
 				// An ACK says a retransmit was dispatched, not that it arrived

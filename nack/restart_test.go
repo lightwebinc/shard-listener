@@ -387,6 +387,107 @@ func TestRetiredUnicastReturnDoesNotCloseGap(t *testing.T) {
 	}
 }
 
+// After a restart, this numbering's 3 is given up on (here for capacity) while
+// the flow stays active. The retired numbering's 3 arriving then is not this
+// numbering's late fill: it must leave the abandonment record alone, and book
+// nothing. This numbering's own 3, arriving late, still books the late fill.
+func TestRetiredFrameIsNotCurrentLateFill(t *testing.T) {
+	rec := newRecorder(t)
+	tr := nack.New(nack.TrackerConfig{GapTTL: 10 * time.Second, MaxPendingPerFlow: 1}, nil, nil, rec, nil)
+	failover := net.ParseIP("2001:db8::11")
+	emitIDs(tr, flowEmitter, 150)
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), failover) // a fresh counter: restart
+	tr.Observe(0, [32]byte{}, flowA, 4, frameID(2, 4), failover) // 2 pending, 3 abandoned for capacity
+	if g := tr.PendingGaps(); g != 1 {
+		t.Fatalf("setup: PendingGaps = %d, want 1 (2)", g)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 3, frameID(1, 3), retryNode) // the retired numbering's 3
+	if v := counter(promText(t, rec), "bsl_gaps_late_filled_total"); v != 0 {
+		t.Errorf("after the retired numbering's 3: late fills = %v, want 0 (this numbering's 3 is still missing)", v)
+	}
+
+	tr.Observe(0, [32]byte{}, flowA, 3, frameID(2, 3), retryNode) // this numbering's 3, late
+	if v := counter(promText(t, rec), "bsl_gaps_late_filled_total"); v != 1 {
+		t.Errorf("after this numbering's 3: late fills = %v, want 1", v)
+	}
+	if g := tr.PendingGaps(); g != 1 {
+		t.Errorf("PendingGaps = %d, want 1 (2)", g)
+	}
+}
+
+// A tail probe after a restart can be answered with the retired numbering's
+// frame: the cache still holds it at that SeqNum. Here the cache ACKs first,
+// then returns the frame. The ACK says nothing about this numbering, so the
+// probe must not be confirmed, and the retired frame answers it MISS: nothing
+// is booked detected or unrecovered for a SeqNum this numbering never sent.
+func TestRetiredReturnAnswersProbeMiss(t *testing.T) {
+	mockConn, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("UDP loopback unavailable: %v", err)
+	}
+	defer func() { _ = mockConn.Close() }()
+	asked := make(chan struct{}, 64)
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			_, src, err := mockConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			var resp [nack.ResponseSize]byte // the ACK first, then the frame
+			nack.EncodeResponse(&nack.Response{MsgType: nack.MsgTypeACK, Flags: 0x02, SeqNum: 2}, resp[:])
+			_, _ = mockConn.WriteTo(resp[:], src)
+			_, _ = mockConn.WriteTo(dataFrame(), src)
+			select {
+			case asked <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
+	rec := newRecorder(t)
+	cfg := nack.TrackerConfig{
+		JitterMax: time.Millisecond, BackoffBase: 20 * time.Millisecond, BackoffMax: 50 * time.Millisecond,
+		MaxRetries: 2, GapTTL: 2 * time.Second,
+		TailProbe: true, TailProbeMinIdle: 50 * time.Millisecond, TailProbeMaxMisses: 1,
+	}
+	tr := nack.New(cfg, []string{mockConn.LocalAddr().String()}, nil, rec, nil)
+	tr.SetRecoverFunc(func([]byte) bool {
+		// What the worker does with the return: re-inject it, here the
+		// retired numbering's 2, through the pipeline (no datagram source).
+		tr.Observe(0, [32]byte{}, flowA, 2, frameID(1, 2), nil)
+		return true
+	})
+	failover := net.ParseIP("2001:db8::11")
+	for s := uint64(1); s <= 150; s++ { // a settled rate, for the probe
+		tr.Observe(0, [32]byte{}, flowA, s, frameID(1, s), flowEmitter)
+		time.Sleep(100 * time.Microsecond)
+	}
+	tr.Observe(0, [32]byte{}, flowA, 1, frameID(2, 1), failover) // restart, then quiet
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr.Start(ctx)
+
+	select {
+	case <-asked:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no tail probe for 2 was sent")
+	}
+	time.Sleep(time.Second) // the probe's retries and its eviction, if it was confirmed
+
+	out := promText(t, rec)
+	if v := counter(out, "bsl_gaps_detected_total"); v != 0 {
+		t.Errorf("gaps detected = %v, want 0 (the retired numbering's ACK confirmed the probe)", v)
+	}
+	if v := counter(out, "bsl_gaps_unrecovered_total"); v != 0 {
+		t.Errorf("gaps unrecovered = %v, want 0 (a SeqNum this numbering never sent)", v)
+	}
+	if v := counter(out, "bsl_tail_probes_miss_total"); v < 1 {
+		t.Errorf("tail probe misses = %v, want at least 1 (the retired frame answers MISS)", v)
+	}
+}
+
 // A late fill is a replay, not an advance: one that lands beyond the baseline
 // (here a gap the restart abandoned; a confirmed tail probe that was given up
 // on is another) must not count toward a candidate emitter, or it can promote

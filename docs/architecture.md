@@ -262,12 +262,12 @@ without the observing worker's id):
   - A frame the current set holds at its `SeqNum` is the current numbering's
     (a duplicate). Otherwise a frame equal to the **retired** numbering's
     frame at its `SeqNum` is a retransmit of a frame from before the restart,
-    wherever it lands: it does not fill a gap, advance the flow, register gaps
-    or join the current set. A gap pending at that `SeqNum` waits for the
-    current numbering's frame; when a cache returns the retired frame for it
-    on the unicast NACK channel, the exchange moves to the next cache, as on a
-    MISS. The refused frame is still delivered: the tracker only keeps the
-    books. A new frame whose fingerprint collides with the retired one (1 in
+    wherever it lands: it does not fill a gap, book a late fill, advance the
+    flow, register gaps or join the current set. A gap pending at that
+    `SeqNum` waits for the current numbering's frame; when a cache returns the
+    retired frame for it on the unicast NACK channel, the exchange moves to
+    the next cache, as on a MISS. A tail probe it answers is answered MISS.
+    The refused frame is still delivered: the tracker only keeps the books. A new frame whose fingerprint collides with the retired one (1 in
     65,536 per early frame) is refused the same way, and its `SeqNum` is
     booked unrecovered although the frame was delivered.
   - A frame off the wire with `SeqNum <= 100` on a flow already past 100 is
@@ -355,7 +355,11 @@ workers waiting on the lock for more than a tenth of the time.
   impaired link is asked for again and, once `nack-max-retries` rounds are spent,
   booked unrecovered rather than repaired. BRC-126 lets a listener cancel on such
   an ACK; this one does not. An ACK that answers a tail probe also confirms the
-  loss: the probe becomes an ordinary gap, booked detected.
+  loss: the probe becomes an ordinary gap, booked detected. The exception is a
+  probe of a `SeqNum` the numbering a restart retired held: the cache may hold
+  that numbering's frame, so its ACK confirms nothing, and the frame that comes
+  back decides (this numbering's fills the probe, booked detected and repaired;
+  the retired one's answers it MISS).
 - **MISS**: endpoint index is advanced immediately (no backoff). The next sweep
   dispatch targets the next endpoint in the sorted registry snapshot. A MISS
   from the last endpoint counts as a failed round with backoff instead.
