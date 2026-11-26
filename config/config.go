@@ -129,6 +129,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"runtime"
 	"strconv"
@@ -189,8 +190,9 @@ type Config struct {
 	DeliveryAddrs  []string
 	EgressProto    string // "udp" or "tcp"
 	StripHeader    bool
-	RetryEndpoints []string // host:port list for NACK dispatch
-	RetryTee       string   // co-resident retry-endpoint tee-ingest host:port ("" = off)
+	RetryEndpoints []string     // host:port list for NACK dispatch
+	RetryTee       string       // co-resident retry-endpoint tee-ingest host:port ("" = off)
+	RetryTeeSkip   []netip.Addr // sources the retry tee does not mirror (-retry-tee-skip-source)
 
 	// Reference lane (-lane-*): one TCP host:port per object class, each
 	// delivered header-stripped to a single bridge. Any one set replaces the
@@ -498,6 +500,8 @@ func Load() (*Config, error) {
 		"comma-separated host:port of multicast-retry caching nodes")
 	flag.StringVar(&c.RetryTee, "retry-tee", envStr("RETRY_TEE", ""),
 		"host:port of a co-resident retry-endpoint's tee ingest (its -tee-listen, e.g. [::1]:9002): mirror every received data frame there over loopback, wrapped in a teewire envelope that preserves the original fabric source, so the cache learns frames this node did NOT originate without a multicast join of its own (the proxy's -retry-tee covers own-origin frames); empty = off")
+	retryTeeSkipFlag := flag.String("retry-tee-skip-source", envStr("RETRY_TEE_SKIP_SOURCE", ""),
+		"comma-separated source addresses whose frames -retry-tee does not mirror: on a collapsed edge the node's own source, whose frames the proxy beside this listener already mirrors to the same retry-endpoint (its -retry-tee); empty = mirror every source")
 	flag.DurationVar(&c.NACKJitterMax, "nack-jitter-max", envDuration("NACK_JITTER_MAX", 200*time.Millisecond),
 		"max random hold-off before NACK dispatch (NORM suppression window)")
 	flag.DurationVar(&c.NACKBackoffBase, "nack-backoff-base", envDuration("NACK_BACKOFF_BASE", 500*time.Millisecond),
@@ -929,6 +933,18 @@ func Load() (*Config, error) {
 		if ep != "" {
 			c.RetryEndpoints = append(c.RetryEndpoints, ep)
 		}
+	}
+
+	// Parse the retry tee's skipped sources.
+	for _, a := range splitComma(*retryTeeSkipFlag) {
+		if a == "" {
+			continue
+		}
+		ip, err := netip.ParseAddr(a)
+		if err != nil {
+			return nil, fmt.Errorf("retry-tee-skip-source %q: %w", a, err)
+		}
+		c.RetryTeeSkip = append(c.RetryTeeSkip, ip)
 	}
 
 	// Parse shard include list.

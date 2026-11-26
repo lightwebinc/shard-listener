@@ -629,6 +629,7 @@ func run() error {
 			if err := w.SetRetryTee(cfg.RetryTee); err != nil {
 				return fmt.Errorf("worker %d: %w", i, err)
 			}
+			w.SetRetryTeeSkip(cfg.RetryTeeSkip)
 		}
 		if !delivery && cfg.RequireBlockPoW {
 			w.SetBlockPoW(true, cfg.MinPoWBits)

@@ -108,6 +108,7 @@ type Worker struct {
 	verifyPayloadHash bool
 	senderACL         *filter.SenderACL  // nil = accept every source
 	retryTee          *retryTeeSender    // nil = receive-side retry tee disabled
+	retryTeeSkip      []netip.Addr       // sources the retry tee does not mirror (SetRetryTeeSkip)
 	dedupSet          *dedup.Set         // nil = dedup disabled
 	txDedup           *txdedup.Store     // nil = cross-listener TxID dedup disabled
 	reassemBuf        *reassembly.Buffer // nil = BRC-130 disabled

@@ -448,6 +448,16 @@ receive path copies the frame and never waits on the send, and a tee that
 falls behind drops frames, counted in `bsl_retry_tee_dropped_total`.
 Mirrored frames are counted in `bsl_retry_tee_frames_total`.
 
+### `-retry-tee-skip-source` / `RETRY_TEE_SKIP_SOURCE` (default: empty = mirror every source)
+
+Comma-separated source addresses whose frames `-retry-tee` does not mirror.
+On a collapsed edge whose proxy sends with the multicast loop on, the
+listener receives the node's own frames again, and the proxy's `-retry-tee`
+has already given the same retry-endpoint each of them as it sent it; set
+this to the node's own source so the endpoint takes one copy, not two. Name
+a source only when its frames reach the endpoint by another tee: a skipped
+frame is in no cache otherwise.
+
 ### `-nack-jitter-max` / `NACK_JITTER_MAX` (default: `200ms`)
 
 Maximum random hold-off before the first NACK is dispatched (NORM suppression
