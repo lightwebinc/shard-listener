@@ -302,5 +302,26 @@ func (w *Worker) teeToRetry(raw []byte, from unix.Sockaddr) {
 	if !ok || !teeEligible(raw) {
 		return
 	}
-	w.retryTee.mirror(netip.AddrPortFrom(netip.AddrFrom16(sa.Addr), uint16(sa.Port)), raw)
+	src := netip.AddrFrom16(sa.Addr)
+	for _, s := range w.retryTeeSkip {
+		if src == s {
+			return
+		}
+	}
+	w.retryTee.mirror(netip.AddrPortFrom(src, uint16(sa.Port)), raw)
+}
+
+// SetRetryTeeSkip names datagram sources the receive-side tee does not
+// mirror. On a collapsed edge that is the node's own source: the proxy beside
+// this listener mirrors each frame to the same retry-endpoint as it sends it
+// (its -retry-tee), and the frame reaches this listener again over the
+// multicast loop, so a second mirror only doubles the endpoint's intake.
+// Call after New and before Run; nil mirrors every source.
+func (w *Worker) SetRetryTeeSkip(srcs []netip.Addr) {
+	w.retryTeeSkip = nil
+	for _, s := range srcs {
+		// The receive path sees every source as 16 bytes (an IPv4 source
+		// v4-mapped), so compare in that form.
+		w.retryTeeSkip = append(w.retryTeeSkip, netip.AddrFrom16(s.As16()))
+	}
 }

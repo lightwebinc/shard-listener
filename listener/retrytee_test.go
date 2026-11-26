@@ -497,3 +497,34 @@ func TestRetryTee_BurstKeepsOrder(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 }
+
+// TestRetryTee_SkipsNamedSources: a frame from a source named in
+// SetRetryTeeSkip (the node's own, on a collapsed edge) is not mirrored, a
+// frame from any other source is, and an IPv4 skip matches its v4-mapped form.
+func TestRetryTee_SkipsNamedSources(t *testing.T) {
+	teeAddr, teeCh, teeCleanup := newTeeSinkDepth(t, 16)
+	defer teeCleanup()
+	tee := newRetryTeeSender(dialTee(t, teeAddr), nil, 0, slog.Default(), 16)
+	w := &Worker{retryTee: tee}
+	w.SetRetryTeeSkip([]netip.Addr{netip.MustParseAddr("::1"), netip.MustParseAddr("192.0.2.7")})
+	tee.start()
+	defer func() { _ = tee.close() }()
+
+	own := teeSource(4321) // ::1
+	v4 := &unix.SockaddrInet6{Port: 4322}
+	copy(v4.Addr[:], netip.MustParseAddr("::ffff:192.0.2.7").AsSlice())
+	other := &unix.SockaddrInet6{Port: 4323}
+	copy(other.Addr[:], netip.MustParseAddr("2001:db8::9").AsSlice())
+
+	w.teeToRetry(buildSequencedFrame(t, sha256d([]byte("own")), []byte("own"), 1), own)
+	w.teeToRetry(buildSequencedFrame(t, sha256d([]byte("v4")), []byte("v4"), 2), v4)
+	w.teeToRetry(buildSequencedFrame(t, sha256d([]byte("other")), []byte("other"), 3), other)
+	seq, port := decapSeq(t, waitTee(t, teeCh))
+	if seq != 3 || port != 4323 {
+		t.Fatalf("first mirrored frame is SeqNum %d from port %d, want 3 from 4323: a skipped source was mirrored", seq, port)
+	}
+	assertNoTee(t, teeCh)
+	if got := tee.dropped.Load(); got != 0 {
+		t.Fatalf("dropped = %d, want 0: a skipped frame is not a drop", got)
+	}
+}
